@@ -6,6 +6,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 func TestParseChallenge(t *testing.T) {
@@ -63,5 +65,20 @@ func TestCheckPinned(t *testing.T) {
 	}
 	if err := CheckPinned(ctx, srv.Client(), repo, "1", "sha256:bbb"); err == nil {
 		t.Fatal("moved tag accepted")
+	}
+}
+
+func TestHostLedgersTmpBeforeUse(t *testing.T) {
+	v, err := venue.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := &Env{Venue: v, HostBin: "/usr/bin/true"}
+	if _, err := e.host(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	open := v.OpenObjects()
+	if len(open) != 1 || open[0].ID != "tmp" || open[0].Last != venue.OpCreated {
+		t.Fatalf("open = %+v, want the ledgered tmp cache", open)
 	}
 }

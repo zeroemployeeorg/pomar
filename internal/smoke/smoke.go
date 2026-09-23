@@ -117,24 +117,11 @@ func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 		e.logf("tag_check %s:%s -> %s (matches pin)", p[0], p[1], p[2])
 	}
 
-	// The store and the temp directory are long-lived caches: ledgered once.
-	for _, o := range []struct {
-		kind venue.Kind
-		id   string
-		rel  string
-	}{{venue.KindImage, "image-store", storeDir}, {venue.KindVolume, "tmp", tmpDir}} {
-		if isOpen(v, o.kind, o.id) {
-			continue
-		}
-		if err := v.Intent(o.kind, o.id, o.rel, "cache"); err != nil {
-			return err
-		}
-		if err := os.MkdirAll(filepath.Join(v.Root(), o.rel), 0o700); err != nil {
-			return err
-		}
-		if err := v.Created(o.kind, o.id); err != nil {
-			return err
-		}
+	if err := ensureCache(v, venue.KindImage, "image-store", storeDir); err != nil {
+		return err
+	}
+	if err := ensureCache(v, venue.KindVolume, "tmp", tmpDir); err != nil {
+		return err
 	}
 
 	vmRel := filepath.Join(storeDir, "containers", id)
@@ -161,6 +148,20 @@ func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 	return runErr
 }
 
+// ensureCache ledgers a long-lived cache directory once, before creating it.
+func ensureCache(v *venue.Venue, k venue.Kind, id, rel string) error {
+	if isOpen(v, k, id) {
+		return nil
+	}
+	if err := v.Intent(k, id, rel, "cache"); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(v.Root(), rel), 0o700); err != nil {
+		return err
+	}
+	return v.Created(k, id)
+}
+
 func isOpen(v *venue.Venue, k venue.Kind, id string) bool {
 	for _, o := range v.OpenObjects() {
 		if o.Kind == k && o.ID == id {
@@ -171,12 +172,12 @@ func isOpen(v *venue.Venue, k venue.Kind, id string) bool {
 }
 
 // host runs pomar-host with TMPDIR inside the data root, so that nothing it
-// unpacks lands elsewhere.
+// unpacks lands elsewhere. The temp directory is ledgered before first use.
 func (e *Env) host(ctx context.Context, args ...string) (string, error) {
-	tmp := filepath.Join(e.Venue.Root(), tmpDir)
-	if err := os.MkdirAll(tmp, 0o700); err != nil {
+	if err := ensureCache(e.Venue, venue.KindVolume, "tmp", tmpDir); err != nil {
 		return "", err
 	}
+	tmp := filepath.Join(e.Venue.Root(), tmpDir)
 	cmd := exec.CommandContext(ctx, e.HostBin, args...)
 	cmd.Env = append(os.Environ(), "TMPDIR="+tmp+string(filepath.Separator))
 	var buf strings.Builder
