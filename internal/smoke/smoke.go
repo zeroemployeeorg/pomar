@@ -17,7 +17,7 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
-// Paths inside the data root.
+// Paths inside the data root. downloads/ and kernels/ are venue structure.
 const (
 	downloadsDir = "downloads"
 	kernelsDir   = "kernels"
@@ -45,11 +45,14 @@ func (e *Env) KernelPath() string {
 // ledgered and open for reuse.
 func FetchKernel(ctx context.Context, e *Env) error {
 	v := e.Venue
+	if err := v.Init(); err != nil {
+		return err
+	}
 	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
 		return err
 	}
 	tarRel := filepath.Join(downloadsDir, filepath.Base(KernelURL))
-	if err := v.Intent(venue.KindDownload, "kernel-tarball", tarRel, KernelURL); err != nil {
+	if err := v.Intent(venue.KindDownload, venue.ClassAttempt, "kernel-tarball", tarRel, KernelURL); err != nil {
 		return err
 	}
 	tarAbs := filepath.Join(v.Root(), tarRel)
@@ -66,10 +69,7 @@ func FetchKernel(ctx context.Context, e *Env) error {
 	e.logf("kernel_tarball_sha256=%s", sum)
 
 	kRel := filepath.Join(kernelsDir, KernelName)
-	if err := v.Intent(venue.KindImage, "kernel", kRel, "extracted from sha256:"+sum); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(v.Root(), kernelsDir), 0o700); err != nil {
+	if err := v.Intent(venue.KindImage, venue.ClassCache, "kernel", kRel, "extracted from sha256:"+sum); err != nil {
 		return err
 	}
 	out, err := e.host(ctx, "extract-kernel", "--archive", tarAbs, "--member", KernelMember, "--out", e.KernelPath())
@@ -99,6 +99,9 @@ func FetchKernel(ctx context.Context, e *Env) error {
 // ledgered and open as the host-side cache; the guest is torn down.
 func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 	v := e.Venue
+	if err := v.Init(); err != nil {
+		return err
+	}
 	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
 		return err
 	}
@@ -125,7 +128,7 @@ func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 	}
 
 	vmRel := filepath.Join(storeDir, "containers", id)
-	if err := v.Intent(venue.KindVM, id, vmRel, "first-boot smoke, vsock only"); err != nil {
+	if err := v.Intent(venue.KindVM, venue.ClassAttempt, id, vmRel, "first-boot smoke, vsock only"); err != nil {
 		return err
 	}
 	out, runErr := e.host(ctx, "boot-smoke",
@@ -153,7 +156,7 @@ func ensureCache(v *venue.Venue, k venue.Kind, id, rel string) error {
 	if isOpen(v, k, id) {
 		return nil
 	}
-	if err := v.Intent(k, id, rel, "cache"); err != nil {
+	if err := v.Intent(k, venue.ClassCache, id, rel, ""); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(v.Root(), rel), 0o700); err != nil {

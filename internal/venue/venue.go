@@ -15,8 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -37,23 +39,42 @@ const (
 	KindNetwork  Kind = "network"
 )
 
+// Class is an object's lifecycle. Attempt objects are torn down when their
+// attempt ends; cache objects persist and are evicted only by the retention
+// policy, never by attempt teardown.
+type Class string
+
+const (
+	ClassAttempt Class = "attempt"
+	ClassCache   Class = "cache"
+)
+
+func (c Class) valid() bool { return c == ClassAttempt || c == ClassCache }
+
+// Structure is the fixed set of directories that give the data root its
+// shape. They are not ledgered: they hold only ledgered objects, Init creates
+// them, and a directory not listed here is not structure.
+var Structure = []string{"downloads", "kernels"}
+
 // Op is a ledger operation.
 type Op string
 
 const (
-	OpIntent  Op = "intent"  // about to create; written before creation
-	OpCreated Op = "created" // creation succeeded
-	OpFailed  Op = "failed"  // creation failed; any partial path is still ours
-	OpRemoved Op = "removed" // torn down with its data
+	OpIntent   Op = "intent"   // about to create; written before creation
+	OpCreated  Op = "created"  // creation succeeded
+	OpFailed   Op = "failed"   // creation failed; any partial path is still ours
+	OpRemoved  Op = "removed"  // torn down with its data
+	OpClassify Op = "classify" // assigns a class to an object ledgered before classes existed
 )
 
 // Entry is one ledger line.
 type Entry struct {
-	Seq  int       `json:"seq"`
-	Time time.Time `json:"time"`
-	Op   Op        `json:"op"`
-	Kind Kind      `json:"kind"`
-	ID   string    `json:"id"`
+	Seq   int       `json:"seq"`
+	Time  time.Time `json:"time"`
+	Op    Op        `json:"op"`
+	Kind  Kind      `json:"kind"`
+	Class Class     `json:"class,omitempty"`
+	ID    string    `json:"id"`
 	// Path is relative to the data root; empty for objects with no data on
 	// disk (for example a transient network).
 	Path string `json:"path,omitempty"`
@@ -62,10 +83,11 @@ type Entry struct {
 
 // Object is the current state of one ledgered object.
 type Object struct {
-	Kind Kind
-	ID   string
-	Path string
-	Last Op
+	Kind  Kind
+	Class Class // empty only for objects ledgered before classes existed
+	ID    string
+	Path  string
+	Last  Op
 }
 
 // Venue is an open data root.
@@ -144,8 +166,13 @@ func (v *Venue) apply(e Entry) {
 		o = &Object{Kind: e.Kind, ID: e.ID, Path: e.Path}
 		v.objs[k] = o
 	}
-	if e.Op == OpIntent {
+	switch e.Op {
+	case OpIntent:
 		o.Path = e.Path // an id reused after teardown starts afresh
+		o.Class = e.Class
+	case OpClassify:
+		o.Class = e.Class
+		return // classifying does not change the lifecycle state
 	}
 	o.Last = e.Op
 }
@@ -196,11 +223,14 @@ func (v *Venue) resolve(rel string) (string, error) {
 
 // Intent records that an object is about to be created. It must be called,
 // and must succeed, before the object is created.
-func (v *Venue) Intent(k Kind, id, rel, note string) error {
+func (v *Venue) Intent(k Kind, c Class, id, rel, note string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if id == "" {
 		return errors.New("venue: empty id")
+	}
+	if !c.valid() {
+		return fmt.Errorf("venue: invalid class %q", c)
 	}
 	if _, err := v.resolve(rel); err != nil {
 		return err
@@ -208,7 +238,7 @@ func (v *Venue) Intent(k Kind, id, rel, note string) error {
 	if o, ok := v.objs[key(k, id)]; ok && o.Last != OpRemoved {
 		return fmt.Errorf("venue: %s is already open (%s)", key(k, id), o.Last)
 	}
-	return v.append(Entry{Op: OpIntent, Kind: k, ID: id, Path: rel, Note: note})
+	return v.append(Entry{Op: OpIntent, Kind: k, Class: c, ID: id, Path: rel, Note: note})
 }
 
 // Created records that creation succeeded.
@@ -224,7 +254,7 @@ func (v *Venue) mark(k Kind, id string, op Op, note string) error {
 	if !ok || o.Last == OpRemoved {
 		return fmt.Errorf("venue: %s has no open intent", key(k, id))
 	}
-	return v.append(Entry{Op: op, Kind: k, ID: id, Path: o.Path, Note: note})
+	return v.append(Entry{Op: op, Kind: k, Class: o.Class, ID: id, Path: o.Path, Note: note})
 }
 
 // Teardown removes an open object's data and records the removal. Only an
@@ -249,7 +279,7 @@ func (v *Venue) Teardown(k Kind, id string) error {
 			return fmt.Errorf("venue: removing %s: %w", o.Path, err)
 		}
 	}
-	return v.append(Entry{Op: OpRemoved, Kind: k, ID: id, Path: o.Path})
+	return v.append(Entry{Op: OpRemoved, Kind: k, Class: o.Class, ID: id, Path: o.Path})
 }
 
 // checkNoSymlinkParents refuses paths whose parent directories, below the
@@ -317,4 +347,86 @@ func (v *Venue) CheckHeavy(maxPercent int) error {
 		return fmt.Errorf("%w: %d%% > %d%%", ErrDiskFull, pct, maxPercent)
 	}
 	return nil
+}
+
+// Classify gives a class to an open object ledgered before classes existed.
+// It refuses an object that already has one.
+func (v *Venue) Classify(k Kind, id string, c Class) error {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if !c.valid() {
+		return fmt.Errorf("venue: invalid class %q", c)
+	}
+	o, ok := v.objs[key(k, id)]
+	if !ok || o.Last == OpRemoved {
+		return fmt.Errorf("venue: %s is not an open ledgered object", key(k, id))
+	}
+	if o.Class != "" {
+		return fmt.Errorf("venue: %s already has class %s", key(k, id), o.Class)
+	}
+	return v.append(Entry{Op: OpClassify, Kind: k, Class: c, ID: id, Path: o.Path})
+}
+
+// Init creates the structure directories. It is idempotent, and it is the
+// only code that creates anything in the data root without a ledger entry.
+func (v *Venue) Init() error {
+	for _, d := range Structure {
+		if err := os.MkdirAll(filepath.Join(v.root, d), 0o700); err != nil {
+			return fmt.Errorf("venue: %w", err)
+		}
+	}
+	return nil
+}
+
+// Unaccounted walks the data root and returns, relative to it, every entry
+// that is neither structure, nor an open ledgered object or inside one, nor a
+// directory on the way to one. It reports; it never deletes. Symlinks are not
+// followed.
+func (v *Venue) Unaccounted() ([]string, error) {
+	v.mu.Lock()
+	var open []string
+	for _, o := range v.objs {
+		if o.Last != OpRemoved && o.Path != "" {
+			open = append(open, filepath.Clean(o.Path))
+		}
+	}
+	v.mu.Unlock()
+	structure := map[string]bool{}
+	for _, d := range Structure {
+		structure[d] = true
+	}
+	var out []string
+	err := filepath.WalkDir(v.root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(v.root, p)
+		if rel == "." || rel == ledgerName {
+			return nil
+		}
+		for _, o := range open {
+			if rel == o || strings.HasPrefix(rel, o+string(filepath.Separator)) {
+				if d.IsDir() {
+					return filepath.SkipDir // inside an object: its contents are the object
+				}
+				return nil
+			}
+		}
+		if d.IsDir() && d.Type()&fs.ModeSymlink == 0 {
+			if structure[rel] {
+				return nil
+			}
+			for _, o := range open {
+				if strings.HasPrefix(o, rel+string(filepath.Separator)) {
+					return nil // on the way to an object; its other contents are still checked
+				}
+			}
+			out = append(out, rel)
+			return filepath.SkipDir
+		}
+		out = append(out, rel)
+		return nil
+	})
+	sort.Strings(out)
+	return out, err
 }

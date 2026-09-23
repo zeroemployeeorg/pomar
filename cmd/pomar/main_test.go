@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -29,5 +31,23 @@ func TestVenueStatus(t *testing.T) {
 	errb.Reset()
 	if got := run([]string{"venue", "status"}, &out, &errb); got != 1 {
 		t.Fatalf("status with no root = %d, want 1", got)
+	}
+}
+
+func TestVenueUnaccountedExit(t *testing.T) {
+	root := t.TempDir()
+	var out, errb bytes.Buffer
+	if got := run([]string{"venue", "init", "-root", root}, &out, &errb); got != 0 {
+		t.Fatalf("init = %d, %q", got, errb.String())
+	}
+	if err := os.WriteFile(filepath.Join(root, "stray"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if got := run([]string{"venue", "status", "-root", root}, &out, &errb); got != 3 {
+		t.Fatalf("status with a stray = %d, want 3; out %q", got, out.String())
+	}
+	if !strings.Contains(out.String(), "unaccounted: 1") {
+		t.Fatalf("output = %q", out.String())
 	}
 }

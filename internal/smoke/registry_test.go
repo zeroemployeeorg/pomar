@@ -78,7 +78,7 @@ func TestHostLedgersTmpBeforeUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	open := v.OpenObjects()
-	if len(open) != 1 || open[0].ID != "tmp" || open[0].Last != venue.OpCreated {
+	if len(open) != 1 || open[0].ID != "tmp" || open[0].Last != venue.OpCreated || open[0].Class != venue.ClassCache {
 		t.Fatalf("open = %+v, want the ledgered tmp cache", open)
 	}
 }
