@@ -13,9 +13,9 @@ HYGIENE_DENYLIST ?=
 HYGIENE_REQUIRE ?= 0
 HYGIENE_COPY := .hygiene/denylist.txt
 
-.PHONY: verify versions no-docker hygiene gofmt vet test
+.PHONY: verify versions no-docker hygiene gofmt vet test swift-build swift-sign swift-test
 
-verify: versions no-docker hygiene gofmt vet test
+verify: versions no-docker hygiene gofmt vet test swift-build swift-sign swift-test
 	@echo "=== make verify GREEN ==="
 
 versions:
@@ -48,3 +48,27 @@ vet:
 test:
 	@echo "=== go test"
 	@go test -count=1 ./...
+
+# The Swift host. Its dependency graph is pinned by host/Package.resolved;
+# --force-resolved-versions refuses to change it.
+SWIFT_FLAGS := --package-path host --force-resolved-versions
+HOST_BIN = $(shell swift build --package-path host --show-bin-path)/pomar-host
+# The Command Line Tools keep Swift Testing outside the default search path.
+CLT_FRAMEWORKS := $(shell xcode-select -p)/Library/Developer/Frameworks
+SWIFT_TEST_FLAGS := $(if $(wildcard $(CLT_FRAMEWORKS)/Testing.framework),-Xswiftc -F -Xswiftc $(CLT_FRAMEWORKS) -Xlinker -F -Xlinker $(CLT_FRAMEWORKS) -Xlinker -rpath -Xlinker $(CLT_FRAMEWORKS))
+
+swift-build:
+	@echo "=== swift build"
+	@swift --version 2>&1 | head -1
+	@swift build $(SWIFT_FLAGS) --product pomar-host
+
+# Ad-hoc signing with the Virtualization entitlement is part of the build.
+swift-sign: swift-build
+	@echo "=== swift sign (ad-hoc, virtualization entitlement)"
+	@codesign --force --sign - --entitlements host/pomar-host.entitlements "$(HOST_BIN)"
+	@codesign -d --entitlements - --xml "$(HOST_BIN)" 2>/dev/null | grep -q com.apple.security.virtualization
+	@"$(HOST_BIN)" version
+
+swift-test:
+	@echo "=== swift test"
+	@swift test $(SWIFT_FLAGS) $(SWIFT_TEST_FLAGS)
