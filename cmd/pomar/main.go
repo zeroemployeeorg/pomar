@@ -3,12 +3,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"sort"
 
+	"github.com/zeroemployeeorg/pomar/internal/smoke"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
@@ -20,6 +22,8 @@ const usage = `usage:
   pomar venue init [-root DIR]      create the structure directories (idempotent)
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
                                     class an object ledgered before classes existed
+  pomar smoke fetch-kernel [-root DIR] -host-bin PATH
+  pomar smoke boot [-root DIR] -host-bin PATH -kernel-sha256 HEX -id ID
 
 The data root comes from -root or POMAR_DATA_ROOT. It has no default.
 `
@@ -37,6 +41,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return venueStatus(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "venue" && (args[1] == "init" || args[1] == "classify"):
 		return venueChange(args[1], args[2:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "smoke" && (args[1] == "fetch-kernel" || args[1] == "boot"):
+		return smokeCmd(args[1], args[2:], stdout, stderr)
 	}
 	fmt.Fprint(stderr, usage)
 	return 2
@@ -119,5 +125,38 @@ func venueChange(step string, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "venue %s: ok\n", step)
+	return 0
+}
+
+func smokeCmd(step string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("smoke "+step, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
+	hostBin := fs.String("host-bin", "", "signed pomar-host binary")
+	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel (boot)")
+	id := fs.String("id", "", "attempt id for the guest (boot)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *hostBin == "" || (step == "boot" && (*kernelSum == "" || *id == "")) {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	v, err := venue.Open(*root)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	e := &smoke.Env{Venue: v, HostBin: *hostBin, Client: smoke.NewClient(), Out: stdout}
+	ctx := context.Background()
+	if step == "fetch-kernel" {
+		err = smoke.FetchKernel(ctx, e)
+	} else {
+		err = smoke.Boot(ctx, e, *kernelSum, *id)
+	}
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
 	return 0
 }
