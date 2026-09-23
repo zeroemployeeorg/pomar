@@ -23,6 +23,8 @@ let usage = """
            pomar-host extract-kernel --archive A --member M --out O
            pomar-host boot-smoke --store S --kernel K --init REF --init-digest D \\
                                  --image REF --image-digest D --id ID
+           pomar-host helper --attempt ID --state-dir DIR --store S --kernel K \\
+                             --init REF --init-digest D --image REF --image-digest D -- CMD...
     """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -64,6 +66,21 @@ case "boot-smoke":
     } catch {
         fail("boot-smoke: \(error)")
     }
+case "helper":
+    let rest = args.dropFirst()
+    guard let sep = rest.firstIndex(of: "--"), sep < rest.endIndex - 1,
+        let f = flags(rest[rest.startIndex..<sep]),
+        let a = f["attempt"], let dir = f["state-dir"], let s = f["store"], let k = f["kernel"],
+        let ir = f["init"], let idg = f["init-digest"], let mr = f["image"], let md = f["image-digest"]
+    else {
+        fail(usage, code: 2)
+    }
+    let command = Array(rest[(sep + 1)...])
+    let code = await Helper.run(
+        .init(
+            attempt: a, stateDir: dir, store: s, kernel: k, initRef: ir, initDigest: idg,
+            imageRef: mr, imageDigest: md, command: command))
+    exit(code)
 default:
     fail(usage, code: 2)
 }

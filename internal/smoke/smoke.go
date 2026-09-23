@@ -120,10 +120,10 @@ func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 		e.logf("tag_check %s:%s -> %s (matches pin)", p[0], p[1], p[2])
 	}
 
-	if err := ensureCache(v, venue.KindImage, "image-store", storeDir); err != nil {
+	if err := v.EnsureCache(venue.KindImage, "image-store", storeDir); err != nil {
 		return err
 	}
-	if err := ensureCache(v, venue.KindVolume, "tmp", tmpDir); err != nil {
+	if err := v.EnsureCache(venue.KindVolume, "tmp", tmpDir); err != nil {
 		return err
 	}
 
@@ -151,33 +151,10 @@ func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 	return runErr
 }
 
-// ensureCache ledgers a long-lived cache directory once, before creating it.
-func ensureCache(v *venue.Venue, k venue.Kind, id, rel string) error {
-	if isOpen(v, k, id) {
-		return nil
-	}
-	if err := v.Intent(k, venue.ClassCache, id, rel, ""); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(v.Root(), rel), 0o700); err != nil {
-		return err
-	}
-	return v.Created(k, id)
-}
-
-func isOpen(v *venue.Venue, k venue.Kind, id string) bool {
-	for _, o := range v.OpenObjects() {
-		if o.Kind == k && o.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
 // host runs pomar-host with TMPDIR inside the data root, so that nothing it
 // unpacks lands elsewhere. The temp directory is ledgered before first use.
 func (e *Env) host(ctx context.Context, args ...string) (string, error) {
-	if err := ensureCache(e.Venue, venue.KindVolume, "tmp", tmpDir); err != nil {
+	if err := e.Venue.EnsureCache(venue.KindVolume, "tmp", tmpDir); err != nil {
 		return "", err
 	}
 	tmp := filepath.Join(e.Venue.Root(), tmpDir)
@@ -236,3 +213,15 @@ func fileSHA256(path string) (string, error) {
 
 // NewClient returns an HTTP client with a generous overall timeout.
 func NewClient() *http.Client { return &http.Client{Timeout: 30 * time.Minute} }
+
+// VerifyKernel checks the extracted kernel against its pinned sha256.
+func VerifyKernel(e *Env, pinned string) error {
+	got, err := fileSHA256(e.KernelPath())
+	if err != nil {
+		return err
+	}
+	if got != pinned {
+		return fmt.Errorf("smoke: kernel sha256 %s, pinned %s", got, pinned)
+	}
+	return nil
+}

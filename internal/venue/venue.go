@@ -54,7 +54,7 @@ func (c Class) valid() bool { return c == ClassAttempt || c == ClassCache }
 // Structure is the fixed set of directories that give the data root its
 // shape. They are not ledgered: they hold only ledgered objects, Init creates
 // them, and a directory not listed here is not structure.
-var Structure = []string{"downloads", "kernels"}
+var Structure = []string{"attempts", "downloads", "kernels"}
 
 // Op is a ledger operation.
 type Op string
@@ -429,4 +429,26 @@ func (v *Venue) Unaccounted() ([]string, error) {
 	})
 	sort.Strings(out)
 	return out, err
+}
+
+// IsOpen reports whether an object is ledgered and not yet torn down.
+func (v *Venue) IsOpen(k Kind, id string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	o, ok := v.objs[key(k, id)]
+	return ok && o.Last != OpRemoved
+}
+
+// EnsureCache ledgers a long-lived cache directory once, before creating it.
+func (v *Venue) EnsureCache(k Kind, id, rel string) error {
+	if v.IsOpen(k, id) {
+		return os.MkdirAll(filepath.Join(v.root, rel), 0o700)
+	}
+	if err := v.Intent(k, ClassCache, id, rel, ""); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(v.root, rel), 0o700); err != nil {
+		return fmt.Errorf("venue: %w", err)
+	}
+	return v.Created(k, id)
 }
