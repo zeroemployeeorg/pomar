@@ -13,9 +13,9 @@ HYGIENE_DENYLIST ?=
 HYGIENE_REQUIRE ?= 0
 HYGIENE_COPY := .hygiene/denylist.txt
 
-.PHONY: verify versions no-docker hygiene gofmt vet test swift-build swift-sign swift-test
+.PHONY: verify versions no-docker hygiene gofmt vet test swift-build swift-test swift-sign
 
-verify: versions no-docker hygiene gofmt vet test swift-build swift-sign swift-test
+verify: versions no-docker hygiene gofmt vet test swift-build swift-test swift-sign
 	@echo "=== make verify GREEN ==="
 
 versions:
@@ -62,10 +62,13 @@ swift-build:
 	@swift --version 2>&1 | head -1
 	@swift build $(SWIFT_FLAGS) --product pomar-host
 
-# Ad-hoc signing with the Virtualization entitlement is part of the build.
-swift-sign: swift-build
+# Ad-hoc signing with the Virtualization entitlement is part of the build. It runs
+# last: `swift test` relinks pomar-host with SwiftPM's default signature, which
+# lacks the entitlement.
+swift-sign:
 	@echo "=== swift sign (ad-hoc, virtualization entitlement)"
 	@codesign --force --sign - --entitlements host/pomar-host.entitlements "$(HOST_BIN)"
+	@codesign -d --entitlements - "$(HOST_BIN)" 2>/dev/null | grep -E "virtualization|get-task-allow" || true
 	@codesign -d --entitlements - --xml "$(HOST_BIN)" 2>/dev/null | grep -q com.apple.security.virtualization
 	@"$(HOST_BIN)" version
 
