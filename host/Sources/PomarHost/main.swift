@@ -55,20 +55,15 @@ case "boot-smoke":
             "/bin/sh", "-c",
             "uname -a; echo '--- /sys/class/net'; ls /sys/class/net; echo '--- /proc/net/dev'; cat /proc/net/dev",
         ])
-    let done = DispatchSemaphore(value: 0)
-    nonisolated(unsafe) var code: Int32 = 1
-    Task {
-        do {
-            let r = try await BootSmoke.run(opts)
-            r.lines.forEach { print($0) }
-            code = r.exitCode == 0 ? 0 : 1
-        } catch {
-            FileHandle.standardError.write(Data("boot-smoke: \(error)\n".utf8))
-        }
-        done.signal()
+    // Top-level await. Blocking the main thread on a semaphore here would
+    // deadlock: top-level code runs on the main actor, and so would the task.
+    do {
+        let r = try await BootSmoke.run(opts)
+        r.lines.forEach { print($0) }
+        exit(r.exitCode == 0 ? 0 : 1)
+    } catch {
+        fail("boot-smoke: \(error)")
     }
-    done.wait()
-    exit(code)
 default:
     fail(usage, code: 2)
 }
