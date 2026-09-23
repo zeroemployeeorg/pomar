@@ -17,7 +17,10 @@ let package = Package(
     targets: [
         .target(
             name: "PomarHostCore",
-            dependencies: [.product(name: "Containerization", package: "containerization")]
+            dependencies: [
+                .product(name: "Containerization", package: "containerization"),
+                .product(name: "ContainerizationArchive", package: "containerization"),
+            ]
         ),
         .executableTarget(
             name: "PomarHost",
