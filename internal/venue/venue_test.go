@@ -315,3 +315,58 @@ func TestRootIsNeverAnObject(t *testing.T) {
 		}
 	}
 }
+
+func TestCreatedTimeAndTeardownNote(t *testing.T) {
+	v := openTemp(t)
+	if err := v.Intent(KindVolume, ClassCache, "c1", "c1", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Created(KindVolume, "c1"); err != nil {
+		t.Fatal(err)
+	}
+	v2, err := Open(v.Root())
+	if err != nil {
+		t.Fatal(err)
+	}
+	objs := v2.OpenObjects()
+	if len(objs) != 1 || objs[0].Created.IsZero() {
+		t.Fatalf("replayed objects = %+v, want one with a creation time", objs)
+	}
+	if err := v2.TeardownNote(KindVolume, "c1", "evicted: test"); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(filepath.Join(v.Root(), ledgerName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"op":"removed","kind":"volume","class":"cache","id":"c1","path":"c1","note":"evicted: test"`) {
+		t.Fatalf("ledger lacks the noted removal:\n%s", b)
+	}
+}
+
+func TestSameContainer(t *testing.T) {
+	for _, tc := range []struct {
+		a, b string
+		want bool
+	}{
+		{"/dev/disk3s5", "/dev/disk3s1s1", true},
+		{"/dev/disk3s5", "/dev/disk6s1", false},
+		{"/dev/disk13s1", "/dev/disk1s1", false},
+		{"map auto_home", "/dev/disk3s5", true}, // unparsable counts as shared
+		{"/dev/disk", "/dev/disk3s5", true},
+	} {
+		if got := SameContainer(tc.a, tc.b); got != tc.want {
+			t.Errorf("SameContainer(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestSpaceReadsTheFilesystem(t *testing.T) {
+	sp, err := openTemp(t).Space()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sp.Avail <= 0 || sp.Used <= 0 || !strings.HasPrefix(sp.Device, "/dev/") {
+		t.Fatalf("Space() = %+v", sp)
+	}
+}

@@ -21,6 +21,7 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/sign"
 	"github.com/zeroemployeeorg/pomar/internal/smoke"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
+	"github.com/zeroemployeeorg/pomar/internal/volume"
 )
 
 const version = "0.0.0-dev"
@@ -41,6 +42,12 @@ const usage = `usage:
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile [-root DIR]
   pomar attempt stop|rm [-root DIR] -id ID
+  pomar attempt capacity [-root DIR] the job class, slots, space and how many fit when idle
+  pomar attempt caches|evict [-root DIR]
+                                    cache budgets and planned evictions; evict applies them
+  pomar volume create [-root DIR] -id ID -size-mib N
+                                    a bounded APFS volume from a sparse image, for tests
+  pomar volume rm [-root DIR] -id ID
   pomar smoke fetch-kernel [-root DIR] -host-bin PATH
   pomar smoke boot [-root DIR] -host-bin PATH -kernel-sha256 HEX -id ID
 
@@ -70,6 +77,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return mirrorCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "attempt":
 		return attemptCmd(args[1], args[2:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "volume" && (args[1] == "create" || args[1] == "rm"):
+		return volumeCmd(args[1], args[2:], stdout, stderr)
 	}
 	fmt.Fprint(stderr, usage)
 	return 2
@@ -104,6 +113,13 @@ func venueStatus(args []string, stdout, stderr io.Writer) int {
 		return open[i].ID < open[j].ID
 	})
 	fmt.Fprintf(stdout, "fill: %d%% (limit %d%%, heavy work %s)\n", pct, venue.DefaultMaxFillPercent, heavy)
+	if sp, err := v.Space(); err == nil {
+		floor := "shared with " + venue.SystemData + ": admission keeps the fill floor"
+		if !sp.Shared {
+			floor = "a dedicated container: no fill floor, peak plus headroom only"
+		}
+		fmt.Fprintf(stdout, "disk: %s, %s\n", sp.Device, floor)
+	}
 	fmt.Fprintf(stdout, "open objects: %d\n", len(open))
 	for _, o := range open {
 		class := string(o.Class)
@@ -238,6 +254,11 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 			}
 			return bs.Verify(smoke.ImageArm64)
 		},
+		// The kernel and the pinned image's base are never evicted.
+		Pinned: func() []string {
+			p, _ := (&base.Bases{Venue: v}).Path(smoke.ImageArm64)
+			return []string{e.KernelPath(), p}
+		},
 		UID: os.Getuid(),
 		Log: stdout,
 	})
@@ -310,6 +331,18 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "capacity":
+		var cp manager.Capacity
+		err = c.Do("GET", "/v1/capacity", nil, &cp)
+		out = cp
+	case "caches", "evict":
+		var rep manager.CacheReport
+		if step == "caches" {
+			err = c.Do("GET", "/v1/caches", nil, &rep)
+		} else {
+			err = c.Do("POST", "/v1/caches/evict", nil, &rep)
+		}
+		out = rep
 	default:
 		fmt.Fprint(stderr, usage)
 		return 2
@@ -395,5 +428,42 @@ func baseBuild(args []string, stdout, stderr io.Writer) int {
 	}
 	p, _ := bs.Path(smoke.ImageArm64)
 	fmt.Fprintf(stdout, "base %s: built at %s\n", smoke.ImageArm64, p)
+	return 0
+}
+
+func volumeCmd(step string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("volume "+step, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
+	id := fs.String("id", "", "volume id")
+	sizeMiB := fs.Int64("size-mib", 0, "size in MiB (create)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *id == "" || (step == "create" && *sizeMiB <= 0) {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	v, err := venue.Open(*root)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	vs := &volume.Volumes{Venue: v}
+	ctx := context.Background()
+	if step == "create" {
+		mnt, err := vs.Create(ctx, *id, *sizeMiB*volume.MiB)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "volume %s: mounted at %s\n", *id, mnt)
+		return 0
+	}
+	if err := vs.Remove(ctx, *id); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "volume %s: removed\n", *id)
 	return 0
 }

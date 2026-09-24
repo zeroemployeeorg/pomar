@@ -10,10 +10,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/zeroemployeeorg/pomar/internal/cache"
+	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
 	"github.com/zeroemployeeorg/pomar/internal/sign"
@@ -49,11 +52,27 @@ type Config struct {
 	// them unpack the image. Nil means always unpack.
 	Base func() (string, error)
 	UID  int
+	// Class is the job class every attempt is admitted as; zero means
+	// capacity.CI.
+	Class capacity.Class
+	// Host is what attempts may claim in total; zero reads this host.
+	Host capacity.Host
+	// Space reads the data root's filesystem at claim time; nil reads it
+	// from the venue.
+	Space func() (venue.Space, error)
+	// Budgets bound the caches; nil means cache.Budgets.
+	Budgets []cache.Budget
+	// Pinned returns absolute paths the running configuration boots from
+	// (the kernel, the base); the caches holding them are never evicted.
+	Pinned func() []string
 	// ReapWait bounds how long an orphan gets between SIGTERM and SIGKILL.
 	ReapWait time.Duration
 	// Poll is the liveness check interval.
 	Poll time.Duration
-	Log  io.Writer
+	// StallWait is how long a live attempt may show no progress on a full
+	// host before it is stopped as host-disk-full.
+	StallWait time.Duration
+	Log       io.Writer
 }
 
 // Manager supervises helpers.
@@ -66,6 +85,8 @@ type Manager struct {
 	report []Finding
 	events *os.File
 	done   chan struct{}
+	// seen is poll's own: when it first saw each live helper.
+	seen map[string]time.Time
 }
 
 // Open takes the manager lock, loads the table and reconciles it against the
@@ -78,8 +99,27 @@ func Open(cfg Config) (*Manager, error) {
 	if cfg.Poll == 0 {
 		cfg.Poll = time.Second
 	}
+	if cfg.StallWait == 0 {
+		cfg.StallWait = 2 * time.Minute
+	}
 	if cfg.Log == nil {
 		cfg.Log = io.Discard
+	}
+	if cfg.Class == (capacity.Class{}) {
+		cfg.Class = capacity.CI
+	}
+	if cfg.Host == (capacity.Host{}) {
+		h, err := capacity.ReadHost()
+		if err != nil {
+			return nil, err
+		}
+		cfg.Host = h
+	}
+	if cfg.Budgets == nil {
+		cfg.Budgets = cache.Budgets
+	}
+	if cfg.Space == nil {
+		cfg.Space = v.Space
 	}
 	if err := v.Init(); err != nil {
 		return nil, err
@@ -109,12 +149,13 @@ func Open(cfg Config) (*Manager, error) {
 		lock.Close()
 		return nil, fmt.Errorf("manager: %w", err)
 	}
-	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{})}
+	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}}
 	m.event("manager-start", "", 0, "")
 	if err := m.reconcile(); err != nil {
 		m.Close()
 		return nil, err
 	}
+	m.evict()
 	go m.watch()
 	return m, nil
 }
@@ -251,16 +292,20 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	if src != nil && m.cfg.Mirrors == nil {
 		return Entry{}, errors.New("manager: sources are not configured")
 	}
-	// Refuse an unentitled helper binary before creating anything.
-	if err := sign.Check(m.cfg.HostBin); err != nil {
-		return Entry{}, err
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.t.entries[id]; ok {
 		return Entry{}, fmt.Errorf("%w: %s", ErrExists, id)
 	}
-	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
+	// Claim-time admission, under the lock so that two starts cannot both
+	// take the last slot. Nothing is created before it passes.
+	class := m.cfg.Class
+	if err := m.admit(class); err != nil {
+		m.event("start-refused", id, 0, err.Error())
+		return Entry{}, err
+	}
+	// Refuse an unentitled helper binary before creating anything.
+	if err := sign.Check(m.cfg.HostBin); err != nil {
 		return Entry{}, err
 	}
 	var basePath string
@@ -318,7 +363,8 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	args := []string{"helper", "--attempt", id, "--state-dir", rec,
 		"--store", filepath.Join(v.Root(), storeDir), "--kernel", g.Kernel,
 		"--init", g.InitRef, "--init-digest", g.InitDigest,
-		"--image", g.ImageRef, "--image-digest", g.ImageDigest}
+		"--image", g.ImageRef, "--image-digest", g.ImageDigest,
+		"--cpus", strconv.Itoa(class.VCPU), "--memory-bytes", strconv.FormatInt(class.MemoryBytes, 10)}
 	if basePath != "" {
 		args = append(args, "--base", basePath)
 	}
@@ -350,7 +396,7 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC()}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class}
 	if src != nil {
 		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha}
 	}
@@ -363,6 +409,51 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	}
 	m.event("start", id, pid, start)
 	return *e, nil
+}
+
+// admit decides a claim against the live attempts. m.mu must be held.
+func (m *Manager) admit(c capacity.Class) error {
+	sp, err := m.cfg.Space()
+	if err != nil {
+		return err
+	}
+	var live []capacity.Class
+	for _, e := range m.t.entries {
+		if !e.Terminal() {
+			live = append(live, e.claimClass())
+		}
+	}
+	return capacity.Admit(c, live, m.cfg.Host, capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared})
+}
+
+// Capacity is the manager's admission state, for status output.
+type Capacity struct {
+	Class capacity.Class `json:"class"`
+	Host  capacity.Host  `json:"host"`
+	Space venue.Space    `json:"space"`
+	Live  int            `json:"live"`
+	// FitsIdle is how many attempts of the class fit on this host when
+	// idle. It is a plan figure only when the class is measured.
+	FitsIdle int `json:"fits_idle"`
+}
+
+// Capacity reports the admission state.
+func (m *Manager) Capacity() (Capacity, error) {
+	sp, err := m.cfg.Space()
+	if err != nil {
+		return Capacity{}, err
+	}
+	m.mu.Lock()
+	live := 0
+	for _, e := range m.t.entries {
+		if !e.Terminal() {
+			live++
+		}
+	}
+	m.mu.Unlock()
+	d := capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared}
+	return Capacity{Class: m.cfg.Class, Host: m.cfg.Host, Space: sp, Live: live,
+		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d)}, nil
 }
 
 func (m *Manager) startTime(pid int) (string, error) {
@@ -407,6 +498,11 @@ func (m *Manager) Stop(id string) (Entry, error) {
 func (m *Manager) Remove(id string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.removeLocked(id, "")
+}
+
+// removeLocked is Remove with m.mu held and a ledger note for the removal.
+func (m *Manager) removeLocked(id, note string) error {
 	e, ok := m.t.entries[id]
 	if !ok {
 		return fmt.Errorf("manager: no attempt %s", id)
@@ -416,12 +512,12 @@ func (m *Manager) Remove(id string) error {
 	}
 	v := m.cfg.Venue
 	if v.IsOpen(venue.KindVolume, "attempt-"+id) {
-		if err := v.Teardown(venue.KindVolume, "attempt-"+id); err != nil {
+		if err := v.TeardownNote(venue.KindVolume, "attempt-"+id, note); err != nil {
 			return err
 		}
 	}
 	delete(m.t.entries, id)
-	m.event("removed", id, 0, "")
+	m.event("removed", id, 0, note)
 	return m.t.save()
 }
 
@@ -442,29 +538,135 @@ func (m *Manager) watch() {
 			return
 		case <-tick.C:
 		}
-		ps, err := m.cfg.Procs.List()
-		if err != nil {
-			continue // unknown: change nothing
-		}
-		m.mu.Lock()
-		var live []Entry
-		for _, e := range m.t.entries {
-			if !e.Terminal() {
-				live = append(live, *e)
-			}
-		}
-		m.mu.Unlock()
-		for _, e := range live {
-			p, ok := proc.Find(ps, e.PID)
-			a, isHelper := helperAttempt(p.Args, m.cfg.HostBin)
-			if ok && p.Start == e.Start && isHelper && a == e.Attempt {
-				m.observe(e.Attempt)
-				continue
-			}
-			st, reason, code := m.terminalFromStatus(e.Attempt)
-			m.finish(e.Attempt, st, reason, code)
+		m.poll()
+	}
+}
+
+// poll checks every live entry once. The entries are copied before the
+// processes are listed, so every entry judged was spawned before the listing
+// it is judged against: a listing taken first could miss a helper that Start
+// spawned while the watcher waited for the lock. An end is recorded only
+// when a second, fresh listing agrees.
+func (m *Manager) poll() {
+	m.mu.Lock()
+	var live []Entry
+	for _, e := range m.t.entries {
+		if !e.Terminal() {
+			live = append(live, *e)
 		}
 	}
+	m.mu.Unlock()
+	if len(live) == 0 {
+		return
+	}
+	ps, err := m.cfg.Procs.List()
+	if err != nil {
+		return // unknown: change nothing
+	}
+	m.noteSeen(live, ps)
+	m.checkDiskFull(live)
+	for _, e := range live {
+		if m.isHelperOf(ps, e) {
+			m.observe(e.Attempt)
+			continue
+		}
+		again, err := m.cfg.Procs.List()
+		if err != nil || m.isHelperOf(again, e) {
+			continue
+		}
+		st, reason, code := m.terminalFromStatus(e.Attempt)
+		m.finish(e.Attempt, st, reason, code)
+	}
+}
+
+// markDiskFull records that the host was full while attempt id was live.
+func (m *Manager) markDiskFull(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e := m.t.entries[id]; e != nil && !e.Terminal() && !e.DiskFull {
+		e.DiskFull = true
+		m.t.save()
+		m.event("host-disk-full", id, e.PID, "")
+	}
+}
+
+// checkDiskFull samples the data root's free space for the live entries. On
+// a full host it marks them all, and stops any whose helper has made no
+// progress for StallWait: a paused or hung guest never ends by itself. A
+// helper that ignores the stop is killed after a second StallWait.
+func (m *Manager) checkDiskFull(live []Entry) {
+	sp, err := m.cfg.Space()
+	if err != nil || sp.Avail >= capacity.DiskFullBytes {
+		return
+	}
+	for _, e := range live {
+		m.markDiskFull(e.Attempt)
+		idle := time.Since(m.lastProgress(e.Attempt))
+		if idle < m.cfg.StallWait {
+			continue
+		}
+		m.mu.Lock()
+		cur := m.t.entries[e.Attempt]
+		if cur == nil || cur.Terminal() || !m.sameHelperAlive(cur.PID, cur.Attempt) {
+			m.mu.Unlock()
+			continue
+		}
+		sig, what := syscall.SIGTERM, "stall-sigterm"
+		if cur.State == StateStopping && idle >= 2*m.cfg.StallWait {
+			sig, what = syscall.SIGKILL, "stall-sigkill"
+		} else if cur.State == StateStopping {
+			m.mu.Unlock()
+			continue
+		}
+		syscall.Kill(cur.PID, sig)
+		cur.State = StateStopping
+		m.t.save()
+		m.mu.Unlock()
+		m.event(what, e.Attempt, e.PID, fmt.Sprintf("host full; no progress for %s", idle.Round(time.Second)))
+	}
+}
+
+// noteSeen records when poll first saw each live helper, and forgets ended
+// ones. The first sighting starts the stall clock: a helper adopted after a
+// restart gets a full StallWait before it is judged.
+func (m *Manager) noteSeen(live []Entry, ps []proc.Process) {
+	seen := map[string]time.Time{}
+	for _, e := range live {
+		if !m.isHelperOf(ps, e) {
+			continue
+		}
+		if t, ok := m.seen[e.Attempt]; ok {
+			seen[e.Attempt] = t
+		} else {
+			seen[e.Attempt] = time.Now()
+		}
+	}
+	m.seen = seen
+}
+
+// lastProgress is the newest sign of life from an attempt: a change to its
+// status or output, or else its first sighting. The helper's own CPU time
+// is no sign: the guest runs in Virtualization's XPC service, not in the
+// helper.
+func (m *Manager) lastProgress(id string) time.Time {
+	t := m.seen[id]
+	for _, f := range []string{"status.json", "output.log"} {
+		if fi, err := os.Stat(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id, f)); err == nil && fi.ModTime().After(t) {
+			t = fi.ModTime()
+		}
+	}
+	return t
+}
+
+// isHelperOf reports whether ps shows e's own helper: its pid, start time,
+// uid, executable and attempt.
+func (m *Manager) isHelperOf(ps []proc.Process, e Entry) bool {
+	p, ok := proc.Find(ps, e.PID)
+	if !ok || p.Start != e.Start || p.UID != m.cfg.UID {
+		return false
+	}
+	a, isHelper := helperAttempt(p.Args, m.cfg.HostBin)
+	return isHelper && a == e.Attempt
 }
 
 // observe moves a live attempt from starting to running once its helper says so.
@@ -495,6 +697,11 @@ func (m *Manager) terminalFromStatus(id string) (State, string, *int) {
 	if err != nil {
 		return StateLost, "helper gone; no status", nil
 	}
+	// The helper reads the free space as its guest ends, before deleting
+	// the guest frees the clone; a full host then marks the entry.
+	if free, err := strconv.ParseInt(s["host_free_bytes"], 10, 64); err == nil && free >= 0 && free < capacity.DiskFullBytes {
+		m.markDiskFull(id)
+	}
 	switch s["phase"] {
 	case "exited":
 		var code int
@@ -516,9 +723,25 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		m.mu.Unlock()
 		return
 	}
+	// A full host fails the attempt under one name, whether the guest saw
+	// an I/O error, paused or hung. Even an exit 0 is failed: on the bounded
+	// volume the guest's fsync got EIO and a command that went on exited 0,
+	// so a guest's own verdict is not trusted once its disk failed under it.
+	// The exit code is kept.
+	if e.DiskFull {
+		detail := string(st)
+		if code != nil {
+			detail += fmt.Sprintf(" %d", *code)
+		}
+		if reason != "" {
+			detail += ": " + reason
+		}
+		st, reason = StateFailed, capacity.ReasonHostDiskFull+" ("+detail+")"
+	}
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
 	m.t.save()
 	m.mu.Unlock()
 	m.event("ended-"+string(st), id, e.PID, reason)
 	m.teardownVM(id)
+	m.evict()
 }

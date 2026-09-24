@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"sort"
 	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/capacity"
 )
 
 // State is an attempt's state as the manager knows it.
@@ -40,6 +42,12 @@ type Entry struct {
 	ExitCode *int      `json:"exit_code,omitempty"`
 	Created  time.Time `json:"created"`
 	Ended    time.Time `json:"ended,omitzero"`
+	// Class is the job class the attempt was admitted as; its caps are the
+	// guest's. An entry from before classes counts as capacity.CI.
+	Class capacity.Class `json:"class,omitzero"`
+	// DiskFull records that the data root's filesystem was seen full while
+	// the attempt was live.
+	DiskFull bool `json:"disk_full,omitempty"`
 	// Source is the commit the attempt was pinned to at admission.
 	Source *PinnedSource `json:"source,omitempty"`
 }
@@ -49,6 +57,14 @@ type PinnedSource struct {
 	Mirror string `json:"mirror"`
 	Ref    string `json:"ref"`
 	SHA    string `json:"sha"`
+}
+
+// claimClass is the class the entry holds a claim as.
+func (e Entry) claimClass() capacity.Class {
+	if e.Class == (capacity.Class{}) {
+		return capacity.CI
+	}
+	return e.Class
 }
 
 // Terminal reports whether the attempt has ended.

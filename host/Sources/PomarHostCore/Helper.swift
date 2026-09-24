@@ -16,15 +16,21 @@ public enum Helper {
         public var imageRef: String
         public var imageDigest: String
         public var command: [String]
+        /// The guest's caps, from the attempt's job class.
+        public var cpus: Int
+        public var memoryBytes: UInt64
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
 
         public init(
             attempt: String, stateDir: String, store: String, kernel: String,
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
-            command: [String], base: String? = nil
+            command: [String], base: String? = nil,
+            cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
+            self.cpus = cpus
+            self.memoryBytes = memoryBytes
             self.attempt = attempt
             self.stateDir = stateDir
             self.store = store
@@ -35,6 +41,25 @@ public enum Helper {
             self.imageDigest = imageDigest
             self.command = command
         }
+    }
+
+    /// The caps a helper gets when the manager passes none.
+    public static let defaultCaps = (cpus: 2, memoryBytes: UInt64(1024 * 1024 * 1024))
+
+    /// Parses the --cpus and --memory-bytes flags. An absent flag takes the
+    /// default; a present one must be a positive integer, and memory at
+    /// least 256 MiB. Returns nil on a bad value.
+    public static func caps(cpus: String?, memoryBytes: String?) -> (cpus: Int, memoryBytes: UInt64)? {
+        var c = defaultCaps
+        if let s = cpus {
+            guard let n = Int(s), n > 0 else { return nil }
+            c.cpus = n
+        }
+        if let s = memoryBytes {
+            guard let n = UInt64(s), n >= 256 * 1024 * 1024 else { return nil }
+            c.memoryBytes = n
+        }
+        return c
     }
 
     /// Appends to a file; used for the guest's stdout and stderr.
@@ -108,7 +133,7 @@ public enum Helper {
             return 1
         }
         let container: LinuxContainer
-        var metrics: [String: String] = [:]
+        var metrics = ["cpus": String(o.cpus), "memory_bytes": String(o.memoryBytes)]
         var freeBefore: Int64 = -1
         do {
             let initImage = try await manager.imageStore.get(reference: o.initRef)
@@ -119,8 +144,8 @@ public enum Helper {
             }
             let out = try FileWriter(path: o.stateDir + "/output.log")
             let configure: (inout LinuxContainer.Configuration) throws -> Void = { config in
-                config.cpus = 2
-                config.memoryInBytes = 1024 * 1024 * 1024
+                config.cpus = o.cpus
+                config.memoryInBytes = o.memoryBytes
                 config.process.arguments = o.command
                 config.process.stdout = out
                 config.process.stderr = out
@@ -143,7 +168,13 @@ public enum Helper {
             try await container.create()
             try await container.start()
         } catch {
-            writeStatus(o.stateDir, ["phase": "failed", "attempt": o.attempt, "error": "\(error)"])
+            // The free space at the failure, read before deleting the guest
+            // frees its clone: the manager names a failure on a full host
+            // host-disk-full.
+            writeStatus(o.stateDir, [
+                "phase": "failed", "attempt": o.attempt, "error": "\(error)",
+                "host_free_bytes": String(Rootfs.freeBytes(o.store)),
+            ])
             try? manager.delete(o.attempt)
             return 1
         }
@@ -163,9 +194,12 @@ public enum Helper {
             }
         }
         try? await container.stop()
+        // Read before deleting the guest, which frees its clone's blocks.
+        let freeAtEnd = Rootfs.freeBytes(o.store)
+        metrics["host_free_bytes"] = String(freeAtEnd)
         if freeBefore >= 0 {
             // Approximate: other writers on the volume show up here too.
-            metrics["bytes_written_approx"] = String(freeBefore - Rootfs.freeBytes(o.store))
+            metrics["bytes_written_approx"] = String(freeBefore - freeAtEnd)
         }
         try? manager.delete(o.attempt)
         if stopped {

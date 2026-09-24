@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/zeroemployeeorg/pomar/internal/capacity"
 )
 
 // SocketPath is where the manager listens, inside its ledgered directory.
@@ -71,6 +73,11 @@ func (m *Manager) mux() *http.ServeMux {
 			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
+		var ref *capacity.Refusal
+		if errors.As(err, &ref) {
+			reply(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error(), "reason": ref.Reason})
+			return
+		}
 		if err != nil {
 			reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
@@ -94,6 +101,26 @@ func (m *Manager) mux() *http.ServeMux {
 	})
 	mux.HandleFunc("GET /v1/reconcile", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.Report())
+	})
+	caches := func(apply bool) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			rep, err := m.Caches(apply)
+			if err != nil {
+				reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			reply(w, http.StatusOK, rep)
+		}
+	}
+	mux.HandleFunc("GET /v1/caches", caches(false))
+	mux.HandleFunc("POST /v1/caches/evict", caches(true))
+	mux.HandleFunc("GET /v1/capacity", func(w http.ResponseWriter, r *http.Request) {
+		c, err := m.Capacity()
+		if err != nil {
+			reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		reply(w, http.StatusOK, c)
 	})
 	return mux
 }
