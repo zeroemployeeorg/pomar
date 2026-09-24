@@ -85,7 +85,7 @@ public enum Helper {
     /// A job with a source runs as this unprivileged uid and gid, with its
     /// own home directory.
     public static let jobUID: UInt32 = 1000
-    public static let jobHome = "/home/pomar"
+    public static let jobHome = "/pomar/home"
 
     /// Gives the job's uid a passwd and group entry when the image has none,
     /// so that user lookups in the job work.

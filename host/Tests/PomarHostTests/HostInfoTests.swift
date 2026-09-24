@@ -41,7 +41,7 @@ import Testing
 
 @Test func extractReleasesTheShimOnlyAfterUnpacking() {
     let script = Helper.extractCommand()[2]
-    #expect(script.contains("tar -xf /pomar/source -C /work && rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/home/pomar:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /home/pomar && chown -R 1000:1000 /work /home/pomar && touch /.pomar-ready"))
+    #expect(script.contains("tar -xf /pomar/source -C /work && rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/pomar/home:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /pomar/home && chown -R 1000:1000 /work /pomar/home && touch /.pomar-ready"))
 }
 
 @Test func extractWaitsForTheProxyShimWhenAsked() {
@@ -66,7 +66,7 @@ import Testing
     #expect(script.contains("checkout -q --detach \(sha)"))
     #expect(script.contains("rev-parse HEAD)\" = \(sha)"))
     #expect(!script.contains("remote add"))
-    #expect(script.hasSuffix("rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/home/pomar:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /home/pomar && chown -R 1000:1000 /work /home/pomar && touch /.pomar-ready"))
+    #expect(script.hasSuffix("rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/pomar/home:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /pomar/home && chown -R 1000:1000 /work /pomar/home && touch /.pomar-ready"))
 }
 
 @Test func sourceKindParsing() {
@@ -83,5 +83,5 @@ import Testing
 @Test func jobRunsUnprivilegedWithItsOwnHome() {
     #expect(Helper.jobUID == 1000)
     let env = Helper.jobEnvironment(["PATH=/usr/local/go/bin:/usr/bin", "HOME=/root", "GOPROXY=http://127.0.0.1:7070"])
-    #expect(env == ["PATH=/usr/local/go/bin:/usr/bin", "GOPROXY=http://127.0.0.1:7070", "HOME=/home/pomar"])
+    #expect(env == ["PATH=/usr/local/go/bin:/usr/bin", "GOPROXY=http://127.0.0.1:7070", "HOME=/pomar/home"])
 }
