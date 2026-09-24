@@ -20,6 +20,7 @@ func SocketPath(root string) string { return filepath.Join(root, managerDir, "ma
 type StartRequest struct {
 	ID      string   `json:"id"`
 	Command []string `json:"command"`
+	Source  *Source  `json:"source,omitempty"`
 }
 
 // Serve listens on the Unix socket until ctx ends. A stale socket left by a
@@ -65,7 +66,7 @@ func (m *Manager) mux() *http.ServeMux {
 			reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		e, err := m.Start(req.ID, req.Command)
+		e, err := m.Start(req.ID, req.Command, req.Source)
 		if errors.Is(err, ErrExists) {
 			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return

@@ -87,6 +87,10 @@ public enum Helper {
         source.setEventHandler { stop.set() }
         source.resume()
 
+        guard Entitlement.hasVirtualization() else {
+            writeStatus(o.stateDir, ["phase": "failed", "attempt": o.attempt, "error": Entitlement.missingReason])
+            return 1
+        }
         writeStatus(o.stateDir, ["phase": "booting", "attempt": o.attempt])
         var manager: ContainerManager
         do {

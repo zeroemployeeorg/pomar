@@ -54,7 +54,7 @@ func (c Class) valid() bool { return c == ClassAttempt || c == ClassCache }
 // Structure is the fixed set of directories that give the data root its
 // shape. They are not ledgered: they hold only ledgered objects, Init creates
 // them, and a directory not listed here is not structure.
-var Structure = []string{"attempts", "downloads", "kernels"}
+var Structure = []string{"attempts", "downloads", "kernels", "mirrors"}
 
 // Op is a ledger operation.
 type Op string

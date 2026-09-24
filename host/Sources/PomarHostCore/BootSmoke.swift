@@ -62,6 +62,9 @@ public enum BootSmoke {
     }
 
     public static func run(_ o: Options) async throws -> Report {
+        guard Entitlement.hasVirtualization() else {
+            throw CocoaError(.executableNotLoadable, userInfo: [NSDebugDescriptionErrorKey: Entitlement.missingReason])
+        }
         var report = Report()
         let kernel = HostInfo.kernel(atPath: o.kernel)
         let t0 = Date()
