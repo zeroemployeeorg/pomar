@@ -16,7 +16,7 @@ func TestCheckLoopback(t *testing.T) {
 		"[::1]:7070":     true,
 		"0.0.0.0:7070":   false,
 		":7070":          false,
-		"10.0.0.1:7070":  false,
+		"192.0.2.1:7070": false, // RFC 5737 documentation address
 		"localhost:7070": false, // a name could resolve anywhere
 	} {
 		if err := checkLoopback(addr); (err == nil) != ok {
