@@ -53,14 +53,15 @@ test:
 # --force-resolved-versions refuses to change it.
 SWIFT_FLAGS := --package-path host --force-resolved-versions
 HOST_BIN = $(shell swift build --package-path host --show-bin-path)/pomar-host
-# Build and test use identical flags: with the Command Line Tools 27.2, changing
-# the flag set between two builds of the same package leaves the next build
-# unable to find the Swift Testing macro plugin.
+# One build of everything, then tests from that build. With the Command Line
+# Tools 27.2, a product-only build after a test build (or a change of flags
+# between builds) leaves the next test build unable to find the Swift Testing
+# macro plugin, so the two are never interleaved.
 
 swift-build:
 	@echo "=== swift build"
 	@swift --version 2>&1 | head -1
-	@swift build $(SWIFT_FLAGS) --product pomar-host
+	@swift build $(SWIFT_FLAGS) --build-tests
 
 # Ad-hoc signing with the Virtualization entitlement is part of the build. It runs
 # last: `swift test` relinks pomar-host with SwiftPM's default signature, which
@@ -74,4 +75,4 @@ swift-sign:
 
 swift-test:
 	@echo "=== swift test"
-	@swift test $(SWIFT_FLAGS)
+	@swift test $(SWIFT_FLAGS) --skip-build
