@@ -71,7 +71,20 @@ func (b *Bases) Build(ctx context.Context, store, imageRef, imageDigest, arm64Di
 		return err
 	}
 	if b.Exists(arm64Digest) {
-		return nil
+		// A base of another capacity is replaced, through the ledger; its
+		// clones are independent copies, so live attempts are unaffected.
+		p, _ := b.Path(arm64Digest)
+		fi, err := os.Stat(p)
+		if err == nil && uint64(fi.Size()) == sizeBytes {
+			return nil
+		}
+		was := "unreadable"
+		if err == nil {
+			was = fmt.Sprint(fi.Size())
+		}
+		if err := v.TeardownNote(venue.KindImage, objID(h), fmt.Sprintf("replaced: capacity %s bytes, now %d", was, sizeBytes)); err != nil {
+			return err
+		}
 	}
 	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
 		return err
