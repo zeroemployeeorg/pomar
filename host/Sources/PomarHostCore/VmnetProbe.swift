@@ -6,6 +6,14 @@ import vmnet
 /// under this binary's own signature, which vmnet modes are usable.
 public enum VmnetProbe {
     public static func run(hostOnly: Bool) -> (ok: Bool, detail: String) {
+        // Reported, not enforced: the probe exists to observe what an
+        // unentitled binary gets (PR 2's control run).
+        let entitled = Entitlement.hasVirtualization() ? "entitled" : "UNENTITLED"
+        let r = probe(hostOnly: hostOnly)
+        return (r.ok, "\(r.detail) (\(entitled))")
+    }
+
+    static func probe(hostOnly: Bool) -> (ok: Bool, detail: String) {
         let mode: vmnet.operating_modes_t = hostOnly ? .VMNET_HOST_MODE : .VMNET_SHARED_MODE
         let name = hostOnly ? "host" : "shared"
         do {

@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
 	"github.com/zeroemployeeorg/pomar/internal/smoke"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -30,7 +31,10 @@ const usage = `usage:
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR] -id ID -- CMD...
+  pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF] -- CMD...
+                                    with a mirror, REF is pinned to a commit SHA at admission
+  pomar mirror sync [-root DIR] -name NAME -url URL
+  pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile [-root DIR]
   pomar attempt stop|rm [-root DIR] -id ID
   pomar smoke fetch-kernel [-root DIR] -host-bin PATH
@@ -56,6 +60,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return smokeCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 1 && args[0] == "manager":
 		return managerCmd(args[1:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "mirror" && (args[1] == "sync" || args[1] == "resolve"):
+		return mirrorCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "attempt":
 		return attemptCmd(args[1], args[2:], stdout, stderr)
 	}
@@ -216,9 +222,10 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 			InitRef: smoke.InitRepo + "@" + smoke.InitDigest, InitDigest: smoke.InitDigest,
 			ImageRef: smoke.ImageRepo + "@" + smoke.ImageDigest, ImageDigest: smoke.ImageDigest,
 		},
-		Procs: proc.PS{},
-		UID:   os.Getuid(),
-		Log:   stdout,
+		Procs:   proc.PS{},
+		Mirrors: &mirror.Mirrors{Venue: v},
+		UID:     os.Getuid(),
+		Log:     stdout,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -245,6 +252,8 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
 	id := fs.String("id", "", "attempt id")
+	mirrorName := fs.String("mirror", "", "source mirror (start)")
+	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -262,7 +271,15 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
-		err = c.Do("POST", "/v1/attempts", manager.StartRequest{ID: *id, Command: cmd}, &e)
+		req := manager.StartRequest{ID: *id, Command: cmd}
+		if *mirrorName != "" || *ref != "" {
+			if *mirrorName == "" || *ref == "" {
+				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")
+				return 2
+			}
+			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref}
+		}
+		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e
 	case "list":
 		var l []manager.Entry
@@ -289,5 +306,43 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	}
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Fprintln(stdout, string(b))
+	return 0
+}
+
+func mirrorCmd(step string, args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("mirror "+step, flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
+	name := fs.String("name", "", "mirror name")
+	url := fs.String("url", "", "repository URL to mirror (sync)")
+	ref := fs.String("ref", "", "ref to resolve (resolve)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *name == "" || (step == "sync" && *url == "") || (step == "resolve" && *ref == "") {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	v, err := venue.Open(*root)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	m := &mirror.Mirrors{Venue: v}
+	ctx := context.Background()
+	if step == "sync" {
+		if err := m.Sync(ctx, *name, *url); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "mirror %s: synced\n", *name)
+		return 0
+	}
+	sha, err := m.Resolve(ctx, *name, *ref)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	fmt.Fprintln(stdout, sha)
 	return 0
 }

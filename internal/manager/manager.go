@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,7 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/zeroemployeeorg/pomar/internal/sign"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
@@ -40,6 +43,8 @@ type Config struct {
 	HostBin string // absolute path of the signed pomar-host
 	Guest   Guest
 	Procs   proc.Lister
+	// Mirrors resolves and snapshots attempt sources; nil disables sources.
+	Mirrors *mirror.Mirrors
 	UID     int
 	// ReapWait bounds how long an orphan gets between SIGTERM and SIGKILL.
 	ReapWait time.Duration
@@ -220,15 +225,32 @@ var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 // ErrExists is returned when an attempt id is already in the table.
 var ErrExists = errors.New("manager: attempt exists")
 
+// Source names the code an attempt runs: a mirror and a ref. The ref is
+// pinned to a commit SHA at admission, and the attempt only ever sees a
+// snapshot of that commit.
+type Source struct {
+	Mirror string `json:"mirror"`
+	Ref    string `json:"ref"`
+}
+
 // Start ledgers an attempt's objects and spawns its helper in a new session,
-// so that the manager's own death does not signal it.
-func (m *Manager) Start(id string, command []string) (Entry, error) {
+// so that the manager's own death does not signal it. With a source, the ref
+// is pinned to a commit SHA before anything is created, and a snapshot of
+// that commit is written into the attempt's record.
+func (m *Manager) Start(id string, command []string, src *Source) (Entry, error) {
 	v := m.cfg.Venue
 	if !validID.MatchString(id) {
 		return Entry{}, fmt.Errorf("manager: invalid attempt id %q", id)
 	}
 	if len(command) == 0 {
 		return Entry{}, errors.New("manager: empty command")
+	}
+	if src != nil && m.cfg.Mirrors == nil {
+		return Entry{}, errors.New("manager: sources are not configured")
+	}
+	// Refuse an unentitled helper binary before creating anything.
+	if err := sign.Check(m.cfg.HostBin); err != nil {
+		return Entry{}, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -238,21 +260,48 @@ func (m *Manager) Start(id string, command []string) (Entry, error) {
 	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
 		return Entry{}, err
 	}
+	ctx := context.Background()
+	var sha string
+	if src != nil {
+		var err error
+		if sha, err = m.cfg.Mirrors.Resolve(ctx, src.Mirror, src.Ref); err != nil {
+			return Entry{}, err
+		}
+	}
 	recRel := filepath.Join(attemptsDir, id)
 	recID := "attempt-" + id
 	if err := v.Intent(venue.KindVolume, venue.ClassAttempt, recID, recRel, "attempt record"); err != nil {
 		return Entry{}, err
 	}
 	rec := filepath.Join(v.Root(), recRel)
-	if err := os.MkdirAll(rec, 0o700); err != nil {
+	// Every failure from here on tears down what this call created.
+	abandon := func(err error, vmOpen bool) (Entry, error) {
+		if vmOpen {
+			v.Failed(venue.KindVM, id, err.Error())
+			v.Teardown(venue.KindVM, id)
+		}
 		v.Failed(venue.KindVolume, recID, err.Error())
+		v.Teardown(venue.KindVolume, recID)
+		m.event("start-refused", id, 0, err.Error())
 		return Entry{}, err
+	}
+	if err := os.MkdirAll(rec, 0o700); err != nil {
+		return abandon(err, false)
 	}
 	if err := v.Created(venue.KindVolume, recID); err != nil {
-		return Entry{}, err
+		return abandon(err, false)
+	}
+	if src != nil {
+		if err := m.cfg.Mirrors.Snapshot(ctx, src.Mirror, sha, filepath.Join(rec, "source.tar")); err != nil {
+			return abandon(err, false)
+		}
+		b, _ := json.Marshal(map[string]string{"mirror": src.Mirror, "ref": src.Ref, "sha": sha})
+		if err := os.WriteFile(filepath.Join(rec, "source.json"), append(b, '\n'), 0o600); err != nil {
+			return abandon(err, false)
+		}
 	}
 	if err := v.Intent(venue.KindVM, venue.ClassAttempt, id, filepath.Join(storeDir, "containers", id), "helper-owned guest"); err != nil {
-		return Entry{}, err
+		return abandon(err, false)
 	}
 
 	g := m.cfg.Guest
@@ -263,8 +312,7 @@ func (m *Manager) Start(id string, command []string) (Entry, error) {
 	args = append(args, command...)
 	logf, err := os.OpenFile(filepath.Join(rec, "helper.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
-		v.Failed(venue.KindVM, id, err.Error())
-		return Entry{}, err
+		return abandon(err, true)
 	}
 	cmd := exec.Command(m.cfg.HostBin, args...)
 	cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(v.Root(), tmpDir)+string(filepath.Separator))
@@ -272,9 +320,7 @@ func (m *Manager) Start(id string, command []string) (Entry, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		logf.Close()
-		v.Failed(venue.KindVM, id, err.Error())
-		v.Teardown(venue.KindVM, id)
-		return Entry{}, err
+		return abandon(err, true)
 	}
 	logf.Close()
 	pid := cmd.Process.Pid
@@ -292,6 +338,9 @@ func (m *Manager) Start(id string, command []string) (Entry, error) {
 		return Entry{}, err
 	}
 	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC()}
+	if src != nil {
+		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha}
+	}
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
 		return Entry{}, err

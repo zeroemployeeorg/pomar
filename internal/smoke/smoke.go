@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/zeroemployeeorg/pomar/internal/sign"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
@@ -99,6 +100,10 @@ func FetchKernel(ctx context.Context, e *Env) error {
 // ledgered and open as the host-side cache; the guest is torn down.
 func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 	v := e.Venue
+	// Refuse an unentitled host binary before creating anything.
+	if err := sign.Check(e.HostBin); err != nil {
+		return err
+	}
 	if err := v.Init(); err != nil {
 		return err
 	}

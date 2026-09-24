@@ -40,6 +40,15 @@ type Entry struct {
 	ExitCode *int      `json:"exit_code,omitempty"`
 	Created  time.Time `json:"created"`
 	Ended    time.Time `json:"ended,omitzero"`
+	// Source is the commit the attempt was pinned to at admission.
+	Source *PinnedSource `json:"source,omitempty"`
+}
+
+// PinnedSource records the ref an attempt asked for and the commit it got.
+type PinnedSource struct {
+	Mirror string `json:"mirror"`
+	Ref    string `json:"ref"`
+	SHA    string `json:"sha"`
 }
 
 // Terminal reports whether the attempt has ended.
