@@ -13,9 +13,9 @@ HYGIENE_DENYLIST ?=
 HYGIENE_REQUIRE ?= 0
 HYGIENE_COPY := .hygiene/denylist.txt
 
-.PHONY: verify versions no-docker hygiene gofmt vet test swift-build swift-test swift-sign
+.PHONY: verify versions no-docker hygiene gofmt vet test shim swift-build swift-test swift-sign
 
-verify: versions no-docker hygiene gofmt vet test swift-build swift-test swift-sign
+verify: versions no-docker hygiene gofmt vet test shim swift-build swift-test swift-sign
 	@echo "=== make verify GREEN ==="
 
 versions:
@@ -48,6 +48,15 @@ vet:
 test:
 	@echo "=== go test"
 	@go test -count=1 ./...
+
+# The in-guest module-proxy shim: static, linux/arm64, copied into guests.
+SHIM_BIN := .build-shim/pomar-shim-linux-arm64
+shim:
+	@echo "=== shim (static linux/arm64)"
+	@CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags=-s -o $(SHIM_BIN) ./cmd/pomar-shim
+	@file $(SHIM_BIN) | grep -q "ARM aarch64.*statically linked" \
+		|| { echo "shim: not a static linux/arm64 binary"; exit 1; }
+	@shasum -a 256 $(SHIM_BIN)
 
 # The Swift host. Its dependency graph is pinned by host/Package.resolved;
 # --force-resolved-versions refuses to change it.
