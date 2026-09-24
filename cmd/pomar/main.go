@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/zeroemployeeorg/pomar/internal/base"
+	"github.com/zeroemployeeorg/pomar/internal/goproxy"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
@@ -32,7 +33,8 @@ const usage = `usage:
   pomar venue init [-root DIR]      create the structure directories (idempotent)
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
                                     class an object ledgered before classes existed
-  pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX
+  pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
+                                    with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
@@ -209,6 +211,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
 	hostBin := fs.String("host-bin", "", "signed pomar-host binary")
+	shimBin := fs.String("shim-bin", "", "static linux/arm64 pomar-shim; enables the Go module proxy")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -236,6 +239,25 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	var proxy *goproxy.Proxy
+	if *shimBin != "" {
+		abs, err := filepath.Abs(*shimBin)
+		if err == nil {
+			*shimBin = abs
+			_, err = os.Stat(abs)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		// The module proxy's cache: ledgered before it exists, budgeted like
+		// every cache.
+		if err := v.EnsureCache(venue.KindVolume, "goproxy", "goproxy"); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		proxy = &goproxy.Proxy{Cache: filepath.Join(v.Root(), "goproxy")}
+	}
 	m, err := manager.Open(manager.Config{
 		Venue:   v,
 		HostBin: bin,
@@ -246,6 +268,8 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		},
 		Procs:   proc.PS{},
 		Mirrors: &mirror.Mirrors{Venue: v},
+		GoProxy: proxy,
+		ShimBin: *shimBin,
 		Base: func() (string, error) {
 			// Clone the pinned image's base when one has been built.
 			bs := &base.Bases{Venue: v, HostBin: bin}

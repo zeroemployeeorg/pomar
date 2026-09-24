@@ -56,7 +56,7 @@ func TestGuestIOErrorOnAFullHostIsHostDiskFull(t *testing.T) {
 	writeStatus(t, m, "a", `{"phase":"exited","exit_code":"1","host_free_bytes":"120606720"}`)
 	m.poll()
 	e := entry(m, "a")
-	if e.State != StateFailed || !strings.HasPrefix(e.Reason, capacity.ReasonHostDiskFull) || !e.DiskFull {
+	if e.State != StateFailed || !strings.HasPrefix(e.Reason, capacity.ReasonHostDiskFull) || e.HostCondition != capacity.ReasonHostDiskFull {
 		t.Fatalf("entry = %+v, want failed host-disk-full", e)
 	}
 	if e.ExitCode == nil || *e.ExitCode != 1 {
@@ -85,7 +85,7 @@ func TestFailureWithRoomIsNotHostDiskFull(t *testing.T) {
 	m.t.entries["a"] = &Entry{Attempt: "a", PID: 100, Start: "T1", State: StateRunning}
 	writeStatus(t, m, "a", `{"phase":"exited","exit_code":"2","host_free_bytes":"53687091200"}`)
 	m.poll()
-	if e := entry(m, "a"); e.State != StateExited || e.DiskFull {
+	if e := entry(m, "a"); e.State != StateExited || e.HostCondition != "" {
 		t.Fatalf("entry = %+v, want exited 2", e)
 	}
 }
@@ -121,7 +121,7 @@ func TestStalledAttemptOnAFullHostIsStopped(t *testing.T) {
 	os.Chtimes(filepath.Join(m.cfg.Venue.Root(), attemptsDir, "a", "status.json"), old, old)
 
 	m.poll()
-	if e := entry(m, "a"); e.State != StateRunning || !e.DiskFull {
+	if e := entry(m, "a"); e.State != StateRunning || e.HostCondition != capacity.ReasonHostDiskFull {
 		t.Fatalf("at first sighting: %+v, want running and marked", e)
 	}
 	time.Sleep(40 * time.Millisecond)
@@ -157,7 +157,23 @@ func TestProgressingAttemptOnAFullHostIsLeftRunning(t *testing.T) {
 	m.t.entries["a"] = &Entry{Attempt: "a", PID: os.Getpid(), Start: "T1", State: StateRunning}
 	writeStatus(t, m, "a", `{"phase":"running"}`)
 	m.poll()
-	if e := entry(m, "a"); e.State != StateRunning || !e.DiskFull {
+	if e := entry(m, "a"); e.State != StateRunning || e.HostCondition != capacity.ReasonHostDiskFull {
 		t.Fatalf("entry = %+v, want running and marked", e)
+	}
+}
+
+// A table written before host conditions had a disk_full flag; it loads as
+// the host-disk-full condition.
+func TestOldDiskFullFlagLoadsAsHostCondition(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "table.json")
+	if err := os.WriteFile(path, []byte(`[{"attempt":"a","state":"running","disk_full":true}]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tb, err := loadTable(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e := tb.entries["a"]; e.HostCondition != capacity.ReasonHostDiskFull || e.DiskFull {
+		t.Fatalf("entry = %+v", e)
 	}
 }
