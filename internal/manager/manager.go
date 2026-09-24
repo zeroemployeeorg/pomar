@@ -368,6 +368,11 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	if basePath != "" {
 		args = append(args, "--base", basePath)
 	}
+	if src != nil {
+		// The helper copies the pinned snapshot into the guest over vsock
+		// before releasing the command; the guest never sees the mirror.
+		args = append(args, "--source", filepath.Join(rec, "source.tar"))
+	}
 	args = append(append(args, "--"), command...)
 	logf, err := os.OpenFile(filepath.Join(rec, "helper.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
