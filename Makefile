@@ -51,13 +51,15 @@ test:
 
 # The Swift host. Its dependency graph is pinned by host/Package.resolved;
 # --force-resolved-versions refuses to change it.
-SWIFT_FLAGS := --package-path host --force-resolved-versions
+# With the Command Line Tools 27.2, SwiftPM intermittently omits the Swift
+# Testing macro plugin from the compile of test files ("plugin for module
+# 'TestingMacros' not found"), even from a clean build. The plugin's directory
+# is therefore passed explicitly, with identical flags for build and test, and
+# the gate builds from clean.
+TESTING_PLUGINS := $(shell xcode-select -p)/usr/lib/swift/host/plugins/testing
+SWIFT_FLAGS := --package-path host --force-resolved-versions \
+	$(if $(wildcard $(TESTING_PLUGINS)),-Xswiftc -plugin-path -Xswiftc $(TESTING_PLUGINS))
 HOST_BIN = $(shell swift build --package-path host --show-bin-path)/pomar-host
-# A clean build of everything, then tests from that build. With the Command
-# Line Tools 27.2, an incremental build (after a source edit, a product-only
-# build, or a change of flags) intermittently cannot find the Swift Testing
-# macro plugin. The gate therefore always builds from clean: slower, and never
-# a flake.
 
 swift-build:
 	@echo "=== swift build (clean)"
