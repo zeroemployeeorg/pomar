@@ -53,9 +53,9 @@ test:
 # --force-resolved-versions refuses to change it.
 SWIFT_FLAGS := --package-path host --force-resolved-versions
 HOST_BIN = $(shell swift build --package-path host --show-bin-path)/pomar-host
-# The Command Line Tools keep Swift Testing outside the default search path.
-CLT_FRAMEWORKS := $(shell xcode-select -p)/Library/Developer/Frameworks
-SWIFT_TEST_FLAGS := $(if $(wildcard $(CLT_FRAMEWORKS)/Testing.framework),-Xswiftc -F -Xswiftc $(CLT_FRAMEWORKS) -Xlinker -F -Xlinker $(CLT_FRAMEWORKS) -Xlinker -rpath -Xlinker $(CLT_FRAMEWORKS))
+# Build and test use identical flags: with the Command Line Tools 27.2, changing
+# the flag set between two builds of the same package leaves the next build
+# unable to find the Swift Testing macro plugin.
 
 swift-build:
 	@echo "=== swift build"
@@ -74,4 +74,4 @@ swift-sign:
 
 swift-test:
 	@echo "=== swift test"
-	@swift test $(SWIFT_FLAGS) $(SWIFT_TEST_FLAGS)
+	@swift test $(SWIFT_FLAGS)
