@@ -41,7 +41,7 @@ import Testing
 
 @Test func extractReleasesTheShimOnlyAfterUnpacking() {
     let script = Helper.extractCommand()[2]
-    #expect(script.contains("tar -xf /pomar/source.tar -C /work && rm -f /pomar/source.tar && touch /.pomar-ready"))
+    #expect(script.contains("tar -xf /pomar/source -C /work && rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/home/pomar:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /home/pomar && chown -R 1000:1000 /work /home/pomar && touch /.pomar-ready"))
 }
 
 @Test func extractWaitsForTheProxyShimWhenAsked() {
@@ -57,4 +57,31 @@ import Testing
     for weakening in ["GOSUMDB", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOFLAGS", "GOPRIVATE", "GONOPROXY"] {
         #expect(!Helper.proxyEnvironment.contains { $0.hasPrefix(weakening + "=") })
     }
+}
+
+@Test func bundleSourceBecomesARepositoryWithNoRemote() {
+    let sha = String(repeating: "a", count: 40)
+    let script = Helper.extractCommand(bundleSHA: sha)[2]
+    #expect(script.hasPrefix("git init -q /work && git -C /work fetch -q /pomar/source 'refs/heads/*:refs/remotes/origin/*'"))
+    #expect(script.contains("checkout -q --detach \(sha)"))
+    #expect(script.contains("rev-parse HEAD)\" = \(sha)"))
+    #expect(!script.contains("remote add"))
+    #expect(script.hasSuffix("rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/home/pomar:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /home/pomar && chown -R 1000:1000 /work /home/pomar && touch /.pomar-ready"))
+}
+
+@Test func sourceKindParsing() {
+    #expect(Helper.sourceKind(nil, sha: nil)?.bundle == false)
+    #expect(Helper.sourceKind("tar", sha: nil)?.bundle == false)
+    let sha = String(repeating: "0", count: 40)
+    #expect(Helper.sourceKind("bundle", sha: sha)?.sha == sha)
+    #expect(Helper.sourceKind("bundle", sha: nil) == nil)
+    #expect(Helper.sourceKind("bundle", sha: "main") == nil)
+    #expect(Helper.sourceKind("bundle", sha: String(repeating: "A", count: 40)) == nil)
+    #expect(Helper.sourceKind("zip", sha: nil) == nil)
+}
+
+@Test func jobRunsUnprivilegedWithItsOwnHome() {
+    #expect(Helper.jobUID == 1000)
+    let env = Helper.jobEnvironment(["PATH=/usr/local/go/bin:/usr/bin", "HOME=/root", "GOPROXY=http://127.0.0.1:7070"])
+    #expect(env == ["PATH=/usr/local/go/bin:/usr/bin", "GOPROXY=http://127.0.0.1:7070", "HOME=/home/pomar"])
 }

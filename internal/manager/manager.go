@@ -78,7 +78,11 @@ type Config struct {
 	// StallWait is how long a live attempt may show no progress on a full
 	// host before it is stopped as host-disk-full.
 	StallWait time.Duration
-	Log       io.Writer
+	// SampleEvery is how often a live attempt's VM service is measured;
+	// Footprint reads its memory (nil runs footprint(1)).
+	SampleEvery time.Duration
+	Footprint   Footprinter
+	Log         io.Writer
 }
 
 // Manager supervises helpers.
@@ -106,6 +110,12 @@ func Open(cfg Config) (*Manager, error) {
 	}
 	if cfg.Poll == 0 {
 		cfg.Poll = time.Second
+	}
+	if cfg.SampleEvery == 0 {
+		cfg.SampleEvery = 2 * time.Second
+	}
+	if cfg.Footprint == nil {
+		cfg.Footprint = FootprintTool
 	}
 	if cfg.StallWait == 0 {
 		cfg.StallWait = 2 * time.Minute
@@ -284,6 +294,11 @@ var ErrExists = errors.New("manager: attempt exists")
 type Source struct {
 	Mirror string `json:"mirror"`
 	Ref    string `json:"ref"`
+	// Git gives the guest a repository instead of a tree: a bundle of Ref
+	// (a branch) and of Base, fetched with no remote into /work and checked
+	// out at the pinned commit. Jobs that read their own history need it.
+	Git  bool   `json:"git,omitempty"`
+	Base string `json:"base,omitempty"` // default "main"
 }
 
 // Start ledgers an attempt's objects and spawns its helper in a new session,
@@ -357,10 +372,10 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		return abandon(err, false)
 	}
 	if src != nil {
-		if err := m.cfg.Mirrors.Snapshot(ctx, src.Mirror, sha, filepath.Join(rec, "source.tar")); err != nil {
+		if err := m.writeSource(ctx, src, sha, rec); err != nil {
 			return abandon(err, false)
 		}
-		b, _ := json.Marshal(map[string]string{"mirror": src.Mirror, "ref": src.Ref, "sha": sha})
+		b, _ := json.Marshal(map[string]any{"mirror": src.Mirror, "ref": src.Ref, "sha": sha, "git": src.Git, "base": src.base()})
 		if err := os.WriteFile(filepath.Join(rec, "source.json"), append(b, '\n'), 0o600); err != nil {
 			return abandon(err, false)
 		}
@@ -381,7 +396,7 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	if src != nil {
 		// The helper copies the pinned snapshot into the guest over vsock
 		// before releasing the command; the guest never sees the mirror.
-		args = append(args, "--source", filepath.Join(rec, "source.tar"))
+		args = append(args, "--source", filepath.Join(rec, src.file()), "--source-kind", src.kind(), "--source-sha", sha)
 	}
 	withProxy := src != nil && m.proxyEnabled()
 	if withProxy {
@@ -423,7 +438,7 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	}
 	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy}
 	if src != nil {
-		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha}
+		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git}
 	}
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
@@ -589,6 +604,11 @@ func (m *Manager) poll() {
 		return // unknown: change nothing
 	}
 	m.noteSeen(live, ps)
+	m.mu.Lock()
+	m.linkVMs(ps)
+	m.samplePeaks(ps, time.Now())
+	m.t.save()
+	m.mu.Unlock()
 	m.checkDiskFull(live)
 	for _, e := range live {
 		if m.isHelperOf(ps, e) {
@@ -775,4 +795,36 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 	m.event("ended-"+string(st), id, e.PID, reason)
 	m.teardownVM(id)
 	m.evict()
+}
+
+func (s *Source) base() string {
+	if s.Base == "" {
+		return "main"
+	}
+	return s.Base
+}
+
+func (s *Source) kind() string {
+	if s.Git {
+		return "bundle"
+	}
+	return "tar"
+}
+
+func (s *Source) file() string {
+	if s.Git {
+		return "source.bundle"
+	}
+	return "source.tar"
+}
+
+// writeSource puts the attempt's source in its record: a tar of the pinned
+// tree, or with Git a bundle of the branch and base that holds the pinned
+// commit.
+func (m *Manager) writeSource(ctx context.Context, src *Source, sha, rec string) error {
+	dst := filepath.Join(rec, src.file())
+	if src.Git {
+		return m.cfg.Mirrors.Bundle(ctx, src.Mirror, sha, src.Ref, src.base(), dst)
+	}
+	return m.cfg.Mirrors.Snapshot(ctx, src.Mirror, sha, dst)
 }

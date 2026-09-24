@@ -161,3 +161,56 @@ func TestFailedCloneLeavesNothing(t *testing.T) {
 		t.Fatalf("unaccounted after failed clone: %v, %v", un, err)
 	}
 }
+
+// A bundle holds the branch and base; fetched into a fresh repository with
+// no remote, it checks out exactly the pinned commit and has origin/main.
+func TestBundle(t *testing.T) {
+	m, env, up, sha1 := setup(t)
+	ctx := context.Background()
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	run(t, env, up, "checkout", "--quiet", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(up, "hello.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, env, up, "commit", "--quiet", "-am", "two")
+	sha2 := run(t, env, up, "rev-parse", "HEAD")
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "s.bundle")
+	if err := m.Bundle(ctx, "demo", sha2, "feature", "main", dst); err != nil {
+		t.Fatal(err)
+	}
+	heads := run(t, env, "", "bundle", "list-heads", dst)
+	if !strings.Contains(heads, sha2+" refs/heads/feature") || !strings.Contains(heads, sha1+" refs/heads/main") {
+		t.Fatalf("list-heads:\n%s", heads)
+	}
+	work := t.TempDir()
+	run(t, env, work, "init", "--quiet")
+	run(t, env, work, "fetch", "--quiet", dst, "refs/heads/*:refs/remotes/origin/*")
+	run(t, env, work, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", sha2)
+	if got := run(t, env, work, "rev-parse", "HEAD"); got != sha2 {
+		t.Fatalf("HEAD %s, want %s", got, sha2)
+	}
+	if got := run(t, env, work, "rev-parse", "origin/main"); got != sha1 {
+		t.Fatalf("origin/main %s, want %s", got, sha1)
+	}
+	if remotes := run(t, env, work, "remote"); remotes != "" {
+		t.Fatalf("the guest repository has remotes: %q", remotes)
+	}
+	// A commit outside the branch's history is refused, and so is a
+	// branch that looks like an option or a revision range.
+	if err := m.Bundle(ctx, "demo", sha2, "main", "main", filepath.Join(t.TempDir(), "x.bundle")); err == nil {
+		t.Error("a SHA outside the branch was bundled")
+	}
+	for _, bad := range []string{"--all", "main..feature", "a b"} {
+		if err := m.Bundle(ctx, "demo", sha2, bad, "main", filepath.Join(t.TempDir(), "y.bundle")); err == nil {
+			t.Errorf("branch %q accepted", bad)
+		}
+	}
+	if err := m.Bundle(ctx, "demo", sha2, "feature", "main", dst); err == nil {
+		t.Error("an existing destination was overwritten")
+	}
+}
