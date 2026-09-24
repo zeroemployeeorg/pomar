@@ -53,14 +53,16 @@ test:
 # --force-resolved-versions refuses to change it.
 SWIFT_FLAGS := --package-path host --force-resolved-versions
 HOST_BIN = $(shell swift build --package-path host --show-bin-path)/pomar-host
-# One build of everything, then tests from that build. With the Command Line
-# Tools 27.2, a product-only build after a test build (or a change of flags
-# between builds) leaves the next test build unable to find the Swift Testing
-# macro plugin, so the two are never interleaved.
+# A clean build of everything, then tests from that build. With the Command
+# Line Tools 27.2, an incremental build (after a source edit, a product-only
+# build, or a change of flags) intermittently cannot find the Swift Testing
+# macro plugin. The gate therefore always builds from clean: slower, and never
+# a flake.
 
 swift-build:
-	@echo "=== swift build"
+	@echo "=== swift build (clean)"
 	@swift --version 2>&1 | head -1
+	@swift package --package-path host clean
 	@swift build $(SWIFT_FLAGS) --build-tests
 
 # Ad-hoc signing with the Virtualization entitlement is part of the build. It runs
