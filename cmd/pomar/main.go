@@ -14,9 +14,11 @@ import (
 	"sort"
 	"syscall"
 
+	"github.com/zeroemployeeorg/pomar/internal/base"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/zeroemployeeorg/pomar/internal/sign"
 	"github.com/zeroemployeeorg/pomar/internal/smoke"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
@@ -33,6 +35,8 @@ const usage = `usage:
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
+  pomar base build [-root DIR] -host-bin PATH
+                                    unpack the pinned image once into a read-only base rootfs
   pomar mirror sync [-root DIR] -name NAME -url URL
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile [-root DIR]
@@ -60,6 +64,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return smokeCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 1 && args[0] == "manager":
 		return managerCmd(args[1:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "base" && args[1] == "build":
+		return baseBuild(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "mirror" && (args[1] == "sync" || args[1] == "resolve"):
 		return mirrorCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "attempt":
@@ -224,8 +230,16 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		},
 		Procs:   proc.PS{},
 		Mirrors: &mirror.Mirrors{Venue: v},
-		UID:     os.Getuid(),
-		Log:     stdout,
+		Base: func() (string, error) {
+			// Clone the pinned image's base when one has been built.
+			bs := &base.Bases{Venue: v, HostBin: bin}
+			if !bs.Exists(smoke.ImageArm64) {
+				return "", nil
+			}
+			return bs.Verify(smoke.ImageArm64)
+		},
+		UID: os.Getuid(),
+		Log: stdout,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -344,5 +358,42 @@ func mirrorCmd(step string, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintln(stdout, sha)
+	return 0
+}
+
+func baseBuild(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("base build", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
+	hostBin := fs.String("host-bin", "", "signed pomar-host binary")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *hostBin == "" {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	if err := sign.Check(*hostBin); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	v, err := venue.Open(*root)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if err := v.EnsureCache(venue.KindImage, "image-store", "store"); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	bs := &base.Bases{Venue: v, HostBin: *hostBin}
+	err = bs.Build(context.Background(), filepath.Join(v.Root(), "store"),
+		smoke.ImageRepo+"@"+smoke.ImageDigest, smoke.ImageDigest, smoke.ImageArm64, smoke.BaseSizeBytes)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	p, _ := bs.Path(smoke.ImageArm64)
+	fmt.Fprintf(stdout, "base %s: built at %s\n", smoke.ImageArm64, p)
 	return 0
 }

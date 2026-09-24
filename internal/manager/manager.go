@@ -45,7 +45,10 @@ type Config struct {
 	Procs   proc.Lister
 	// Mirrors resolves and snapshots attempt sources; nil disables sources.
 	Mirrors *mirror.Mirrors
-	UID     int
+	// Base returns a verified base rootfs for helpers to clone, or "" to have
+	// them unpack the image. Nil means always unpack.
+	Base func() (string, error)
+	UID  int
 	// ReapWait bounds how long an orphan gets between SIGTERM and SIGKILL.
 	ReapWait time.Duration
 	// Poll is the liveness check interval.
@@ -260,6 +263,13 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
 		return Entry{}, err
 	}
+	var basePath string
+	if m.cfg.Base != nil {
+		var err error
+		if basePath, err = m.cfg.Base(); err != nil {
+			return Entry{}, err
+		}
+	}
 	ctx := context.Background()
 	var sha string
 	if src != nil {
@@ -308,8 +318,11 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	args := []string{"helper", "--attempt", id, "--state-dir", rec,
 		"--store", filepath.Join(v.Root(), storeDir), "--kernel", g.Kernel,
 		"--init", g.InitRef, "--init-digest", g.InitDigest,
-		"--image", g.ImageRef, "--image-digest", g.ImageDigest, "--"}
-	args = append(args, command...)
+		"--image", g.ImageRef, "--image-digest", g.ImageDigest}
+	if basePath != "" {
+		args = append(args, "--base", basePath)
+	}
+	args = append(append(args, "--"), command...)
 	logf, err := os.OpenFile(filepath.Join(rec, "helper.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return abandon(err, true)

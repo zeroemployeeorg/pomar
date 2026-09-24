@@ -22,4 +22,9 @@ const (
 	ImageRepo   = "docker.io/library/golang"
 	ImageTag    = "1.27.0-bookworm"
 	ImageDigest = "sha256:ded31c68586d2e49e760acc2e65a884b23d032e9bbbed0ae0c55abd3fcaf4452"
+	// ImageArm64 keys the base root filesystem built from the image.
+	ImageArm64 = "sha256:4220c5d84f685eb34a728d389bab47674b46f433b5218ae9a75a5fbd5e0be724"
+	// BaseSizeBytes is the ext4 capacity of a base (and so of each clone).
+	// A placeholder until measured job peaks size it (plan PR A).
+	BaseSizeBytes = 2 << 30
 )
