@@ -54,7 +54,7 @@ func (c Class) valid() bool { return c == ClassAttempt || c == ClassCache }
 // Structure is the fixed set of directories that give the data root its
 // shape. They are not ledgered: they hold only ledgered objects, Init creates
 // them, and a directory not listed here is not structure.
-var Structure = []string{"attempts", "bases", "downloads", "kernels", "mirrors"}
+var Structure = []string{"attempts", "bases", "downloads", "kernels", "mirrors", "volumes"}
 
 // Op is a ledger operation.
 type Op string
@@ -83,11 +83,13 @@ type Entry struct {
 
 // Object is the current state of one ledgered object.
 type Object struct {
-	Kind  Kind
-	Class Class // empty only for objects ledgered before classes existed
-	ID    string
-	Path  string
-	Last  Op
+	Kind  Kind   `json:"kind"`
+	Class Class  `json:"class"` // empty only for objects ledgered before classes existed
+	ID    string `json:"id"`
+	Path  string `json:"path"`
+	Last  Op     `json:"last"`
+	// Created is when creation last succeeded; eviction goes oldest first.
+	Created time.Time `json:"created"`
 }
 
 // Venue is an open data root.
@@ -173,6 +175,8 @@ func (v *Venue) apply(e Entry) {
 	case OpClassify:
 		o.Class = e.Class
 		return // classifying does not change the lifecycle state
+	case OpCreated:
+		o.Created = e.Time
 	}
 	o.Last = e.Op
 }
@@ -260,7 +264,11 @@ func (v *Venue) mark(k Kind, id string, op Op, note string) error {
 // Teardown removes an open object's data and records the removal. Only an
 // object the ledger shows as ours is touched, and only inside the data root.
 // A symlink at the object's path is removed as a link, never followed.
-func (v *Venue) Teardown(k Kind, id string) error {
+func (v *Venue) Teardown(k Kind, id string) error { return v.TeardownNote(k, id, "") }
+
+// TeardownNote is Teardown with a reason recorded in the ledger, such as an
+// eviction's budget.
+func (v *Venue) TeardownNote(k Kind, id, note string) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	o, ok := v.objs[key(k, id)]
@@ -279,7 +287,7 @@ func (v *Venue) Teardown(k Kind, id string) error {
 			return fmt.Errorf("venue: removing %s: %w", o.Path, err)
 		}
 	}
-	return v.append(Entry{Op: OpRemoved, Kind: k, Class: o.Class, ID: id, Path: o.Path})
+	return v.append(Entry{Op: OpRemoved, Kind: k, Class: o.Class, ID: id, Path: o.Path, Note: note})
 }
 
 // checkNoSymlinkParents refuses paths whose parent directories, below the
@@ -332,6 +340,72 @@ func (v *Venue) Fill() (int, error) {
 		return 0, errors.New("venue: statfs reported no blocks")
 	}
 	return int((used*100 + denom - 1) / denom), nil
+}
+
+// Space is the data root's filesystem as admission sees it.
+type Space struct {
+	Used  int64 `json:"used"`  // bytes in use, across the APFS container
+	Avail int64 `json:"avail"` // bytes available to unprivileged users
+	// Device is the data root's device (for example /dev/disk3s5), and
+	// Shared reports whether it sits in the same APFS container as the
+	// system's data volume, so that its free space is the operator's too.
+	Device string `json:"device"`
+	Shared bool   `json:"shared"`
+}
+
+// SystemData is the volume that holds the operator's data on macOS.
+const SystemData = "/System/Volumes/Data"
+
+// Space reads the data root's filesystem. Shared is true unless the data
+// root is shown to be on another container than SystemData: a figure that
+// cannot be read counts as shared, which keeps the fill floor on.
+func (v *Venue) Space() (Space, error) {
+	var s syscall.Statfs_t
+	if err := syscall.Statfs(v.root, &s); err != nil {
+		return Space{}, fmt.Errorf("venue: statfs: %w", err)
+	}
+	bs := int64(s.Bsize)
+	sp := Space{Used: int64(s.Blocks-s.Bfree) * bs, Avail: int64(s.Bavail) * bs, Device: cstr(s.Mntfromname[:]), Shared: true}
+	var sys syscall.Statfs_t
+	if err := syscall.Statfs(SystemData, &sys); err == nil {
+		sp.Shared = SameContainer(sp.Device, cstr(sys.Mntfromname[:]))
+	}
+	return sp, nil
+}
+
+// SameContainer reports whether two /dev/diskNs… devices are volumes of one
+// APFS container (disk3s1s1 and disk3s5 are; disk3s5 and disk6s1 are not).
+// Anything it cannot parse counts as the same container.
+func SameContainer(a, b string) bool {
+	ca, oka := container(a)
+	cb, okb := container(b)
+	return !oka || !okb || ca == cb
+}
+
+func container(dev string) (string, bool) {
+	d, ok := strings.CutPrefix(dev, "/dev/disk")
+	if !ok {
+		return "", false
+	}
+	n := 0
+	for n < len(d) && d[n] >= '0' && d[n] <= '9' {
+		n++
+	}
+	if n == 0 {
+		return "", false
+	}
+	return d[:n], true
+}
+
+func cstr(b []int8) string {
+	out := make([]byte, 0, len(b))
+	for _, c := range b {
+		if c == 0 {
+			break
+		}
+		out = append(out, byte(c))
+	}
+	return string(out)
 }
 
 // ErrDiskFull is returned by CheckHeavy when the fill limit is exceeded.
