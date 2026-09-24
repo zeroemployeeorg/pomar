@@ -24,7 +24,8 @@ let usage = """
            pomar-host boot-smoke --store S --kernel K --init REF --init-digest D \\
                                  --image REF --image-digest D --id ID
            pomar-host helper --attempt ID --state-dir DIR --store S --kernel K \\
-                             --init REF --init-digest D --image REF --image-digest D -- CMD...
+                             --init REF --init-digest D --image REF --image-digest D [--base ROOTFS] -- CMD...
+           pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N
     """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -79,8 +80,21 @@ case "helper":
     let code = await Helper.run(
         .init(
             attempt: a, stateDir: dir, store: s, kernel: k, initRef: ir, initDigest: idg,
-            imageRef: mr, imageDigest: md, command: command))
+            imageRef: mr, imageDigest: md, command: command, base: f["base"]))
     exit(code)
+case "build-base":
+    guard let f = flags(args.dropFirst()), let s = f["store"], let mr = f["image"], let md = f["image-digest"],
+        let o = f["out"], let sz = f["size-bytes"].flatMap({ UInt64($0) })
+    else {
+        fail(usage, code: 2)
+    }
+    do {
+        let r = try await Rootfs.buildBase(store: s, imageRef: mr, imageDigest: md, out: o, sizeInBytes: sz)
+        print("arm64_manifest=\(r.arm64Manifest)")
+        print("unpack_ms=\(r.ms)")
+    } catch {
+        fail("build-base: \(error)")
+    }
 default:
     fail(usage, code: 2)
 }

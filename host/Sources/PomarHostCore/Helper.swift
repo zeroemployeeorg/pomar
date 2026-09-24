@@ -16,12 +16,15 @@ public enum Helper {
         public var imageRef: String
         public var imageDigest: String
         public var command: [String]
+        /// A base root filesystem to clone; nil unpacks the image as before.
+        public var base: String?
 
         public init(
             attempt: String, stateDir: String, store: String, kernel: String,
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
-            command: [String]
+            command: [String], base: String? = nil
         ) {
+            self.base = base
             self.attempt = attempt
             self.stateDir = stateDir
             self.store = store
@@ -105,6 +108,8 @@ public enum Helper {
             return 1
         }
         let container: LinuxContainer
+        var metrics: [String: String] = [:]
+        var freeBefore: Int64 = -1
         do {
             let initImage = try await manager.imageStore.get(reference: o.initRef)
             let image = try await manager.imageStore.get(reference: o.imageRef, pull: true)
@@ -113,15 +118,27 @@ public enum Helper {
                 return 1
             }
             let out = try FileWriter(path: o.stateDir + "/output.log")
-            container = try await manager.create(
-                o.attempt, image: image, rootfsSizeInBytes: 2 * 1024 * 1024 * 1024, networking: false
-            ) { config in
+            let configure: (inout LinuxContainer.Configuration) throws -> Void = { config in
                 config.cpus = 2
                 config.memoryInBytes = 1024 * 1024 * 1024
                 config.process.arguments = o.command
                 config.process.stdout = out
                 config.process.stderr = out
                 config.interfaces = []
+            }
+            if let base = o.base {
+                // The clone sits in the container's own directory, so
+                // deleting the container deletes the clone.
+                let clonePath = o.store + "/containers/" + o.attempt + "/rootfs.ext4"
+                freeBefore = Rootfs.freeBytes(o.store)
+                metrics["clone_ms"] = String(try Rootfs.clone(base: base, to: clonePath))
+                container = try await manager.create(
+                    o.attempt, image: image, rootfs: Rootfs.mount(clonePath), networking: false,
+                    configuration: configure)
+            } else {
+                container = try await manager.create(
+                    o.attempt, image: image, rootfsSizeInBytes: 2 * 1024 * 1024 * 1024, networking: false,
+                    configuration: configure)
             }
             try await container.create()
             try await container.start()
@@ -130,7 +147,7 @@ public enum Helper {
             try? manager.delete(o.attempt)
             return 1
         }
-        writeStatus(o.stateDir, ["phase": "running", "attempt": o.attempt])
+        writeStatus(o.stateDir, ["phase": "running", "attempt": o.attempt].merging(metrics) { a, _ in a })
 
         // Wait for the command, checking the stop flag once a second.
         var exitCode: Int32 = -1
@@ -146,12 +163,16 @@ public enum Helper {
             }
         }
         try? await container.stop()
+        if freeBefore >= 0 {
+            // Approximate: other writers on the volume show up here too.
+            metrics["bytes_written_approx"] = String(freeBefore - Rootfs.freeBytes(o.store))
+        }
         try? manager.delete(o.attempt)
         if stopped {
-            writeStatus(o.stateDir, ["phase": "stopped", "attempt": o.attempt])
+            writeStatus(o.stateDir, ["phase": "stopped", "attempt": o.attempt].merging(metrics) { a, _ in a })
             return 143
         }
-        writeStatus(o.stateDir, ["phase": "exited", "attempt": o.attempt, "exit_code": String(exitCode)])
+        writeStatus(o.stateDir, ["phase": "exited", "attempt": o.attempt, "exit_code": String(exitCode)].merging(metrics) { a, _ in a })
         return exitCode == 0 ? 0 : 1
     }
 }
