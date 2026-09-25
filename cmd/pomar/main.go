@@ -16,6 +16,7 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/base"
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/zeroemployeeorg/pomar/internal/debs"
 	"github.com/zeroemployeeorg/pomar/internal/goproxy"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
@@ -35,7 +36,7 @@ const usage = `usage:
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
-                [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G]
+                [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git]] -- CMD...
@@ -214,9 +215,10 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
 	hostBin := fs.String("host-bin", "", "signed pomar-host binary")
 	shimBin := fs.String("shim-bin", "", "static linux/arm64 pomar-shim; enables the Go module proxy")
-	vcpu := fs.Int("class-vcpu", capacity.CI.VCPU, "the CI class's vCPU cap (placeholder until measured)")
-	memMiB := fs.Int64("class-memory-mib", capacity.CI.MemoryBytes>>20, "the CI class's memory cap in MiB (placeholder until measured)")
-	diskGiB := fs.Int64("class-disk-peak-gib", capacity.CI.DiskPeakBytes>>30, "the CI class's disk peak in GiB (placeholder until measured)")
+	vcpu := fs.Int("class-vcpu", capacity.CI.VCPU, "the CI class's vCPU cap")
+	memMiB := fs.Int64("class-memory-mib", capacity.CI.MemoryBytes>>20, "the CI class's memory cap in MiB")
+	diskGiB := fs.Int64("class-disk-peak-gib", capacity.CI.DiskPeakBytes>>30, "the CI class's disk peak in GiB")
+	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -276,12 +278,11 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		GoProxy: proxy,
 		// Caps can be raised to measure a job; the class stays unmeasured
 		// until a SOW states its figures.
-		Class: capacity.Class{Name: capacity.CI.Name, VCPU: *vcpu, MemoryBytes: *memMiB << 20,
-			DiskPeakBytes: *diskGiB << 30, Measured: false},
+		Class:   ciClass(*vcpu, *memMiB, *diskGiB, *concurrency),
 		ShimBin: *shimBin,
 		Base: func() (string, error) {
 			// Clone the pinned image's base when one has been built.
-			bs := &base.Bases{Venue: v, HostBin: bin}
+			bs := &base.Bases{Venue: v, HostBin: bin, PackageSet: debs.SetHash(smoke.CIPackages)}
 			if !bs.Exists(smoke.ImageArm64) {
 				return "", nil
 			}
@@ -289,7 +290,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		},
 		// The kernel and the pinned image's base are never evicted.
 		Pinned: func() []string {
-			p, _ := (&base.Bases{Venue: v}).Path(smoke.ImageArm64)
+			p, _ := (&base.Bases{Venue: v, PackageSet: debs.SetHash(smoke.CIPackages)}).Path(smoke.ImageArm64)
 			return []string{e.KernelPath(), p}
 		},
 		UID: os.Getuid(),
@@ -453,7 +454,14 @@ func baseBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	bs := &base.Bases{Venue: v, HostBin: *hostBin}
+	// The CI class's pinned packages, fetched once, checked, and unpacked into
+	// the base after the image; guests gain no network path for them.
+	layers, err := (&debs.Cache{Venue: v}).DataArchives(context.Background(), smoke.CIPackages)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	bs := &base.Bases{Venue: v, HostBin: *hostBin, PackageSet: debs.SetHash(smoke.CIPackages), Layers: layers}
 	err = bs.Build(context.Background(), filepath.Join(v.Root(), "store"),
 		smoke.ImageRepo+"@"+smoke.ImageDigest, smoke.ImageDigest, smoke.ImageArm64, smoke.BaseSizeBytes)
 	if err != nil {
@@ -500,4 +508,16 @@ func volumeCmd(step string, args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintf(stdout, "volume %s: removed\n", *id)
 	return 0
+}
+
+// ciClass is the CI class with the manager's settings. The class stays
+// measured only at the figures the elders set; any other caps are a
+// measurement run's, and no capacity claim is made from them.
+func ciClass(vcpu int, memMiB, diskGiB int64, concurrency int) capacity.Class {
+	c := capacity.CI
+	c.Concurrency = concurrency
+	if vcpu != c.VCPU || memMiB<<20 != c.MemoryBytes || diskGiB<<30 != c.DiskPeakBytes {
+		c.VCPU, c.MemoryBytes, c.DiskPeakBytes, c.Measured = vcpu, memMiB<<20, diskGiB<<30, false
+	}
+	return c
 }

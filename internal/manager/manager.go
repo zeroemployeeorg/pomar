@@ -606,8 +606,9 @@ func (m *Manager) poll() {
 	m.noteSeen(live, ps)
 	m.mu.Lock()
 	m.linkVMs(ps)
-	m.samplePeaks(ps, time.Now())
-	m.t.save()
+	if m.samplePeaks(ps, time.Now()) {
+		m.t.save()
+	}
 	m.mu.Unlock()
 	m.checkDiskFull(live)
 	for _, e := range live {

@@ -27,7 +27,8 @@ let usage = """
                              --init REF --init-digest D --image REF --image-digest D [--base ROOTFS] [--source FILE [--source-kind tar|bundle --source-sha SHA]] \\
                              [--goproxy-socket SOCK --shim BIN] \\
                              [--cpus N] [--memory-bytes N] -- CMD...
-           pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N
+           pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N \\
+                                 [--extra-layers PATH,PATH...]
     """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -94,12 +95,15 @@ case "helper":
     exit(code)
 case "build-base":
     guard let f = flags(args.dropFirst()), let s = f["store"], let mr = f["image"], let md = f["image-digest"],
-        let o = f["out"], let sz = f["size-bytes"].flatMap({ UInt64($0) })
+        let o = f["out"], let sz = f["size-bytes"].flatMap({ UInt64($0) }),
+        let extra = Rootfs.extraLayers(f["extra-layers"])
     else {
         fail(usage, code: 2)
     }
     do {
-        let r = try await Rootfs.buildBase(store: s, imageRef: mr, imageDigest: md, out: o, sizeInBytes: sz)
+        let r = try await Rootfs.buildBase(
+            store: s, imageRef: mr, imageDigest: md, out: o, sizeInBytes: sz, extraLayers: extra)
+        print("extra_layers=\(extra.count)")
         print("arm64_manifest=\(r.arm64Manifest)")
         print("unpack_ms=\(r.ms)")
     } catch {

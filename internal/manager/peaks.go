@@ -136,8 +136,9 @@ func (m *Manager) linkVMs(ps []proc.Process) {
 
 // samplePeaks updates live entries' peaks: memory and CPU from their linked
 // VM service (after re-checking it is still the same process), disk from
-// the data root's free space. m.mu must be held.
-func (m *Manager) samplePeaks(ps []proc.Process, now time.Time) {
+// the data root's free space. It reports whether a VM service was read,
+// the moment worth saving; disk figures ride along. m.mu must be held.
+func (m *Manager) samplePeaks(ps []proc.Process, now time.Time) (sampled bool) {
 	sp, spErr := m.cfg.Space()
 	for _, e := range m.t.entries {
 		if e.Terminal() {
@@ -161,6 +162,7 @@ func (m *Manager) samplePeaks(ps []proc.Process, now time.Time) {
 			e.Peaks.MemPeakBytes = b
 		}
 		e.Peaks.Samples++
+		sampled = true
 		cpu := p.CPU.Seconds()
 		if !e.lastSample.IsZero() {
 			if dt := now.Sub(e.lastSample).Seconds(); dt > 0 {
@@ -172,4 +174,5 @@ func (m *Manager) samplePeaks(ps []proc.Process, now time.Time) {
 		e.Peaks.CPUSeconds = cpu
 		e.lastSample = now
 	}
+	return sampled
 }
