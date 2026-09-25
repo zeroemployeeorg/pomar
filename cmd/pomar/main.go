@@ -270,9 +270,10 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		Venue:   v,
 		HostBin: bin,
 		Guest: manager.Guest{
-			Kernel:  e.KernelPath(),
+			Kernel: e.KernelPath(), KernelSHA256: *kernelSum,
 			InitRef: smoke.InitRepo + "@" + smoke.InitDigest, InitDigest: smoke.InitDigest,
 			ImageRef: smoke.ImageRepo + "@" + smoke.ImageDigest, ImageDigest: smoke.ImageDigest,
+			ImageArm64: smoke.ImageArm64, PackageSet: debs.SetHash(smoke.CIPackages),
 		},
 		Procs:   proc.PS{},
 		Mirrors: &mirror.Mirrors{Venue: v},
