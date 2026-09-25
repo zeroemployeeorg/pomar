@@ -95,7 +95,7 @@ func TestStartAdmission(t *testing.T) {
 			&Entry{Attempt: "done", State: StateExited, Class: capacity.CI}, ""},
 		{"no memory slot", capacity.Host{CPUSlots: 4, MemoryBytes: capacity.GiB / 2}, roomy, nil, capacity.ReasonMemory},
 		{"disk below peak plus headroom", capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB},
-			venue.Space{Avail: 13 * capacity.GiB}, nil, capacity.ReasonDisk},
+			venue.Space{Avail: 12 * capacity.GiB}, nil, capacity.ReasonDisk}, // one claim is 3 + 10 GiB
 		{"fill floor on a shared disk", capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB},
 			venue.Space{Used: 80 * capacity.GiB, Avail: 20 * capacity.GiB, Shared: true}, nil, capacity.ReasonFloor},
 		{"no floor on a dedicated volume", capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB},
@@ -132,9 +132,9 @@ func TestCapacityReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// CI placeholder: 7 by CPU; 40 by memory; 64 by disk; the floor allows
+	// CI (r12): 7 by CPU; 17 by memory (2 GiB + 300 MiB); 69 by disk; the floor allows
 	// 750 GiB more, 53 claims of 14 GiB.
-	if c.FitsIdle != 7 || c.Class.Measured || c.Live != 0 {
+	if c.FitsIdle != 7 || !c.Class.Measured || c.Live != 0 {
 		t.Fatalf("Capacity = %+v", c)
 	}
 }

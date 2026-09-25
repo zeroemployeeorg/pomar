@@ -81,11 +81,36 @@ func TestFitsIsTheMinimumOfTheThree(t *testing.T) {
 	}
 }
 
-func TestCIIsAPlaceholder(t *testing.T) {
-	if CI.Measured {
-		t.Fatal("CI class marked measured before its peaks are measured")
+func TestCIIsTheRulingsClass(t *testing.T) {
+	if CI.VCPU != 2 || CI.MemoryBytes != 2*GiB || CI.DiskPeakBytes != 3*GiB || CI.VMOverheadBytes != 300<<20 || !CI.Measured {
+		t.Fatalf("CI = %+v, want r12's 2 vCPU, 2 GiB + 300 MiB, 3 GiB", CI)
 	}
-	if CI.VCPU != 2 || CI.MemoryBytes != GiB {
-		t.Fatalf("CI placeholder = %+v, want 2 vCPU and 1 GiB", CI)
+	if CI.Concurrency != 0 {
+		t.Fatal("a per-host concurrency limit is in the code")
+	}
+	if CI.MemoryClaim() != 2*GiB+300<<20 {
+		t.Fatalf("memory claim %d", CI.MemoryClaim())
+	}
+}
+
+func TestClassConcurrencyLimit(t *testing.T) {
+	c := CI
+	c.Concurrency = 2
+	h := Host{CPUSlots: 64, MemoryBytes: 256 * GiB}
+	d := Disk{Avail: 1000 * GiB}
+	if err := Admit(c, []Class{c}, h, d); err != nil {
+		t.Fatalf("the second attempt was refused: %v", err)
+	}
+	if got := reason(Admit(c, []Class{c, c}, h, d)); got != ReasonClassConcurrency {
+		t.Fatalf("the third attempt: %q, want %s", got, ReasonClassConcurrency)
+	}
+	other := Class{Name: "other", VCPU: 1, MemoryBytes: GiB}
+	if err := Admit(c, []Class{c, other, other}, h, d); err != nil {
+		t.Fatalf("other classes counted against the limit: %v", err)
+	}
+	// Slots still bind below the limit.
+	c.Concurrency = 10
+	if got := reason(Admit(c, []Class{c, c}, Host{CPUSlots: 4, MemoryBytes: 256 * GiB}, d)); got != ReasonCPU {
+		t.Fatalf("slots: %q", got)
 	}
 }

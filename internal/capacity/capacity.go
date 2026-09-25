@@ -35,21 +35,37 @@ const ReasonHostDiskFull = "host-disk-full"
 // Class is a job class: what each of its attempts is given and claims.
 type Class struct {
 	Name string `json:"name"`
-	// VCPU and MemoryBytes are the guest's caps; admission counts them.
+	// VCPU and MemoryBytes are the guest's caps.
 	VCPU        int   `json:"vcpu"`
 	MemoryBytes int64 `json:"memory_bytes"`
+	// VMOverheadBytes is what the host pays per guest above its memory cap
+	// (the VM service's footprint minus the cap). Admission counts the cap
+	// plus this.
+	VMOverheadBytes int64 `json:"vm_overhead_bytes"`
 	// DiskPeakBytes is the most one attempt writes to the data root.
 	DiskPeakBytes int64 `json:"disk_peak_bytes"`
+	// Concurrency is the class's measured concurrency limit on this host:
+	// the largest N that ran the class's real gate clean twice (elders'
+	// ruling r12 §2). Zero means not measured here: only the slots bound it.
+	// It is per host, so it is set on the host, never in the code.
+	Concurrency int `json:"concurrency"`
 	// Measured is false while the figures are placeholders. No capacity
 	// claim is made from a class that is not measured.
 	Measured bool `json:"measured"`
 }
 
-// CI is the CI job class. Its figures are placeholders until the jobs'
-// peaks are measured: 2 vCPU, 1 GiB, and a provisional 4 GiB disk peak (the
-// 2 GiB rootfs clone rewritten in full, plus the source snapshot, logs and
-// slack).
-var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: GiB, DiskPeakBytes: 4 * GiB, Measured: false}
+// VMOverhead is the per-guest memory the host pays above the cap: measured
+// at 175 MB for 1 and 2 GiB guests; the elders set 0.3 GB (r12 §2).
+const VMOverhead = 300 << 20
+
+// CI is the CI job class as the elders set it from the measurements
+// (ruling r12 §2): 2 vCPU, 2 GiB plus the VM overhead, a 3 GiB disk peak.
+// The 1-vCPU shape was refused for zero-employee's gate: single-vCPU guests
+// failed its timing tests under load.
+var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true}
+
+// MemoryClaim returns the memory a class's attempt claims at admission.
+func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
 
 // Claim returns the disk a class's attempt claims at admission.
 func (c Class) Claim() int64 { return c.DiskPeakBytes + HeadroomBytes }
@@ -121,6 +137,9 @@ const (
 	ReasonMemory = "memory-slots"
 	ReasonDisk   = "disk-peak"
 	ReasonFloor  = "fill-floor"
+	// ReasonClassConcurrency: the class's measured concurrency limit on this
+	// host is reached (r12 §2).
+	ReasonClassConcurrency = "class-concurrency"
 )
 
 // Refusal says which resource refused a claim.
@@ -140,11 +159,18 @@ func Admit(c Class, live []Class, h Host, d Disk) error {
 	if err := c.validate(); err != nil {
 		return err
 	}
-	cpu, mem, disk := c.VCPU, c.MemoryBytes, c.Claim()
+	cpu, mem, disk := c.VCPU, c.MemoryClaim(), c.Claim()
+	same := 1
 	for _, l := range live {
 		cpu += l.VCPU
-		mem += l.MemoryBytes
+		mem += l.MemoryClaim()
+		if l.Name == c.Name {
+			same++
+		}
 		disk += l.Claim()
+	}
+	if c.Concurrency > 0 && same > c.Concurrency {
+		return &Refusal{ReasonClassConcurrency, fmt.Sprintf("%d attempts of class %s with this one, measured limit %d", same, c.Name, c.Concurrency)}
 	}
 	if cpu > h.CPUSlots {
 		return &Refusal{ReasonCPU, fmt.Sprintf("%d vCPU claimed with this attempt, %d slots", cpu, h.CPUSlots)}

@@ -113,7 +113,7 @@ func TestStalledAttemptOnAFullHostIsStopped(t *testing.T) {
 	// The lister shows the helper only after Open: at Open it would be an
 	// orphan, and reconciliation would signal it.
 	procs := &seqProcs{lists: [][]proc.Process{nil}}
-	m := openFull(t, procs, 100<<20, 20*time.Millisecond)
+	m := openFull(t, procs, 100<<20, 300*time.Millisecond)
 	procs.lists, procs.n = [][]proc.Process{{{PID: pid, UID: me, Start: "T1", Args: helperArgs("a")}}}, 0
 	m.t.entries["a"] = &Entry{Attempt: "a", PID: pid, Start: "T1", State: StateRunning}
 	writeStatus(t, m, "a", `{"phase":"running"}`)
@@ -124,7 +124,7 @@ func TestStalledAttemptOnAFullHostIsStopped(t *testing.T) {
 	if e := entry(m, "a"); e.State != StateRunning || e.HostCondition != capacity.ReasonHostDiskFull {
 		t.Fatalf("at first sighting: %+v, want running and marked", e)
 	}
-	time.Sleep(40 * time.Millisecond)
+	time.Sleep(400 * time.Millisecond)
 	m.poll()
 	if e := entry(m, "a"); e.State != StateStopping {
 		t.Fatalf("after the stall: %+v, want stopping", e)
