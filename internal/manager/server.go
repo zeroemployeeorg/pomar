@@ -99,6 +99,9 @@ func (m *Manager) mux() *http.ServeMux {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
+		reply(w, http.StatusOK, m.VMOrphans())
+	})
 	mux.HandleFunc("GET /v1/reconcile", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.Report())
 	})

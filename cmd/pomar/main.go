@@ -45,7 +45,8 @@ const usage = `usage:
                                     unpack the pinned image once into a read-only base rootfs
   pomar mirror sync [-root DIR] -name NAME -url URL
   pomar mirror resolve [-root DIR] -name NAME -ref REF
-  pomar attempt list|reconcile [-root DIR]
+  pomar attempt list|reconcile|vm-orphans [-root DIR]
+                                    vm-orphans: VM services no live attempt accounts for (reported, never signalled)
   pomar attempt stop|rm [-root DIR] -id ID
   pomar attempt capacity [-root DIR] the job class, slots, space and how many fit when idle
   pomar attempt caches|evict [-root DIR]
@@ -366,6 +367,10 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "vm-orphans":
+		var o []manager.VMOrphan
+		err = c.Do("GET", "/v1/vm-orphans", nil, &o)
+		out = o
 	case "capacity":
 		var cp manager.Capacity
 		err = c.Do("GET", "/v1/capacity", nil, &cp)
