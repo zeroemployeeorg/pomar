@@ -1,6 +1,9 @@
 import Containerization
+import ContainerizationArchive
+import ContainerizationEXT4
 import ContainerizationOCI
 import Foundation
+import SystemPackage
 
 /// Base root filesystems and per-attempt APFS clones.
 ///
@@ -12,7 +15,8 @@ import Foundation
 public enum Rootfs {
     /// Unpacks `imageRef` from the store at `store` into an ext4 file at `out`.
     public static func buildBase(
-        store: String, imageRef: String, imageDigest: String, out: String, sizeInBytes: UInt64
+        store: String, imageRef: String, imageDigest: String, out: String, sizeInBytes: UInt64,
+        extraLayers: [String] = []
     ) async throws -> (arm64Manifest: String, ms: Int) {
         let t0 = Date()
         let images = try ImageStore(path: URL(fileURLWithPath: store))
@@ -21,9 +25,47 @@ public enum Rootfs {
             throw CocoaError(.coderInvalidValue, userInfo: [NSDebugDescriptionErrorKey: "image digest \(image.digest) != pinned \(imageDigest)"])
         }
         let platform = Platform(arch: "arm64", os: "linux", variant: "v8")
-        let manifest = try await image.descriptor(for: platform)
-        _ = try await EXT4Unpacker(capacityInBytes: sizeInBytes).unpack(image, for: platform, at: URL(fileURLWithPath: out))
-        return (manifest.digest, Int(Date().timeIntervalSince(t0) * 1000))
+        let descriptor = try await image.descriptor(for: platform)
+        if extraLayers.isEmpty {
+            _ = try await EXT4Unpacker(capacityInBytes: sizeInBytes).unpack(image, for: platform, at: URL(fileURLWithPath: out))
+            return (descriptor.digest, Int(Date().timeIntervalSince(t0) * 1000))
+        }
+        // With extra layers (a class's pinned packages, as xz-compressed
+        // data archives), the image's layers and then the extra ones go onto
+        // one filesystem, in order, the way the unpacker lays down a layer.
+        let manifest = try await image.manifest(for: platform)
+        let fs = try EXT4.Formatter(FilePath(out), minDiskSize: sizeInBytes)
+        defer { try? fs.close() }
+        for layer in manifest.layers {
+            let content = try await image.getContent(digest: layer.digest)
+            try await fs.unpack(source: content.path, format: .paxRestricted, compression: try layerFilter(layer.mediaType))
+        }
+        for path in extraLayers {
+            try await fs.unpack(source: URL(fileURLWithPath: path), format: .paxRestricted, compression: .xz)
+        }
+        return (descriptor.digest, Int(Date().timeIntervalSince(t0) * 1000))
+    }
+
+    /// The compression of an image layer, by media type.
+    static func layerFilter(_ mediaType: String) throws -> ContainerizationArchive.Filter {
+        switch mediaType {
+        case MediaTypes.imageLayer, MediaTypes.dockerImageLayer:
+            return .none
+        case MediaTypes.imageLayerGzip, MediaTypes.dockerImageLayerGzip:
+            return .gzip
+        case MediaTypes.imageLayerZstd, MediaTypes.dockerImageLayerZstd:
+            return .zstd
+        default:
+            throw CocoaError(.coderInvalidValue, userInfo: [NSDebugDescriptionErrorKey: "unsupported layer media type \(mediaType)"])
+        }
+    }
+
+    /// Parses --extra-layers: comma-separated absolute paths, or nil.
+    public static func extraLayers(_ flag: String?) -> [String]? {
+        guard let flag else { return [] }
+        let paths = flag.split(separator: ",").map(String.init)
+        guard !paths.isEmpty, paths.allSatisfy({ $0.hasPrefix("/") }) else { return nil }
+        return paths
     }
 
     /// Clones `base` to `dst` with APFS clonefile. `dst` must not exist.

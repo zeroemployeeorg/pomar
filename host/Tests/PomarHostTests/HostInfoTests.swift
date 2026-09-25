@@ -85,3 +85,10 @@ import Testing
     let env = Helper.jobEnvironment(["PATH=/usr/local/go/bin:/usr/bin", "HOME=/root", "GOPROXY=http://127.0.0.1:7070"])
     #expect(env == ["PATH=/usr/local/go/bin:/usr/bin", "GOPROXY=http://127.0.0.1:7070", "HOME=/pomar/home"])
 }
+
+@Test func extraLayersParsing() {
+    #expect(Rootfs.extraLayers(nil) == [])
+    #expect(Rootfs.extraLayers("/a/x.tar.xz,/b/y.tar.xz") == ["/a/x.tar.xz", "/b/y.tar.xz"])
+    #expect(Rootfs.extraLayers("relative.tar.xz") == nil)
+    #expect(Rootfs.extraLayers("") == nil)
+}

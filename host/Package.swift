@@ -20,6 +20,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
                 .product(name: "ContainerizationArchive", package: "containerization"),
+                .product(name: "ContainerizationEXT4", package: "containerization"),
             ]
         ),
         .executableTarget(

@@ -26,10 +26,10 @@ func fakeBase(t *testing.T, content string) (*Bases, *string) {
 	boot := "1000"
 	b := &Bases{Venue: v, BootID: func() (string, error) { return boot, nil }}
 	h, _ := hexOf(digest)
-	if err := v.Intent(venue.KindImage, venue.ClassCache, objID(h), filepath.Join(Dir, h), ""); err != nil {
+	if err := v.Intent(venue.KindImage, venue.ClassCache, b.objID(h), filepath.Join(Dir, b.key(h)), ""); err != nil {
 		t.Fatal(err)
 	}
-	dir := filepath.Join(v.Root(), Dir, h)
+	dir := filepath.Join(v.Root(), Dir, b.key(h))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func fakeBase(t *testing.T, content string) (*Bases, *string) {
 	if err := os.WriteFile(filepath.Join(dir, "rootfs.sha256"), []byte(sum+"\n"), 0o400); err != nil {
 		t.Fatal(err)
 	}
-	if err := v.Created(venue.KindImage, objID(h)); err != nil {
+	if err := v.Created(venue.KindImage, b.objID(h)); err != nil {
 		t.Fatal(err)
 	}
 	return b, &boot
@@ -142,5 +142,30 @@ func TestBuildReplacesABaseOfAnotherCapacity(t *testing.T) {
 	}
 	if !strings.Contains(string(led), `"note":"replaced: capacity 10 bytes, now 1048576"`) {
 		t.Fatalf("no noted replacement in the ledger:\n%s", led)
+	}
+}
+
+// A package set is part of a base's key: the same image with and without
+// the set, or with another set, are different bases.
+func TestPackageSetKeysTheBase(t *testing.T) {
+	v, err := venue.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain := &Bases{Venue: v}
+	withA := &Bases{Venue: v, PackageSet: strings.Repeat("a", 64)}
+	withB := &Bases{Venue: v, PackageSet: strings.Repeat("b", 64)}
+	p0, _ := plain.Path(digest)
+	pa, _ := withA.Path(digest)
+	pb, _ := withB.Path(digest)
+	if p0 == pa || pa == pb {
+		t.Fatalf("paths do not differ: %s %s %s", p0, pa, pb)
+	}
+	if !strings.Contains(pa, "4220c5d84f68"+"5eb34a728d389bab47674b46f433b5218ae9a75a5fbd5e0be724-aaaaaaaaaaaaaaaa") {
+		t.Fatalf("path %s lacks the set's hash", pa)
+	}
+	h, _ := hexOf(digest)
+	if withA.objID(h) != "base-4220c5d84f68-aaaaaaaaaaaa" || plain.objID(h) != "base-4220c5d84f68" {
+		t.Fatalf("ids %s %s", withA.objID(h), plain.objID(h))
 	}
 }

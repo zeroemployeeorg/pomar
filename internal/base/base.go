@@ -32,6 +32,13 @@ type Bases struct {
 	// BootID returns an identifier of the current machine boot; the default
 	// reads kern.boottime. Tests replace it.
 	BootID func() (string, error)
+	// PackageSet is the hash of the pinned packages installed into the base
+	// (debs.SetHash), or "" for the image alone. It is part of the base's
+	// key.
+	PackageSet string
+	// Layers are the packages' data archives, unpacked after the image's
+	// layers when the base is built.
+	Layers []string
 }
 
 func hexOf(digest string) (string, error) {
@@ -42,7 +49,21 @@ func hexOf(digest string) (string, error) {
 	return m[1], nil
 }
 
-func objID(h string) string { return "base-" + h[:12] }
+// key names a base's directory: the image's arm64 manifest hash, and with
+// packages, the package set's hash too, so a changed set is a new base.
+func (b *Bases) key(h string) string {
+	if b.PackageSet == "" {
+		return h
+	}
+	return h + "-" + b.PackageSet[:16]
+}
+
+func (b *Bases) objID(h string) string {
+	if b.PackageSet == "" {
+		return "base-" + h[:12]
+	}
+	return "base-" + h[:12] + "-" + b.PackageSet[:12]
+}
 
 // Path returns the root filesystem path of the base for digest.
 func (b *Bases) Path(digest string) (string, error) {
@@ -50,13 +71,13 @@ func (b *Bases) Path(digest string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(b.Venue.Root(), Dir, h, "rootfs.ext4"), nil
+	return filepath.Join(b.Venue.Root(), Dir, b.key(h), "rootfs.ext4"), nil
 }
 
 // Exists reports whether a base for digest is ledgered and open.
 func (b *Bases) Exists(digest string) bool {
 	h, err := hexOf(digest)
-	return err == nil && b.Venue.IsOpen(venue.KindImage, objID(h))
+	return err == nil && b.Venue.IsOpen(venue.KindImage, b.objID(h))
 }
 
 // Build unpacks the image into a new base, records its sha256, and makes it
@@ -82,20 +103,24 @@ func (b *Bases) Build(ctx context.Context, store, imageRef, imageDigest, arm64Di
 		if err == nil {
 			was = fmt.Sprint(fi.Size())
 		}
-		if err := v.TeardownNote(venue.KindImage, objID(h), fmt.Sprintf("replaced: capacity %s bytes, now %d", was, sizeBytes)); err != nil {
+		if err := v.TeardownNote(venue.KindImage, b.objID(h), fmt.Sprintf("replaced: capacity %s bytes, now %d", was, sizeBytes)); err != nil {
 			return err
 		}
 	}
 	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
 		return err
 	}
-	rel := filepath.Join(Dir, h)
-	if err := v.Intent(venue.KindImage, venue.ClassCache, objID(h), rel, "base rootfs for "+arm64Digest); err != nil {
+	rel := filepath.Join(Dir, b.key(h))
+	note := "base rootfs for " + arm64Digest
+	if b.PackageSet != "" {
+		note += " with package set " + b.PackageSet
+	}
+	if err := v.Intent(venue.KindImage, venue.ClassCache, b.objID(h), rel, note); err != nil {
 		return err
 	}
 	fail := func(err error) error {
-		v.Failed(venue.KindImage, objID(h), err.Error())
-		v.Teardown(venue.KindImage, objID(h))
+		v.Failed(venue.KindImage, b.objID(h), err.Error())
+		v.Teardown(venue.KindImage, b.objID(h))
 		return err
 	}
 	dir := filepath.Join(v.Root(), rel)
@@ -106,6 +131,14 @@ func (b *Bases) Build(ctx context.Context, store, imageRef, imageDigest, arm64Di
 	cmd := exec.CommandContext(ctx, b.HostBin, "build-base", "--store", store,
 		"--image", imageRef, "--image-digest", imageDigest, "--out", rootfs,
 		"--size-bytes", fmt.Sprint(sizeBytes))
+	if len(b.Layers) > 0 {
+		for _, l := range b.Layers {
+			if strings.Contains(l, ",") {
+				return fail(fmt.Errorf("base: layer path %q contains a comma", l))
+			}
+		}
+		cmd.Args = append(cmd.Args, "--extra-layers", strings.Join(b.Layers, ","))
+	}
 	cmd.Env = append(os.Environ(), "TMPDIR="+filepath.Join(v.Root(), "tmp")+string(filepath.Separator))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -124,7 +157,7 @@ func (b *Bases) Build(ctx context.Context, store, imageRef, imageDigest, arm64Di
 	if err := os.Chmod(rootfs, 0o444); err != nil {
 		return fail(err)
 	}
-	if err := v.Created(venue.KindImage, objID(h)); err != nil {
+	if err := v.Created(venue.KindImage, b.objID(h)); err != nil {
 		return err
 	}
 	return b.markVerified(dir)
@@ -144,7 +177,7 @@ func (b *Bases) Verify(arm64Digest string) (string, error) {
 	if !b.Exists(arm64Digest) {
 		return "", fmt.Errorf("base: no base for %s", arm64Digest)
 	}
-	dir := filepath.Join(b.Venue.Root(), Dir, h)
+	dir := filepath.Join(b.Venue.Root(), Dir, b.key(h))
 	rootfs := filepath.Join(dir, "rootfs.ext4")
 	fi, err := os.Stat(rootfs)
 	if err != nil {
