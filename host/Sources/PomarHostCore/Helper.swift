@@ -22,6 +22,10 @@ public enum Helper {
         /// The attempt's pinned source snapshot (a tar) on the host; nil runs
         /// the command with no source.
         public var source: String?
+        /// The host socket of this attempt's module proxy, and the shim
+        /// binary that serves it in the guest; both or neither.
+        public var proxySocket: String?
+        public var shim: String?
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
 
@@ -29,10 +33,13 @@ public enum Helper {
             attempt: String, stateDir: String, store: String, kernel: String,
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
             command: [String], base: String? = nil, source: String? = nil,
+            proxySocket: String? = nil, shim: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
             self.source = source
+            self.proxySocket = proxySocket
+            self.shim = shim
             self.cpus = cpus
             self.memoryBytes = memoryBytes
             self.attempt = attempt
@@ -83,23 +90,56 @@ public enum Helper {
     }
 
     /// The guest-side step that unpacks the copied archive and releases the
-    /// shim.
-    public static let extractCommand = [
-        "/bin/sh", "-c",
-        "mkdir -p \(workDir) && tar -xf \(archiveInGuest) -C \(workDir) && rm -f \(archiveInGuest) && touch \(readyMarker)",
-    ]
+    /// shim. With the module proxy, it first waits (up to 10 s) for the
+    /// proxy shim to be listening, so the command never starts without it.
+    public static func extractCommand(waitForProxy: Bool = false) -> [String] {
+        let wait =
+            waitForProxy
+            ? "n=0; until [ -e \(proxyReady) ]; do n=$((n+1)); [ $n -gt 200 ] && { echo 'pomar: proxy shim not ready' >&2; exit 97; }; sleep 0.05; done; "
+            : ""
+        return [
+            "/bin/sh", "-c",
+            wait + "mkdir -p \(workDir) && tar -xf \(archiveInGuest) -C \(workDir) && rm -f \(archiveInGuest) && touch \(readyMarker)",
+        ]
+    }
+
+    /// The guest end of the module proxy: the host socket is relayed to
+    /// proxySocket, and the shim serves it on proxyListen.
+    public static let proxySocket = "/run/pomar/goproxy.sock"
+    public static let proxyListen = "127.0.0.1:7070"
+    static let shimInGuest = "/pomar/shim"
+    static let proxyReady = "/pomar/shim.ready"
+
+    /// The environment a command gets with the module proxy: GOPROXY only.
+    /// The checksum database stays at its default, reached through the
+    /// proxy; nothing that weakens checking is set.
+    public static let proxyEnvironment = ["GOPROXY=http://\(proxyListen)"]
+
+    /// Copies the shim into the guest and starts it. The returned process
+    /// runs until the guest stops.
+    static func startProxyShim(_ container: LinuxContainer, shim: String, output: Writer) async throws -> LinuxProcess {
+        try await container.copyIn(
+            from: URL(fileURLWithPath: shim), to: URL(fileURLWithPath: shimInGuest), mode: 0o755)
+        let p = try await container.exec("pomar-proxy-shim") { config in
+            config.arguments = [shimInGuest, "-listen", proxyListen, "-socket", proxySocket, "-ready", proxyReady]
+            config.stdout = output
+            config.stderr = output
+        }
+        try await p.start()
+        return p
+    }
 
     /// Copies the source archive into the running guest over vsock, unpacks
     /// it there, and releases the command. Returns the copy and unpack times
     /// in milliseconds.
-    static func copyIn(_ container: LinuxContainer, source: String, output: Writer) async throws -> (copy: Int, extract: Int) {
+    static func copyIn(_ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false) async throws -> (copy: Int, extract: Int) {
         let clock = ContinuousClock()
         let t0 = clock.now
         try await container.copyIn(
             from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: archiveInGuest), mode: 0o600)
         let t1 = clock.now
         let p = try await container.exec("pomar-extract") { config in
-            config.arguments = extractCommand
+            config.arguments = extractCommand(waitForProxy: waitForProxy)
             config.stdout = output
             config.stderr = output
         }
@@ -202,6 +242,14 @@ public enum Helper {
                 config.process.stdout = out
                 config.process.stderr = out
                 config.interfaces = []
+                if let sock = o.proxySocket {
+                    config.sockets = [
+                        UnixSocketConfiguration(
+                            source: URL(fileURLWithPath: sock), destination: URL(fileURLWithPath: Helper.proxySocket),
+                            direction: .into)
+                    ]
+                    config.process.environmentVariables += Helper.proxyEnvironment
+                }
             }
             if let base = o.base {
                 // The clone sits in the container's own directory, so
@@ -232,11 +280,20 @@ public enum Helper {
         }
         // With a source, the guest is up but its command waits in the shim
         // until the source is in place.
+        // The proxy shim, when there is one, lives until the guest stops.
+        var proxyShim: LinuxProcess?
+        defer { _ = proxyShim }
         if let src = o.source {
             do {
+                let log = try FileWriter(path: o.stateDir + "/output.log")
+                let withProxy = o.proxySocket != nil && o.shim != nil
+                if withProxy, let shim = o.shim {
+                    proxyShim = try await startProxyShim(container, shim: shim, output: log)
+                    metrics["goproxy"] = "http://" + proxyListen
+                }
                 let attrs = try FileManager.default.attributesOfItem(atPath: src)
                 metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
-                let t = try await copyIn(container, source: src, output: try FileWriter(path: o.stateDir + "/output.log"))
+                let t = try await copyIn(container, source: src, output: log, waitForProxy: withProxy)
                 metrics["copy_in_ms"] = String(t.copy)
                 metrics["extract_ms"] = String(t.extract)
             } catch {

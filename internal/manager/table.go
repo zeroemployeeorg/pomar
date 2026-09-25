@@ -45,11 +45,17 @@ type Entry struct {
 	// Class is the job class the attempt was admitted as; its caps are the
 	// guest's. An entry from before classes counts as capacity.CI.
 	Class capacity.Class `json:"class,omitzero"`
-	// DiskFull records that the data root's filesystem was seen full while
-	// the attempt was live.
+	// HostCondition names a condition of the host that compromised the
+	// attempt while it was live; capacity.ReasonHostDiskFull is the first.
+	// An attempt with one ends failed with it as its reason, whatever its
+	// exit code (elders' ruling r9 §2).
+	HostCondition string `json:"host_condition,omitempty"`
+	// DiskFull is read only from tables written before HostCondition.
 	DiskFull bool `json:"disk_full,omitempty"`
 	// Source is the commit the attempt was pinned to at admission.
 	Source *PinnedSource `json:"source,omitempty"`
+	// GoProxy records that the attempt was given the module proxy.
+	GoProxy bool `json:"goproxy,omitempty"`
 }
 
 // PinnedSource records the ref an attempt asked for and the commit it got.
@@ -95,6 +101,10 @@ func loadTable(path string) (*table, error) {
 		return nil, fmt.Errorf("manager: table: %w", err)
 	}
 	for _, e := range list {
+		if e.DiskFull && e.HostCondition == "" {
+			e.HostCondition = capacity.ReasonHostDiskFull
+		}
+		e.DiskFull = false
 		t.entries[e.Attempt] = e
 	}
 	return t, nil

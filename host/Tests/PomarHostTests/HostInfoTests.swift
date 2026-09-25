@@ -40,6 +40,21 @@ import Testing
 }
 
 @Test func extractReleasesTheShimOnlyAfterUnpacking() {
-    let script = Helper.extractCommand[2]
+    let script = Helper.extractCommand()[2]
     #expect(script.contains("tar -xf /pomar/source.tar -C /work && rm -f /pomar/source.tar && touch /.pomar-ready"))
+}
+
+@Test func extractWaitsForTheProxyShimWhenAsked() {
+    #expect(!Helper.extractCommand()[2].contains("shim.ready"))
+    let script = Helper.extractCommand(waitForProxy: true)[2]
+    #expect(script.hasPrefix("n=0; until [ -e /pomar/shim.ready ]"))
+    #expect(script.contains("exit 97"))
+    #expect(script.hasSuffix("touch /.pomar-ready"))
+}
+
+@Test func proxyEnvironmentSetsOnlyGOPROXY() {
+    #expect(Helper.proxyEnvironment == ["GOPROXY=http://127.0.0.1:7070"])
+    for weakening in ["GOSUMDB", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOFLAGS", "GOPRIVATE", "GONOPROXY"] {
+        #expect(!Helper.proxyEnvironment.contains { $0.hasPrefix(weakening + "=") })
+    }
 }

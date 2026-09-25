@@ -34,6 +34,9 @@ type Budget struct {
 	// Class is the class of object the budget covers. Terminal attempt
 	// records are attempt objects kept under a budget like a cache's.
 	Class venue.Class `json:"class"`
+	// KeepWhileLive keeps the budget's objects while any attempt is live:
+	// they serve live attempts (the module proxy's cache).
+	KeepWhileLive bool `json:"keep_while_live,omitempty"`
 }
 
 // Budgets are the data root's budgets. The figures are provisional, like the
@@ -44,6 +47,7 @@ var Budgets = []Budget{
 	{Name: "image-store", Prefix: "store", Bytes: 16 * GiB, Evict: true, Class: venue.ClassCache},
 	{Name: "mirrors", Prefix: "mirrors/", Bytes: 16 * GiB, Evict: true, Class: venue.ClassCache},
 	{Name: "downloads", Prefix: "downloads/", Bytes: 4 * GiB, Evict: true, Class: venue.ClassCache},
+	{Name: "goproxy", Prefix: "goproxy", Bytes: 8 * GiB, Evict: true, Class: venue.ClassCache, KeepWhileLive: true},
 	{Name: "attempt-records", Prefix: "attempts/", Bytes: 4 * GiB, Evict: true, Class: venue.ClassAttempt},
 	{Name: "manager", Prefix: "manager", Bytes: 1 * GiB, Evict: false, Class: venue.ClassCache},
 	{Name: "tmp", Prefix: "tmp", Bytes: 4 * GiB, Evict: false, Class: venue.ClassCache},
@@ -174,4 +178,14 @@ func Size(path string) (int64, error) {
 		return nil
 	})
 	return total, err
+}
+
+// BudgetFor returns the budget that covers o, if any.
+func BudgetFor(budgets []Budget, o venue.Object) (Budget, bool) {
+	for _, b := range budgets {
+		if b.covers(o) {
+			return b, true
+		}
+	}
+	return Budget{}, false
 }

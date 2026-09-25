@@ -37,6 +37,13 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 			}
 		}
 	}
+	anyLive := false
+	for _, e := range m.t.entries {
+		if !e.Terminal() {
+			anyLive = true
+			break
+		}
+	}
 	var items []cache.Item
 	var rep CacheReport
 	for _, o := range open {
@@ -65,6 +72,8 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 			it.Keep = "holds an open object"
 		case isPinned(o.Path, pinned):
 			it.Keep = "pinned by the running configuration"
+		case anyLive && keepWhileLive(m.cfg.Budgets, o):
+			it.Keep = "serves live attempts"
 		}
 		items = append(items, it)
 	}
@@ -89,6 +98,11 @@ func (m *Manager) cachesLocked(apply bool) (CacheReport, error) {
 		m.event("evicted", "", 0, ev.Object.ID+": "+ev.Note())
 	}
 	return rep, nil
+}
+
+func keepWhileLive(budgets []cache.Budget, o venue.Object) bool {
+	b, ok := cache.BudgetFor(budgets, o)
+	return ok && b.KeepWhileLive
 }
 
 func isPinned(objPath string, pinned []string) bool {

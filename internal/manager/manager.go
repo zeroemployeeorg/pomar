@@ -17,6 +17,7 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/cache"
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/zeroemployeeorg/pomar/internal/goproxy"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
 	"github.com/zeroemployeeorg/pomar/internal/sign"
@@ -60,6 +61,11 @@ type Config struct {
 	// Space reads the data root's filesystem at claim time; nil reads it
 	// from the venue.
 	Space func() (venue.Space, error)
+	// GoProxy is served to each attempt with a source on its own socket,
+	// and ShimBin (a static linux/arm64 pomar-shim) is copied into its guest
+	// to reach it; both or neither.
+	GoProxy *goproxy.Proxy
+	ShimBin string
 	// Budgets bound the caches; nil means cache.Budgets.
 	Budgets []cache.Budget
 	// Pinned returns absolute paths the running configuration boots from
@@ -87,6 +93,8 @@ type Manager struct {
 	done   chan struct{}
 	// seen is poll's own: when it first saw each live helper.
 	seen map[string]time.Time
+	// proxies are the live attempts' module proxy listeners.
+	proxies map[string]*proxyListener
 }
 
 // Open takes the manager lock, loads the table and reconciles it against the
@@ -149,12 +157,13 @@ func Open(cfg Config) (*Manager, error) {
 		lock.Close()
 		return nil, fmt.Errorf("manager: %w", err)
 	}
-	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}}
+	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}, proxies: map[string]*proxyListener{}}
 	m.event("manager-start", "", 0, "")
 	if err := m.reconcile(); err != nil {
 		m.Close()
 		return nil, err
 	}
+	m.reopenProxies()
 	m.evict()
 	go m.watch()
 	return m, nil
@@ -335,6 +344,7 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 			v.Failed(venue.KindVM, id, err.Error())
 			v.Teardown(venue.KindVM, id)
 		}
+		m.closeProxy(id)
 		v.Failed(venue.KindVolume, recID, err.Error())
 		v.Teardown(venue.KindVolume, recID)
 		m.event("start-refused", id, 0, err.Error())
@@ -373,6 +383,15 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		// before releasing the command; the guest never sees the mirror.
 		args = append(args, "--source", filepath.Join(rec, "source.tar"))
 	}
+	withProxy := src != nil && m.proxyEnabled()
+	if withProxy {
+		// Its own socket, relayed into its guest only; the shim serves it on
+		// the guest's loopback as GOPROXY.
+		if err := m.listenProxy(id); err != nil {
+			return abandon(err, true)
+		}
+		args = append(args, "--goproxy-socket", m.proxySocket(id), "--shim", m.cfg.ShimBin)
+	}
 	args = append(append(args, "--"), command...)
 	logf, err := os.OpenFile(filepath.Join(rec, "helper.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
@@ -398,10 +417,11 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		// Without a start time the entry could never be adopted safely. Stop
 		// the helper we just made.
 		syscall.Kill(pid, syscall.SIGTERM)
+		m.closeProxy(id)
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy}
 	if src != nil {
 		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha}
 	}
@@ -584,16 +604,21 @@ func (m *Manager) poll() {
 	}
 }
 
-// markDiskFull records that the host was full while attempt id was live.
-func (m *Manager) markDiskFull(id string) {
+// markHostCondition records that condition held on the host while attempt
+// id was live. The first condition recorded is kept.
+func (m *Manager) markHostCondition(id, condition string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if e := m.t.entries[id]; e != nil && !e.Terminal() && !e.DiskFull {
-		e.DiskFull = true
+	if e := m.t.entries[id]; e != nil && !e.Terminal() && e.HostCondition == "" {
+		e.HostCondition = condition
 		m.t.save()
-		m.event("host-disk-full", id, e.PID, "")
+		m.event(condition, id, e.PID, "")
 	}
 }
+
+// markDiskFull records the first host condition: the data root's filesystem
+// was full (under capacity.DiskFullBytes free) while the attempt was live.
+func (m *Manager) markDiskFull(id string) { m.markHostCondition(id, capacity.ReasonHostDiskFull) }
 
 // checkDiskFull samples the data root's free space for the live entries. On
 // a full host it marks them all, and stops any whose helper has made no
@@ -728,12 +753,12 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		m.mu.Unlock()
 		return
 	}
-	// A full host fails the attempt under one name, whether the guest saw
-	// an I/O error, paused or hung. Even an exit 0 is failed: on the bounded
-	// volume the guest's fsync got EIO and a command that went on exited 0,
-	// so a guest's own verdict is not trusted once its disk failed under it.
-	// The exit code is kept.
-	if e.DiskFull {
+	// A compromised host fails the attempt under the condition's name,
+	// whatever shape the failure took. Even an exit 0 is failed: on the
+	// bounded volume the guest's fsync got EIO and a command that went on
+	// exited 0, so a result produced while the host could not honour the
+	// guest is not a result. The exit code is kept.
+	if e.HostCondition != "" {
 		detail := string(st)
 		if code != nil {
 			detail += fmt.Sprintf(" %d", *code)
@@ -741,9 +766,10 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		if reason != "" {
 			detail += ": " + reason
 		}
-		st, reason = StateFailed, capacity.ReasonHostDiskFull+" ("+detail+")"
+		st, reason = StateFailed, e.HostCondition+" ("+detail+")"
 	}
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
+	m.closeProxy(id)
 	m.t.save()
 	m.mu.Unlock()
 	m.event("ended-"+string(st), id, e.PID, reason)
