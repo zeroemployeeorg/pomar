@@ -99,6 +99,9 @@ type Manager struct {
 	seen map[string]time.Time
 	// proxies are the live attempts' module proxy listeners.
 	proxies map[string]*proxyListener
+	// vmOrphans are the VM services no live attempt accounts for.
+	vmOrphans map[int]*VMOrphan
+	lastSweep time.Time
 }
 
 // Open takes the manager lock, loads the table and reconciles it against the
@@ -167,7 +170,7 @@ func Open(cfg Config) (*Manager, error) {
 		lock.Close()
 		return nil, fmt.Errorf("manager: %w", err)
 	}
-	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}, proxies: map[string]*proxyListener{}}
+	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}, proxies: map[string]*proxyListener{}, vmOrphans: map[int]*VMOrphan{}}
 	m.event("manager-start", "", 0, "")
 	if err := m.reconcile(); err != nil {
 		m.Close()
@@ -216,6 +219,7 @@ func (m *Manager) reconcile() error {
 	entries := m.t.list()
 	m.mu.Unlock()
 	findings := Reconcile(entries, ps, m.cfg.UID, m.cfg.HostBin)
+	defer m.orphanSweep(nil, true) // after the findings are applied
 	for _, f := range findings {
 		m.event("reconcile-"+string(f.Decision), f.Attempt, f.PID, f.Reason)
 		switch f.Decision {
@@ -597,6 +601,7 @@ func (m *Manager) poll() {
 	}
 	m.mu.Unlock()
 	if len(live) == 0 {
+		m.orphanSweep(nil, false)
 		return
 	}
 	ps, err := m.cfg.Procs.List()
@@ -604,6 +609,7 @@ func (m *Manager) poll() {
 		return // unknown: change nothing
 	}
 	m.noteSeen(live, ps)
+	m.orphanSweep(ps, false)
 	m.mu.Lock()
 	m.linkVMs(ps)
 	if m.samplePeaks(ps, time.Now()) {
