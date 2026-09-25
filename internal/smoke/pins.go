@@ -25,6 +25,8 @@ const (
 	// ImageArm64 keys the base root filesystem built from the image.
 	ImageArm64 = "sha256:4220c5d84f685eb34a728d389bab47674b46f433b5218ae9a75a5fbd5e0be724"
 	// BaseSizeBytes is the ext4 capacity of a base (and so of each clone).
-	// A placeholder until measured job peaks size it (plan PR A).
-	BaseSizeBytes = 2 << 30
+	// The ext4 image is sparse and each clone is copy-on-write, so the host
+	// pays only for what is written; the capacity bounds what one guest can
+	// write. 2 GiB was too small for a Go gate with -race (POMAR-SOW-03 §36).
+	BaseSizeBytes = 16 << 30
 )

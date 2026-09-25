@@ -56,6 +56,11 @@ type Entry struct {
 	Source *PinnedSource `json:"source,omitempty"`
 	// GoProxy records that the attempt was given the module proxy.
 	GoProxy bool `json:"goproxy,omitempty"`
+	// Peaks is what the attempt was measured to use.
+	Peaks Peaks `json:"peaks,omitzero"`
+
+	freeAtStart int64     // the data root's free space when first sampled
+	lastSample  time.Time // the last footprint reading
 }
 
 // PinnedSource records the ref an attempt asked for and the commit it got.
@@ -63,6 +68,7 @@ type PinnedSource struct {
 	Mirror string `json:"mirror"`
 	Ref    string `json:"ref"`
 	SHA    string `json:"sha"`
+	Git    bool   `json:"git,omitempty"`
 }
 
 // claimClass is the class the entry holds a claim as.

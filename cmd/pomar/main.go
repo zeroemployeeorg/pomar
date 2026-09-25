@@ -15,6 +15,7 @@ import (
 	"syscall"
 
 	"github.com/zeroemployeeorg/pomar/internal/base"
+	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/goproxy"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
@@ -34,9 +35,10 @@ const usage = `usage:
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
+                [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF] -- CMD...
+  pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git]] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
@@ -212,6 +214,9 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
 	hostBin := fs.String("host-bin", "", "signed pomar-host binary")
 	shimBin := fs.String("shim-bin", "", "static linux/arm64 pomar-shim; enables the Go module proxy")
+	vcpu := fs.Int("class-vcpu", capacity.CI.VCPU, "the CI class's vCPU cap (placeholder until measured)")
+	memMiB := fs.Int64("class-memory-mib", capacity.CI.MemoryBytes>>20, "the CI class's memory cap in MiB (placeholder until measured)")
+	diskGiB := fs.Int64("class-disk-peak-gib", capacity.CI.DiskPeakBytes>>30, "the CI class's disk peak in GiB (placeholder until measured)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -269,6 +274,10 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		Procs:   proc.PS{},
 		Mirrors: &mirror.Mirrors{Venue: v},
 		GoProxy: proxy,
+		// Caps can be raised to measure a job; the class stays unmeasured
+		// until a SOW states its figures.
+		Class: capacity.Class{Name: capacity.CI.Name, VCPU: *vcpu, MemoryBytes: *memMiB << 20,
+			DiskPeakBytes: *diskGiB << 30, Measured: false},
 		ShimBin: *shimBin,
 		Base: func() (string, error) {
 			// Clone the pinned image's base when one has been built.
@@ -313,6 +322,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	id := fs.String("id", "", "attempt id")
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
+	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -336,7 +346,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")
 				return 2
 			}
-			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref}
+			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, Git: *gitSrc}
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e

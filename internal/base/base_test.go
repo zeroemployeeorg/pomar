@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -114,5 +115,32 @@ func TestBuildFailureLeavesNothing(t *testing.T) {
 	}
 	if un, err := v.Unaccounted(); err != nil || len(un) != 0 {
 		t.Fatalf("unaccounted after failed build: %v, %v", un, err)
+	}
+}
+
+// A base of the requested capacity is kept; one of another capacity is torn
+// down through the ledger, with a note, before the new one is built. The
+// rebuild here fails (the host binary is false), which leaves nothing.
+func TestBuildReplacesABaseOfAnotherCapacity(t *testing.T) {
+	b, _ := fakeBase(t, "0123456789")
+	b.HostBin = "/usr/bin/false"
+	if err := b.Build(context.Background(), "store", "img", "sha256:x", digest, 10); err != nil {
+		t.Fatalf("a base of the same capacity was not kept: %v", err)
+	}
+	if !b.Exists(digest) {
+		t.Fatal("the same-capacity base is gone")
+	}
+	if err := b.Build(context.Background(), "store", "img", "sha256:x", digest, 1<<20); err == nil {
+		t.Fatal("the rebuild with a failing host binary succeeded")
+	}
+	if b.Exists(digest) {
+		t.Fatal("the old base survived a capacity change")
+	}
+	led, err := os.ReadFile(filepath.Join(b.Venue.Root(), "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(led), `"note":"replaced: capacity 10 bytes, now 1048576"`) {
+		t.Fatalf("no noted replacement in the ledger:\n%s", led)
 	}
 }

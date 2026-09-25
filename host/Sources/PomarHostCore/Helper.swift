@@ -25,6 +25,8 @@ public enum Helper {
         /// The host socket of this attempt's module proxy, and the shim
         /// binary that serves it in the guest; both or neither.
         public var proxySocket: String?
+        /// With a bundle source, the commit to check out; nil for a tar.
+        public var sourceBundleSHA: String?
         public var shim: String?
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
@@ -33,12 +35,13 @@ public enum Helper {
             attempt: String, stateDir: String, store: String, kernel: String,
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
             command: [String], base: String? = nil, source: String? = nil,
-            proxySocket: String? = nil, shim: String? = nil,
+            proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
             self.source = source
             self.proxySocket = proxySocket
+            self.sourceBundleSHA = sourceBundleSHA
             self.shim = shim
             self.cpus = cpus
             self.memoryBytes = memoryBytes
@@ -76,8 +79,24 @@ public enum Helper {
     /// Where a source lands in the guest, and the marker that releases the
     /// command once it has.
     public static let workDir = "/work"
-    static let archiveInGuest = "/pomar/source.tar"
+    static let archiveInGuest = "/pomar/source"
     static let readyMarker = "/.pomar-ready"
+
+    /// A job with a source runs as this unprivileged uid and gid, with its
+    /// own home directory.
+    public static let jobUID: UInt32 = 1000
+    public static let jobHome = "/pomar/home"
+
+    /// Gives the job's uid a passwd and group entry when the image has none,
+    /// so that user lookups in the job work.
+    static let registerJobUser =
+        "{ getent passwd \(jobUID) >/dev/null || echo 'pomar:x:\(jobUID):\(jobUID):pomar:\(jobHome):/bin/sh' >> /etc/passwd; } "
+        + "&& { getent group \(jobUID) >/dev/null || echo 'pomar:x:\(jobUID):' >> /etc/group; }"
+
+    /// The image's environment with HOME pointed at the job's home.
+    public static func jobEnvironment(_ env: [String]) -> [String] {
+        env.filter { !$0.hasPrefix("HOME=") } + ["HOME=\(jobHome)"]
+    }
 
     /// The guest's main process when the attempt has a source: it waits for
     /// the source to be in place, then runs the command in the work directory
@@ -92,15 +111,41 @@ public enum Helper {
     /// The guest-side step that unpacks the copied archive and releases the
     /// shim. With the module proxy, it first waits (up to 10 s) for the
     /// proxy shim to be listening, so the command never starts without it.
-    public static func extractCommand(waitForProxy: Bool = false) -> [String] {
+    public static func extractCommand(waitForProxy: Bool = false, bundleSHA: String? = nil) -> [String] {
         let wait =
             waitForProxy
             ? "n=0; until [ -e \(proxyReady) ]; do n=$((n+1)); [ $n -gt 200 ] && { echo 'pomar: proxy shim not ready' >&2; exit 97; }; sleep 0.05; done; "
             : ""
+        // A bundle becomes a repository with no remote: its branches arrive
+        // as origin/* tracking refs, and the pinned commit is checked out
+        // detached. No credential helper is configured.
+        let unpack =
+            bundleSHA.map {
+                "git init -q \(workDir) && git -C \(workDir) fetch -q \(archiveInGuest) 'refs/heads/*:refs/remotes/origin/*' "
+                    + "&& git -C \(workDir) -c advice.detachedHead=false checkout -q --detach \($0) "
+                    + "&& test \"$(git -C \(workDir) rev-parse HEAD)\" = \($0)"
+            } ?? "mkdir -p \(workDir) && tar -xf \(archiveInGuest) -C \(workDir)"
         return [
             "/bin/sh", "-c",
-            wait + "mkdir -p \(workDir) && tar -xf \(archiveInGuest) -C \(workDir) && rm -f \(archiveInGuest) && touch \(readyMarker)",
+            wait + unpack + " && rm -f \(archiveInGuest) && \(registerJobUser) && mkdir -p \(jobHome) "
+                + "&& chown -R \(jobUID):\(jobUID) \(workDir) \(jobHome) && touch \(readyMarker)",
         ]
+    }
+
+    /// Parses --source-kind and --source-sha: a tar needs no SHA; a bundle
+    /// needs a full lower-case hex SHA. Returns nil on a bad pair.
+    public static func sourceKind(_ kind: String?, sha: String?) -> (bundle: Bool, sha: String?)? {
+        switch kind ?? "tar" {
+        case "tar":
+            return (false, nil)
+        case "bundle":
+            guard let s = sha, s.count == 40, s.allSatisfy({ ("0"..."9").contains($0) || ("a"..."f").contains($0) }) else {
+                return nil
+            }
+            return (true, s)
+        default:
+            return nil
+        }
     }
 
     /// The guest end of the module proxy: the host socket is relayed to
@@ -132,14 +177,16 @@ public enum Helper {
     /// Copies the source archive into the running guest over vsock, unpacks
     /// it there, and releases the command. Returns the copy and unpack times
     /// in milliseconds.
-    static func copyIn(_ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false) async throws -> (copy: Int, extract: Int) {
+    static func copyIn(
+        _ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false, bundleSHA: String? = nil
+    ) async throws -> (copy: Int, extract: Int) {
         let clock = ContinuousClock()
         let t0 = clock.now
         try await container.copyIn(
             from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: archiveInGuest), mode: 0o600)
         let t1 = clock.now
         let p = try await container.exec("pomar-extract") { config in
-            config.arguments = extractCommand(waitForProxy: waitForProxy)
+            config.arguments = extractCommand(waitForProxy: waitForProxy, bundleSHA: bundleSHA)
             config.stdout = output
             config.stderr = output
         }
@@ -239,6 +286,12 @@ public enum Helper {
                 config.cpus = o.cpus
                 config.memoryInBytes = o.memoryBytes
                 config.process.arguments = o.source == nil ? o.command : Helper.shim(o.command)
+                if o.source != nil {
+                    // The job runs unprivileged in its guest: its tests may
+                    // rely on permissions root would bypass.
+                    config.process.user = .init(uid: Helper.jobUID, gid: Helper.jobUID)
+                    config.process.environmentVariables = Helper.jobEnvironment(config.process.environmentVariables)
+                }
                 config.process.stdout = out
                 config.process.stderr = out
                 config.interfaces = []
@@ -293,7 +346,9 @@ public enum Helper {
                 }
                 let attrs = try FileManager.default.attributesOfItem(atPath: src)
                 metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
-                let t = try await copyIn(container, source: src, output: log, waitForProxy: withProxy)
+                let t = try await copyIn(
+                    container, source: src, output: log, waitForProxy: withProxy, bundleSHA: o.sourceBundleSHA)
+                if o.sourceBundleSHA != nil { metrics["source_kind"] = "bundle" }
                 metrics["copy_in_ms"] = String(t.copy)
                 metrics["extract_ms"] = String(t.extract)
             } catch {
