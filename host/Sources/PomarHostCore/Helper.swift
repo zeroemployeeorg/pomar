@@ -19,16 +19,20 @@ public enum Helper {
         /// The guest's caps, from the attempt's job class.
         public var cpus: Int
         public var memoryBytes: UInt64
+        /// The attempt's pinned source snapshot (a tar) on the host; nil runs
+        /// the command with no source.
+        public var source: String?
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
 
         public init(
             attempt: String, stateDir: String, store: String, kernel: String,
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
-            command: [String], base: String? = nil,
+            command: [String], base: String? = nil, source: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
+            self.source = source
             self.cpus = cpus
             self.memoryBytes = memoryBytes
             self.attempt = attempt
@@ -60,6 +64,54 @@ public enum Helper {
             c.memoryBytes = n
         }
         return c
+    }
+
+    /// Where a source lands in the guest, and the marker that releases the
+    /// command once it has.
+    public static let workDir = "/work"
+    static let archiveInGuest = "/pomar/source.tar"
+    static let readyMarker = "/.pomar-ready"
+
+    /// The guest's main process when the attempt has a source: it waits for
+    /// the source to be in place, then runs the command in the work directory
+    /// as itself (exec), so its exit is the attempt's.
+    public static func shim(_ command: [String]) -> [String] {
+        let script =
+            "while [ ! -e \(readyMarker) ]; do sleep 0.05; done; rm -f \(readyMarker); "
+            + "cd \(workDir) || exit 125; exec \"$@\""
+        return ["/bin/sh", "-c", script, "pomar-shim"] + command
+    }
+
+    /// The guest-side step that unpacks the copied archive and releases the
+    /// shim.
+    public static let extractCommand = [
+        "/bin/sh", "-c",
+        "mkdir -p \(workDir) && tar -xf \(archiveInGuest) -C \(workDir) && rm -f \(archiveInGuest) && touch \(readyMarker)",
+    ]
+
+    /// Copies the source archive into the running guest over vsock, unpacks
+    /// it there, and releases the command. Returns the copy and unpack times
+    /// in milliseconds.
+    static func copyIn(_ container: LinuxContainer, source: String, output: Writer) async throws -> (copy: Int, extract: Int) {
+        let clock = ContinuousClock()
+        let t0 = clock.now
+        try await container.copyIn(
+            from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: archiveInGuest), mode: 0o600)
+        let t1 = clock.now
+        let p = try await container.exec("pomar-extract") { config in
+            config.arguments = extractCommand
+            config.stdout = output
+            config.stderr = output
+        }
+        try await p.start()
+        let status = try await p.wait()
+        try? await p.delete()
+        guard status.exitCode == 0 else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [NSLocalizedDescriptionKey: "source unpack in the guest exited \(status.exitCode)"])
+        }
+        let t2 = clock.now
+        let ms = { (d: Duration) in Int(d.components.seconds * 1000 + d.components.attoseconds / 1_000_000_000_000_000) }
+        return (ms(t1 - t0), ms(t2 - t1))
     }
 
     /// Appends to a file; used for the guest's stdout and stderr.
@@ -111,9 +163,9 @@ public enum Helper {
     public static func run(_ o: Options) async -> Int32 {
         let stop = StopFlag()
         signal(SIGTERM, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
-        source.setEventHandler { stop.set() }
-        source.resume()
+        let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())
+        sigterm.setEventHandler { stop.set() }
+        sigterm.resume()
 
         guard Entitlement.hasVirtualization() else {
             writeStatus(o.stateDir, ["phase": "failed", "attempt": o.attempt, "error": Entitlement.missingReason])
@@ -146,7 +198,7 @@ public enum Helper {
             let configure: (inout LinuxContainer.Configuration) throws -> Void = { config in
                 config.cpus = o.cpus
                 config.memoryInBytes = o.memoryBytes
-                config.process.arguments = o.command
+                config.process.arguments = o.source == nil ? o.command : Helper.shim(o.command)
                 config.process.stdout = out
                 config.process.stderr = out
                 config.interfaces = []
@@ -177,6 +229,25 @@ public enum Helper {
             ])
             try? manager.delete(o.attempt)
             return 1
+        }
+        // With a source, the guest is up but its command waits in the shim
+        // until the source is in place.
+        if let src = o.source {
+            do {
+                let attrs = try FileManager.default.attributesOfItem(atPath: src)
+                metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
+                let t = try await copyIn(container, source: src, output: try FileWriter(path: o.stateDir + "/output.log"))
+                metrics["copy_in_ms"] = String(t.copy)
+                metrics["extract_ms"] = String(t.extract)
+            } catch {
+                writeStatus(o.stateDir, [
+                    "phase": "failed", "attempt": o.attempt, "error": "source copy-in: \(error)",
+                    "host_free_bytes": String(Rootfs.freeBytes(o.store)),
+                ].merging(metrics) { a, _ in a })
+                try? await container.stop()
+                try? manager.delete(o.attempt)
+                return 1
+            }
         }
         writeStatus(o.stateDir, ["phase": "running", "attempt": o.attempt].merging(metrics) { a, _ in a })
 

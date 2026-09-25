@@ -24,7 +24,7 @@ let usage = """
            pomar-host boot-smoke --store S --kernel K --init REF --init-digest D \\
                                  --image REF --image-digest D --id ID
            pomar-host helper --attempt ID --state-dir DIR --store S --kernel K \\
-                             --init REF --init-digest D --image REF --image-digest D [--base ROOTFS] \\
+                             --init REF --init-digest D --image REF --image-digest D [--base ROOTFS] [--source TAR] \\
                              [--cpus N] [--memory-bytes N] -- CMD...
            pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N
     """
@@ -84,7 +84,7 @@ case "helper":
     let code = await Helper.run(
         .init(
             attempt: a, stateDir: dir, store: s, kernel: k, initRef: ir, initDigest: idg,
-            imageRef: mr, imageDigest: md, command: command, base: f["base"],
+            imageRef: mr, imageDigest: md, command: command, base: f["base"], source: f["source"],
             cpus: caps.cpus, memoryBytes: caps.memoryBytes))
     exit(code)
 case "build-base":

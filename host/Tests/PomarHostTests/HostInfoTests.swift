@@ -30,3 +30,16 @@ import Testing
     #expect(Helper.caps(cpus: nil, memoryBytes: "1048576") == nil)
     #expect(Helper.caps(cpus: nil, memoryBytes: "-1") == nil)
 }
+
+@Test func shimWaitsThenExecsTheCommandInTheWorkDirectory() {
+    let args = Helper.shim(["make", "verify"])
+    #expect(Array(args.prefix(2)) == ["/bin/sh", "-c"])
+    #expect(args[2].contains("while [ ! -e /.pomar-ready ]"))
+    #expect(args[2].hasSuffix("cd /work || exit 125; exec \"$@\""))
+    #expect(Array(args.suffix(3)) == ["pomar-shim", "make", "verify"])
+}
+
+@Test func extractReleasesTheShimOnlyAfterUnpacking() {
+    let script = Helper.extractCommand[2]
+    #expect(script.contains("tar -xf /pomar/source.tar -C /work && rm -f /pomar/source.tar && touch /.pomar-ready"))
+}
