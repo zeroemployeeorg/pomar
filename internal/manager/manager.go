@@ -34,11 +34,15 @@ const (
 
 // Guest holds the pinned artifacts every helper boots from.
 type Guest struct {
-	Kernel      string // absolute path
-	InitRef     string
-	InitDigest  string
-	ImageRef    string
-	ImageDigest string
+	Kernel       string // absolute path
+	KernelSHA256 string // the pinned kernel's hash, recorded in each attempt
+	InitRef      string
+	InitDigest   string
+	ImageRef     string
+	ImageDigest  string
+	// ImageArm64 and PackageSet name the base the guest boots from.
+	ImageArm64 string
+	PackageSet string
 }
 
 // Config is what a manager needs.
@@ -336,6 +340,12 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	if err := sign.Check(m.cfg.HostBin); err != nil {
 		return Entry{}, err
 	}
+	// The pins this attempt runs with, read now: the helper binary as it is
+	// at this moment, which is what the helper will execute.
+	pins, err := m.pinsFor(command)
+	if err != nil {
+		return Entry{}, err
+	}
 	var basePath string
 	if m.cfg.Base != nil {
 		var err error
@@ -440,7 +450,7 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins}
 	if src != nil {
 		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git}
 	}

@@ -80,12 +80,13 @@ public enum Helper {
     /// command once it has.
     public static let workDir = "/work"
     static let archiveInGuest = "/pomar/source"
-    static let readyMarker = "/.pomar-ready"
+    // In the job's home, which the job owns, so the job can remove it.
+    static let readyMarker = "/pomar/job/.pomar-ready"
 
     /// A job with a source runs as this unprivileged uid and gid, with its
     /// own home directory.
     public static let jobUID: UInt32 = 1000
-    public static let jobHome = "/pomar/home"
+    public static let jobHome = "/pomar/job"
 
     /// Gives the job's uid a passwd and group entry when the image has none,
     /// so that user lookups in the job work.

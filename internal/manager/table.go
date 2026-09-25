@@ -56,6 +56,9 @@ type Entry struct {
 	Source *PinnedSource `json:"source,omitempty"`
 	// GoProxy records that the attempt was given the module proxy.
 	GoProxy bool `json:"goproxy,omitempty"`
+	// Pins are what the attempt ran with, copied at admission, so the record
+	// states what it ran, not what the manager runs now (DESIGN-01).
+	Pins *Pins `json:"pins,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 
@@ -155,3 +158,16 @@ func (t *table) list() []Entry {
 }
 
 func tablePath(managerDir string) string { return filepath.Join(managerDir, "table.json") }
+
+// Pins are an attempt's inputs other than its source: the guest's pinned
+// artifacts, the Pomar build, and the command's hash.
+type Pins struct {
+	Kernel      string `json:"kernel_sha256"`
+	Init        string `json:"vminit_digest"`
+	Image       string `json:"image_digest"`
+	ImageArm64  string `json:"image_arm64"`
+	PackageSet  string `json:"package_set,omitempty"`
+	Pomar       string `json:"pomar_version"`
+	HostBin     string `json:"host_bin_sha256"`
+	CommandHash string `json:"command_sha256"`
+}
