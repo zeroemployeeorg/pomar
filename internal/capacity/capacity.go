@@ -60,7 +60,7 @@ const VMOverhead = 300 << 20
 
 // CI is the CI job class as the elders set it from the measurements
 // (ruling r12 §2): 2 vCPU, 2 GiB plus the VM overhead, a 3 GiB disk peak.
-// The 1-vCPU shape was refused for zero-employee's gate: single-vCPU guests
+// The 1-vCPU shape was refused for the measured gate: single-vCPU guests
 // failed its timing tests under load.
 var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true}
 
