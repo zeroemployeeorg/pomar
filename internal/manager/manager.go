@@ -313,7 +313,7 @@ type Source struct {
 // so that the manager's own death does not signal it. With a source, the ref
 // is pinned to a commit SHA before anything is created, and a snapshot of
 // that commit is written into the attempt's record.
-func (m *Manager) Start(id string, command []string, src *Source) (Entry, error) {
+func (m *Manager) Start(id string, command []string, src *Source, inputs ...Input) (Entry, error) {
 	v := m.cfg.Venue
 	if !validID.MatchString(id) {
 		return Entry{}, fmt.Errorf("manager: invalid attempt id %q", id)
@@ -323,6 +323,13 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 	}
 	if src != nil && m.cfg.Mirrors == nil {
 		return Entry{}, errors.New("manager: sources are not configured")
+	}
+	if len(inputs) > 0 && src == nil {
+		return Entry{}, errors.New("manager: inputs need a source: they are released with it")
+	}
+	inputRecs, err := checkInputs(inputs)
+	if err != nil {
+		return Entry{}, err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -389,6 +396,9 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		if err := m.writeSource(ctx, src, sha, rec); err != nil {
 			return abandon(err, false)
 		}
+		if _, err := writeInputs(rec, inputs); err != nil {
+			return abandon(err, false)
+		}
 		b, _ := json.Marshal(map[string]any{"mirror": src.Mirror, "ref": src.Ref, "sha": sha, "git": src.Git, "base": src.base()})
 		if err := os.WriteFile(filepath.Join(rec, "source.json"), append(b, '\n'), 0o600); err != nil {
 			return abandon(err, false)
@@ -411,6 +421,9 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		// The helper copies the pinned snapshot into the guest over vsock
 		// before releasing the command; the guest never sees the mirror.
 		args = append(args, "--source", filepath.Join(rec, src.file()), "--source-kind", src.kind(), "--source-sha", sha)
+		if len(inputs) > 0 {
+			args = append(args, "--inputs", filepath.Join(rec, inputsDir))
+		}
 	}
 	withProxy := src != nil && m.proxyEnabled()
 	if withProxy {
@@ -450,7 +463,7 @@ func (m *Manager) Start(id string, command []string, src *Source) (Entry, error)
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs}
 	if src != nil {
 		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git}
 	}
