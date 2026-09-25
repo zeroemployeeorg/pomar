@@ -41,7 +41,7 @@ import Testing
 
 @Test func extractReleasesTheShimOnlyAfterUnpacking() {
     let script = Helper.extractCommand()[2]
-    #expect(script.contains("tar -xf /pomar/source -C /work && rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/pomar/job:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /pomar/job && chown -R 1000:1000 /work /pomar/job && touch /pomar/job/.pomar-ready"))
+    #expect(script.contains("tar -xf /pomar/source -C /work && rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/pomar/job:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /pomar/job && chown -R 1000:1000 /work /pomar/job && { [ ! -d /pomar/inputs ] || chown -R 1000:1000 /pomar/inputs; } && touch /pomar/job/.pomar-ready"))
 }
 
 @Test func extractWaitsForTheProxyShimWhenAsked() {
@@ -66,7 +66,7 @@ import Testing
     #expect(script.contains("checkout -q --detach \(sha)"))
     #expect(script.contains("rev-parse HEAD)\" = \(sha)"))
     #expect(!script.contains("remote add"))
-    #expect(script.hasSuffix("rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/pomar/job:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /pomar/job && chown -R 1000:1000 /work /pomar/job && touch /pomar/job/.pomar-ready"))
+    #expect(script.hasSuffix("rm -f /pomar/source && { getent passwd 1000 >/dev/null || echo 'pomar:x:1000:1000:pomar:/pomar/job:/bin/sh' >> /etc/passwd; } && { getent group 1000 >/dev/null || echo 'pomar:x:1000:' >> /etc/group; } && mkdir -p /pomar/job && chown -R 1000:1000 /work /pomar/job && { [ ! -d /pomar/inputs ] || chown -R 1000:1000 /pomar/inputs; } && touch /pomar/job/.pomar-ready"))
 }
 
 @Test func sourceKindParsing() {

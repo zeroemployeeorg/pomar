@@ -59,6 +59,8 @@ type Entry struct {
 	// Pins are what the attempt ran with, copied at admission, so the record
 	// states what it ran, not what the manager runs now (DESIGN-01).
 	Pins *Pins `json:"pins,omitempty"`
+	// Inputs are the files the client sent with the request.
+	Inputs []InputRecord `json:"inputs,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 

@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strings"
 	"syscall"
 
 	"github.com/zeroemployeeorg/pomar/internal/base"
@@ -39,7 +42,7 @@ const usage = `usage:
                 [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git]] -- CMD...
+  pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git] [-input NAME=PATH]...] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
@@ -326,6 +329,20 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
+	var inputs []manager.Input
+	fs.Func("input", "NAME=PATH: send a file, copied into the guest at /pomar/inputs/NAME (start; repeatable)", func(v string) error {
+		name, path, ok := strings.Cut(v, "=")
+		if !ok {
+			return fmt.Errorf("want NAME=PATH")
+		}
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		h := sha256.Sum256(b)
+		inputs = append(inputs, manager.Input{Name: name, Data: b, SHA256: hex.EncodeToString(h[:])})
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -343,7 +360,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
-		req := manager.StartRequest{ID: *id, Command: cmd}
+		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs}
 		if *mirrorName != "" || *ref != "" {
 			if *mirrorName == "" || *ref == "" {
 				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")

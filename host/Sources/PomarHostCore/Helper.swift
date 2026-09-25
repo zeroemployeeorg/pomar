@@ -27,6 +27,8 @@ public enum Helper {
         public var proxySocket: String?
         /// With a bundle source, the commit to check out; nil for a tar.
         public var sourceBundleSHA: String?
+        /// A directory of input files, copied into the guest at /pomar/inputs.
+        public var inputs: String?
         public var shim: String?
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
@@ -35,13 +37,14 @@ public enum Helper {
             attempt: String, stateDir: String, store: String, kernel: String,
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
             command: [String], base: String? = nil, source: String? = nil,
-            proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil,
+            proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil, inputs: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
             self.source = source
             self.proxySocket = proxySocket
             self.sourceBundleSHA = sourceBundleSHA
+            self.inputs = inputs
             self.shim = shim
             self.cpus = cpus
             self.memoryBytes = memoryBytes
@@ -129,7 +132,8 @@ public enum Helper {
         return [
             "/bin/sh", "-c",
             wait + unpack + " && rm -f \(archiveInGuest) && \(registerJobUser) && mkdir -p \(jobHome) "
-                + "&& chown -R \(jobUID):\(jobUID) \(workDir) \(jobHome) && touch \(readyMarker)",
+                + "&& chown -R \(jobUID):\(jobUID) \(workDir) \(jobHome) "
+                + "&& { [ ! -d \(inputsInGuest) ] || chown -R \(jobUID):\(jobUID) \(inputsInGuest); } && touch \(readyMarker)",
         ]
     }
 
@@ -154,6 +158,7 @@ public enum Helper {
     public static let proxySocket = "/run/pomar/goproxy.sock"
     public static let proxyListen = "127.0.0.1:7070"
     static let shimInGuest = "/pomar/shim"
+    public static let inputsInGuest = "/pomar/inputs"
     static let proxyReady = "/pomar/shim.ready"
 
     /// The environment a command gets with the module proxy: GOPROXY only.
@@ -344,6 +349,13 @@ public enum Helper {
                 if withProxy, let shim = o.shim {
                     proxyShim = try await startProxyShim(container, shim: shim, output: log)
                     metrics["goproxy"] = "http://" + proxyListen
+                }
+                if let dir = o.inputs {
+                    // The client's files, as a directory; unpacked in the guest,
+                    // then handed to the job user by the source step.
+                    try await container.copyIn(
+                        from: URL(fileURLWithPath: dir, isDirectory: true), to: URL(fileURLWithPath: inputsInGuest))
+                    metrics["inputs"] = String((try? FileManager.default.contentsOfDirectory(atPath: dir).count) ?? 0)
                 }
                 let attrs = try FileManager.default.attributesOfItem(atPath: src)
                 metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
