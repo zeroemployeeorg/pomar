@@ -34,7 +34,7 @@ func TestPinsFor(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Pins{Kernel: "k", Init: "i", Image: "d", ImageArm64: "a", PackageSet: "p",
-		HostBin: "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd",
+		HostBin:     "9a3a45d01531a20e89ac6ae10b0b0beb0492acd7216a368aa062d1a5fecaf9cd",
 		CommandHash: CommandHash([]string{"make", "verify"}), Pomar: p.Pomar}
 	if *p != want || p.Pomar == "" {
 		t.Fatalf("pins %+v, want %+v", *p, want)
