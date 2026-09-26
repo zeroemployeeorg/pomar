@@ -9,7 +9,8 @@ import (
 // SOW-06 §3, with a read-only source and no resolver.
 const good = `uid=1000
 iface=lo
-tcp=refused
+routes=0
+tcp=unreachable
 dns=failed
 nameservers=0
 work=readonly
@@ -39,19 +40,21 @@ func TestGradeFailures(t *testing.T) {
 		edit  func(string) string
 		fails string
 	}{
-		"an interface":       {func(s string) string { return strings.Replace(s, "iface=lo\n", "iface=lo\niface=eth0\n", 1) }, CheckNetwork},
-		"a public connect":   {func(s string) string { return strings.Replace(s, "tcp=refused", "tcp=open", 1) }, CheckNetwork},
-		"tcp untestable":     {func(s string) string { return strings.Replace(s, "tcp=refused", "tcp=untestable", 1) }, CheckNetwork},
-		"a resolved name":    {func(s string) string { return strings.Replace(s, "dns=failed", "dns=resolved", 1) }, CheckNetwork},
-		"a resolver named":   {func(s string) string { return strings.Replace(s, "nameservers=0", "nameservers=2", 1) }, CheckNetwork},
-		"a host path":        {func(s string) string { return strings.Replace(s, "end=1", "hostpath=/Users\nend=1", 1) }, CheckHome},
-		"a writable source":  {func(s string) string { return strings.Replace(s, "work=readonly", "work=writable", 1) }, CheckReadonly},
-		"the job as root":    {func(s string) string { return strings.Replace(s, "uid=1000", "uid=0", 1) }, CheckReadonly},
-		"a token in env":     {func(s string) string { return strings.Replace(s, "env=PATH", "env=PATH\nenv=GITHUB_TOKEN", 1) }, CheckNoToken},
-		"an ssh agent":       {func(s string) string { return strings.Replace(s, "env=PATH", "env=PATH\nenv=SSH_AUTH_SOCK", 1) }, CheckNoToken},
-		"an unexpected file": {func(s string) string { return strings.Replace(s, "end=1", "file=/pomar/keys/id\nend=1", 1) }, CheckNoToken},
-		"a lookalike file":   {func(s string) string { return strings.Replace(s, "end=1", "file=/pomar/pins.json.bak\nend=1", 1) }, CheckNoToken},
-		"a repeated key":     {func(s string) string { return strings.Replace(s, "work=readonly", "work=readonly\nwork=readonly", 1) }, CheckReadonly},
+		"an interface":             {func(s string) string { return strings.Replace(s, "iface=lo\n", "iface=lo\niface=eth0\n", 1) }, CheckNetwork},
+		"a public connect":         {func(s string) string { return strings.Replace(s, "tcp=unreachable", "tcp=open", 1) }, CheckNetwork},
+		"tcp untestable":           {func(s string) string { return strings.Replace(s, "tcp=unreachable", "tcp=untestable", 1) }, CheckNetwork},
+		"a connect that timed out": {func(s string) string { return strings.Replace(s, "tcp=unreachable", "tcp=other", 1) }, CheckNetwork},
+		"a route":                  {func(s string) string { return strings.Replace(s, "routes=0", "routes=1", 1) }, CheckNetwork},
+		"a resolved name":          {func(s string) string { return strings.Replace(s, "dns=failed", "dns=resolved", 1) }, CheckNetwork},
+		"a resolver named":         {func(s string) string { return strings.Replace(s, "nameservers=0", "nameservers=2", 1) }, CheckNetwork},
+		"a host path":              {func(s string) string { return strings.Replace(s, "end=1", "hostpath=/Users\nend=1", 1) }, CheckHome},
+		"a writable source":        {func(s string) string { return strings.Replace(s, "work=readonly", "work=writable", 1) }, CheckReadonly},
+		"the job as root":          {func(s string) string { return strings.Replace(s, "uid=1000", "uid=0", 1) }, CheckReadonly},
+		"a token in env":           {func(s string) string { return strings.Replace(s, "env=PATH", "env=PATH\nenv=GITHUB_TOKEN", 1) }, CheckNoToken},
+		"an ssh agent":             {func(s string) string { return strings.Replace(s, "env=PATH", "env=PATH\nenv=SSH_AUTH_SOCK", 1) }, CheckNoToken},
+		"an unexpected file":       {func(s string) string { return strings.Replace(s, "end=1", "file=/pomar/keys/id\nend=1", 1) }, CheckNoToken},
+		"a lookalike file":         {func(s string) string { return strings.Replace(s, "end=1", "file=/pomar/pins.json.bak\nend=1", 1) }, CheckNoToken},
+		"a repeated key":           {func(s string) string { return strings.Replace(s, "work=readonly", "work=readonly\nwork=readonly", 1) }, CheckReadonly},
 	} {
 		r := Grade(tc.edit(good))
 		if r.Pass {

@@ -19,8 +19,12 @@ out=/pomar/outputs/` + ReportName + `
 {
 echo "uid=$(id -u)"
 for i in /sys/class/net/*; do echo "iface=${i##*/}"; done
+echo "routes=$(awk 'NR > 1 && $1 != "lo"' /proc/net/route 2>/dev/null | wc -l | tr -d ' ')"
 if command -v bash >/dev/null 2>&1; then
-	if timeout 3 bash -c 'exec 3<>/dev/tcp/1.1.1.1/443' 2>/dev/null; then echo tcp=open; else echo tcp=refused; fi
+	# A connect to a documentation address (RFC 5737) fails with ENETUNREACH
+	# only when no route covers it: then no public address is reachable.
+	o=$(timeout 3 bash -c 'exec 3<>/dev/tcp/192.0.2.1/443' 2>&1); rc=$?
+	case "$o" in *"Network is unreachable"*) echo tcp=unreachable ;; *) if [ $rc -eq 0 ]; then echo tcp=open; else echo tcp=other; fi ;; esac
 else
 	echo tcp=untestable
 fi
@@ -96,14 +100,16 @@ func Grade(report string) Report {
 		net.Detail = "report incomplete"
 	case len(kv["iface"]) != 1 || kv["iface"][0] != "lo":
 		net.Detail = "interfaces: " + strings.Join(kv["iface"], ",")
-	case one("tcp") != "refused":
+	case one("routes") != "0":
+		net.Detail = "routes on an interface other than lo: " + one("routes")
+	case one("tcp") != "unreachable":
 		net.Detail = "public tcp connect: " + one("tcp")
 	case one("dns") != "failed":
 		net.Detail = "public name lookup: " + one("dns")
 	case one("nameservers") != "0":
 		net.Detail = "resolv.conf names " + one("nameservers") + " resolver(s)"
 	default:
-		net.Pass, net.Detail = true, "lo only; tcp refused; dns failed; no resolver"
+		net.Pass, net.Detail = true, "lo only; no route; a connect beyond loopback is unreachable; dns failed; no resolver"
 	}
 
 	home := Check{Name: CheckHome}
