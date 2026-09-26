@@ -87,6 +87,13 @@ type Config struct {
 	SampleEvery time.Duration
 	Footprint   Footprinter
 	Log         io.Writer
+	// CtlSocket, when set, is a second socket for the stream (DESIGN-02
+	// approach A; r14 condition 4). It is created at mode 0660 in a directory
+	// the operator makes the manager's user's, group pomarctl, mode 0750, and
+	// takes its group from that directory. It serves the stream's routes only:
+	// start, stop and reads; never a route that removes a record, evicts a
+	// cache or changes configuration.
+	CtlSocket string
 }
 
 // Manager supervises helpers.

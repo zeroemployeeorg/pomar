@@ -224,6 +224,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	diskGiB := fs.Int64("class-disk-peak-gib", capacity.CI.DiskPeakBytes>>30, "the CI class's disk peak in GiB")
 	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
+	ctlSocket := fs.String("ctl-socket", "", "a second socket for the stream: start, stop and reads only (mode 0660; its directory must not be open to others)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -298,8 +299,9 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 			p, _ := (&base.Bases{Venue: v, PackageSet: debs.SetHash(smoke.CIPackages)}).Path(smoke.ImageArm64)
 			return []string{e.KernelPath(), p}
 		},
-		UID: os.Getuid(),
-		Log: stdout,
+		UID:       os.Getuid(),
+		Log:       stdout,
+		CtlSocket: *ctlSocket,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -310,6 +312,9 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "reconcile: %s attempt=%s pid=%d (%s)\n", f.Decision, f.Attempt, f.PID, f.Reason)
 	}
 	fmt.Fprintf(stdout, "manager: serving %s\n", manager.SocketPath(v.Root()))
+	if *ctlSocket != "" {
+		fmt.Fprintf(stdout, "manager: control socket %s (the stream's routes only)\n", *ctlSocket)
+	}
 	// SIGINT or SIGTERM stops the manager only; helpers keep running and
 	// the next manager adopts them.
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -325,6 +330,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("attempt "+step, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
+	socket := fs.String("socket", "", "talk to the manager on this socket instead of the data root's (for example the permanent manager's control socket)")
 	id := fs.String("id", "", "attempt id")
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
@@ -346,11 +352,16 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	if *root == "" {
-		fmt.Fprintln(stderr, "attempt: data root not set")
+	var c *manager.Client
+	switch {
+	case *socket != "":
+		c = manager.NewSocketClient(*socket)
+	case *root != "":
+		c = manager.NewClient(*root)
+	default:
+		fmt.Fprintln(stderr, "attempt: data root not set (or give -socket)")
 		return 2
 	}
-	c := manager.NewClient(*root)
 	var out any
 	var err error
 	switch step {
