@@ -17,9 +17,11 @@ import (
 // (host/Sources/PomarHostCore/Helper.swift: jobUID, jobHome, proxyEnvironment).
 // The result records what Pomar set, never the image's own environment.
 const (
-	jobUID     = 1000
-	jobHome    = "/pomar/job"
-	jobGoProxy = "http://127.0.0.1:7070"
+	jobUID  = 1000
+	jobHome = "/pomar/job"
+	// jobHomeWithoutSource is HOME for a job-user start with no source.
+	jobHomeWithoutSource = "/tmp"
+	jobGoProxy           = "http://127.0.0.1:7070"
 )
 
 // resultDoc is the result document of the CI record design: what an attempt
@@ -70,6 +72,11 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		if e.GoProxy {
 			env["GOPROXY"] = jobGoProxy
 		}
+		if s.ReadOnly {
+			doc["readonly_source"] = true
+		}
+	} else if e.JobUser {
+		env["uid"], env["gid"], env["HOME"] = jobUID, jobUID, jobHomeWithoutSource
 	}
 	doc["env"] = env
 	if len(e.OutputNames) > 0 {

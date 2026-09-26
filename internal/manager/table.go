@@ -65,6 +65,8 @@ type Entry struct {
 	// copied out of each, filled when the attempt ends.
 	OutputNames []string       `json:"output_names,omitempty"`
 	Outputs     []OutputRecord `json:"outputs,omitempty"`
+	// JobUser records that a start with no source ran as the job user.
+	JobUser bool `json:"job_user,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 
@@ -81,6 +83,8 @@ type PinnedSource struct {
 	// Base is the other branch a repository source carries (Source.Base):
 	// the result records it as the gate's release base.
 	Base string `json:"base,omitempty"`
+	// ReadOnly records that /work was left read-only to the job.
+	ReadOnly bool `json:"readonly,omitempty"`
 }
 
 // claimClass is the class the entry holds a claim as.

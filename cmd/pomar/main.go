@@ -42,12 +42,13 @@ const usage = `usage:
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
-                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]...
+                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-git] [-input NAME=PATH]... [-output NAME]...] -- CMD...
+  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
                                     -output: a file the command leaves at /pomar/outputs/NAME, copied out when it exits
+                                    -readonly-source: /work stays root-owned and not writable by the job
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
   pomar mirror sync [-root DIR] -name NAME -url URL
@@ -295,6 +296,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		mirrorURLs[name] = url
 		return nil
 	})
+	jobUser := fs.Bool("class-job-user", false, "run starts with no source as the job user too, so the class never runs a job as root")
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -365,6 +367,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	m, err := manager.Open(manager.Config{
 		Signer:     signer,
 		MirrorURLs: mirrorURLs,
+		JobUser:    *jobUser,
 		Venue:      v,
 		HostBin:    bin,
 		Guest: manager.Guest{
@@ -429,6 +432,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
+	readonlySrc := fs.Bool("readonly-source", false, "leave /work root-owned and not writable by the job; it writes to its home, /tmp and /pomar/outputs (start; needs -mirror)")
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
 	var outputs []string
 	fs.Func("output", "NAME: a file the command leaves at /pomar/outputs/NAME, copied out when it exits (start; repeatable)", func(v string) error {
@@ -473,13 +477,17 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
+		if *readonlySrc && *mirrorName == "" {
+			fmt.Fprintln(stderr, "attempt start: -readonly-source needs -mirror and -ref")
+			return 2
+		}
 		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs, Class: *className, Outputs: outputs}
 		if *mirrorName != "" || *ref != "" {
 			if *mirrorName == "" || *ref == "" {
 				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")
 				return 2
 			}
-			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, Git: *gitSrc}
+			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, Git: *gitSrc, ReadOnly: *readonlySrc}
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e
