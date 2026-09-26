@@ -45,7 +45,7 @@ const usage = `usage:
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git] [-input NAME=PATH]...] -- CMD...
+  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-git] [-input NAME=PATH]...] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
@@ -426,6 +426,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
+	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
 	var inputs []manager.Input
 	fs.Func("input", "NAME=PATH: send a file, copied into the guest at /pomar/inputs/NAME (start; repeatable)", func(v string) error {
 		name, path, ok := strings.Cut(v, "=")
@@ -462,7 +463,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
-		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs}
+		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs, Class: *className}
 		if *mirrorName != "" || *ref != "" {
 			if *mirrorName == "" || *ref == "" {
 				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")

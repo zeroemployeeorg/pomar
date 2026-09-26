@@ -24,6 +24,8 @@ type StartRequest struct {
 	Command []string `json:"command"`
 	Source  *Source  `json:"source,omitempty"`
 	Inputs  []Input  `json:"inputs,omitempty"`
+	// Class names the job class; empty is the manager's default.
+	Class string `json:"class,omitempty"`
 }
 
 // Serve listens on the Unix socket until ctx ends: the owner's socket with every
@@ -125,7 +127,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		e, err := m.Start(req.ID, req.Command, req.Source, req.Inputs...)
+		e, err := m.StartIn(req.Class, req.ID, req.Command, req.Source, req.Inputs...)
 		if errors.Is(err, ErrExists) {
 			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return

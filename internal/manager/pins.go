@@ -58,12 +58,11 @@ func fileSHA256(path string) (string, error) {
 }
 
 // pinsFor records what an attempt of command runs with.
-func (m *Manager) pinsFor(command []string) (*Pins, error) {
+func (m *Manager) pinsFor(command []string, g Guest) (*Pins, error) {
 	host, err := fileSHA256(m.cfg.HostBin)
 	if err != nil {
 		return nil, fmt.Errorf("manager: hashing the helper binary: %w", err)
 	}
-	g := m.cfg.Guest
 	return &Pins{
 		Kernel: g.KernelSHA256, Init: g.InitDigest, Image: g.ImageDigest, ImageArm64: g.ImageArm64,
 		PackageSet: g.PackageSet, Pomar: BuildVersion(), HostBin: host, CommandHash: CommandHash(command),
