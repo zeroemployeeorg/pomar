@@ -140,6 +140,9 @@ const (
 	// ReasonClassConcurrency: the class's measured concurrency limit on this
 	// host is reached (r12 §2).
 	ReasonClassConcurrency = "class-concurrency"
+	// ReasonBaseUnverified: the class's base has not been verified since this
+	// boot; the manager verifies bases when it starts, never inline.
+	ReasonBaseUnverified = "base-unverified"
 )
 
 // Refusal says which resource refused a claim.

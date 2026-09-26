@@ -399,7 +399,16 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 			if !bs.Exists(smoke.ImageArm64) {
 				return "", nil
 			}
-			return bs.Verify(smoke.ImageArm64)
+			// Never hashes: VerifyBase did that when the manager started.
+			return bs.Verified(smoke.ImageArm64)
+		},
+		VerifyBase: func() error {
+			bs := &base.Bases{Venue: v, HostBin: bin, PackageSet: debs.SetHash(smoke.CIPackages)}
+			if !bs.Exists(smoke.ImageArm64) {
+				return nil
+			}
+			_, err := bs.Verify(smoke.ImageArm64)
+			return err
 		},
 		// The kernel and the pinned image's base are never evicted.
 		Pinned: func() []string {
