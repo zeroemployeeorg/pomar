@@ -46,6 +46,17 @@ type Guest struct {
 	PackageSet string
 }
 
+// JobClass is a class a start may name: its caps and concurrency limit, the
+// guest it boots (image and pins), and the base it clones. Classes are chosen
+// per start by name; the first is the default.
+type JobClass struct {
+	Class capacity.Class
+	Guest Guest
+	// Base returns a verified base rootfs for the class's helpers to clone, or
+	// "" to have them unpack the image. Nil means always unpack.
+	Base func() (string, error)
+}
+
 // Config is what a manager needs.
 type Config struct {
 	Venue   *venue.Venue
@@ -105,6 +116,9 @@ type Config struct {
 	// start names a mirror and a ref, never a URL. Nil keeps the development
 	// behaviour: mirrors are synced by hand with `pomar mirror sync`.
 	MirrorURLs map[string]string
+	// Classes are the job classes a start may name, the first being the
+	// default. Empty means one class made of Class, Guest and Base.
+	Classes []JobClass
 }
 
 // Manager supervises helpers.
@@ -154,6 +168,17 @@ func Open(cfg Config) (*Manager, error) {
 	if cfg.Class == (capacity.Class{}) {
 		cfg.Class = capacity.CI
 	}
+	if len(cfg.Classes) == 0 {
+		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base}}
+	}
+	seen := map[string]bool{}
+	for _, jc := range cfg.Classes {
+		if jc.Class.Name == "" || seen[jc.Class.Name] {
+			return nil, fmt.Errorf("manager: job classes need distinct, non-empty names (%q)", jc.Class.Name)
+		}
+		seen[jc.Class.Name] = true
+	}
+	cfg.Class, cfg.Guest, cfg.Base = cfg.Classes[0].Class, cfg.Classes[0].Guest, cfg.Classes[0].Base
 	if cfg.Host == (capacity.Host{}) {
 		h, err := capacity.ReadHost()
 		if err != nil {
@@ -333,9 +358,33 @@ type Source struct {
 // Start ledgers an attempt's objects and spawns its helper in a new session,
 // so that the manager's own death does not signal it. With a source, the ref
 // is pinned to a commit SHA before anything is created, and a snapshot of
-// that commit is written into the attempt's record.
+// that commit is written into the attempt's record. It runs in the default
+// job class.
 func (m *Manager) Start(id string, command []string, src *Source, inputs ...Input) (Entry, error) {
+	return m.StartIn("", id, command, src, inputs...)
+}
+
+// jobClass returns the class a start names; "" is the default (the first).
+func (m *Manager) jobClass(name string) (JobClass, error) {
+	if name == "" {
+		return m.cfg.Classes[0], nil
+	}
+	for _, jc := range m.cfg.Classes {
+		if jc.Class.Name == name {
+			return jc, nil
+		}
+	}
+	return JobClass{}, fmt.Errorf("manager: no job class %q on this manager", name)
+}
+
+// StartIn is Start in a named job class: its caps and concurrency limit, its
+// guest and its base. An unknown class is refused before anything is done.
+func (m *Manager) StartIn(className, id string, command []string, src *Source, inputs ...Input) (Entry, error) {
 	v := m.cfg.Venue
+	jc, err := m.jobClass(className)
+	if err != nil {
+		return Entry{}, err
+	}
 	if !validID.MatchString(id) {
 		return Entry{}, fmt.Errorf("manager: invalid attempt id %q", id)
 	}
@@ -376,7 +425,7 @@ func (m *Manager) Start(id string, command []string, src *Source, inputs ...Inpu
 	}
 	// Claim-time admission, under the lock so that two starts cannot both
 	// take the last slot. Nothing is created before it passes.
-	class := m.cfg.Class
+	class := jc.Class
 	if err := m.admit(class); err != nil {
 		m.event("start-refused", id, 0, err.Error())
 		return Entry{}, err
@@ -387,14 +436,14 @@ func (m *Manager) Start(id string, command []string, src *Source, inputs ...Inpu
 	}
 	// The pins this attempt runs with, read now: the helper binary as it is
 	// at this moment, which is what the helper will execute.
-	pins, err := m.pinsFor(command)
+	pins, err := m.pinsFor(command, jc.Guest)
 	if err != nil {
 		return Entry{}, err
 	}
 	var basePath string
-	if m.cfg.Base != nil {
+	if jc.Base != nil {
 		var err error
-		if basePath, err = m.cfg.Base(); err != nil {
+		if basePath, err = jc.Base(); err != nil {
 			return Entry{}, err
 		}
 	}
@@ -446,7 +495,7 @@ func (m *Manager) Start(id string, command []string, src *Source, inputs ...Inpu
 		return abandon(err, false)
 	}
 
-	g := m.cfg.Guest
+	g := jc.Guest
 	args := []string{"helper", "--attempt", id, "--state-dir", rec,
 		"--store", filepath.Join(v.Root(), storeDir), "--kernel", g.Kernel,
 		"--init", g.InitRef, "--init-digest", g.InitDigest,
@@ -543,6 +592,8 @@ type Capacity struct {
 	// FitsIdle is how many attempts of the class fit on this host when
 	// idle. It is a plan figure only when the class is measured.
 	FitsIdle int `json:"fits_idle"`
+	// Classes are every job class a start may name; Class is the default.
+	Classes []capacity.Class `json:"classes"`
 }
 
 // Capacity reports the admission state.
@@ -560,8 +611,12 @@ func (m *Manager) Capacity() (Capacity, error) {
 	}
 	m.mu.Unlock()
 	d := capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared}
+	var classes []capacity.Class
+	for _, jc := range m.cfg.Classes {
+		classes = append(classes, jc.Class)
+	}
 	return Capacity{Class: m.cfg.Class, Host: m.cfg.Host, Space: sp, Live: live,
-		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d)}, nil
+		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d), Classes: classes}, nil
 }
 
 func (m *Manager) startTime(pid int) (string, error) {

@@ -29,7 +29,7 @@ func TestPinsFor(t *testing.T) {
 	}
 	m := &Manager{cfg: Config{HostBin: bin, Guest: Guest{KernelSHA256: "k", InitDigest: "i", ImageDigest: "d",
 		ImageArm64: "a", PackageSet: "p"}}}
-	p, err := m.pinsFor([]string{"make", "verify"})
+	p, err := m.pinsFor([]string{"make", "verify"}, m.cfg.Guest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestPinsFor(t *testing.T) {
 		t.Fatalf("pins %+v, want %+v", *p, want)
 	}
 	m.cfg.HostBin = filepath.Join(t.TempDir(), "missing")
-	if _, err := m.pinsFor(nil); err == nil {
+	if _, err := m.pinsFor(nil, m.cfg.Guest); err == nil {
 		t.Fatal("a missing helper binary was pinned")
 	}
 }
