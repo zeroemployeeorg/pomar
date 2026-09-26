@@ -42,7 +42,7 @@ const usage = `usage:
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
-                [-ctl-socket PATH] [-sign-results]
+                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git] [-input NAME=PATH]...] -- CMD...
@@ -277,6 +277,21 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	ctlSocket := fs.String("ctl-socket", "", "a second socket for the stream: start, stop and reads only (mode 0660; its directory must not be open to others)")
+	var mirrorURLs map[string]string
+	fs.Func("mirror-url", "NAME=URL: a mirror attempts may name, synced by the manager from URL at each start (repeatable; with none, mirrors are synced by hand)", func(s string) error {
+		name, url, ok := strings.Cut(s, "=")
+		if !ok || name == "" || url == "" {
+			return fmt.Errorf("want NAME=URL")
+		}
+		if mirrorURLs == nil {
+			mirrorURLs = map[string]string{}
+		}
+		if _, dup := mirrorURLs[name]; dup {
+			return fmt.Errorf("mirror %q given twice", name)
+		}
+		mirrorURLs[name] = url
+		return nil
+	})
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -345,9 +360,10 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "manager: signing results with key %s\n", signer.ID)
 	}
 	m, err := manager.Open(manager.Config{
-		Signer:  signer,
-		Venue:   v,
-		HostBin: bin,
+		Signer:     signer,
+		MirrorURLs: mirrorURLs,
+		Venue:      v,
+		HostBin:    bin,
 		Guest: manager.Guest{
 			Kernel: e.KernelPath(), KernelSHA256: *kernelSum,
 			InitRef: smoke.InitRepo + "@" + smoke.InitDigest, InitDigest: smoke.InitDigest,

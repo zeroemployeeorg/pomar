@@ -99,6 +99,12 @@ type Config struct {
 	// document unsigned. Only the role user's permanent manager has one (the
 	// signing-identity design, approach A); the stream's never does.
 	Signer *result.Signer
+	// MirrorURLs, when set, are the only mirrors attempts may name, each with
+	// the URL the manager itself syncs it from at admission (the signing-
+	// identity design: mirrors are synced by the manager, not the stream). A
+	// start names a mirror and a ref, never a URL. Nil keeps the development
+	// behaviour: mirrors are synced by hand with `pomar mirror sync`.
+	MirrorURLs map[string]string
 }
 
 // Manager supervises helpers.
@@ -118,6 +124,9 @@ type Manager struct {
 	// vmOrphans are the VM services no live attempt accounts for.
 	vmOrphans map[int]*VMOrphan
 	lastSweep time.Time
+	// syncMu serialises the manager's own mirror syncs: two fetches into one
+	// mirror would contend for git's locks.
+	syncMu sync.Mutex
 }
 
 // Open takes the manager lock, loads the table and reconciles it against the
@@ -342,6 +351,23 @@ func (m *Manager) Start(id string, command []string, src *Source, inputs ...Inpu
 	inputRecs, err := checkInputs(inputs)
 	if err != nil {
 		return Entry{}, err
+	}
+	// With configured mirrors, the named mirror is synced from its configured
+	// URL now, before the lock: a fetch must not hold up the other routes.
+	if src != nil && m.cfg.MirrorURLs != nil {
+		url, ok := m.cfg.MirrorURLs[src.Mirror]
+		if !ok {
+			return Entry{}, fmt.Errorf("manager: mirror %q is not one this manager syncs", src.Mirror)
+		}
+		m.syncMu.Lock()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		err := m.cfg.Mirrors.Sync(ctx, src.Mirror, url)
+		cancel()
+		m.syncMu.Unlock()
+		if err != nil {
+			m.event("start-refused", id, 0, "mirror sync: "+err.Error())
+			return Entry{}, fmt.Errorf("manager: syncing mirror %q: %w", src.Mirror, err)
+		}
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
