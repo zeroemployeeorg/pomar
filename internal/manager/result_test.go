@@ -66,7 +66,7 @@ func terminalEntry(id string) Entry {
 		Attempt: id, Command: []string{"make", "verify"}, State: StateExited, ExitCode: &code,
 		Created: time.Date(2026, 9, 26, 5, 0, 0, 0, time.UTC), Ended: time.Date(2026, 9, 26, 5, 6, 0, 0, time.UTC),
 		Class:   capacity.CI,
-		Source:  &PinnedSource{Mirror: "zero-employee", Ref: "main", SHA: strings.Repeat("a", 40), Git: true, Base: "main"},
+		Source:  &PinnedSource{Mirror: "example", Ref: "main", SHA: strings.Repeat("a", 40), Git: true, Base: "main"},
 		GoProxy: true,
 		Pins: &Pins{Kernel: "k", Init: "i", Image: "img", ImageArm64: "arm", PackageSet: "ps", Pomar: "v", HostBin: "hb",
 			CommandHash: "ch"},
