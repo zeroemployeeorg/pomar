@@ -151,7 +151,16 @@ func resultVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "result verify: the result is not signed")
 		return 1
 	}
-	if !result.Verify(key, r.Result, sig) {
+	// `pomar attempt result` prints the reply indented, which re-indents the
+	// document inside it. The signature is over the canonical (compact)
+	// bytes; compacting removes only whitespace between tokens, so any change
+	// to the document itself still fails.
+	var doc bytes.Buffer
+	if err := json.Compact(&doc, r.Result); err != nil {
+		fmt.Fprintln(stderr, "result verify:", err)
+		return 1
+	}
+	if !result.Verify(key, doc.Bytes(), sig) {
 		fmt.Fprintln(stdout, "result verify: FAILED: the signature does not match this result and key")
 		return 1
 	}
