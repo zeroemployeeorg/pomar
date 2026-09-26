@@ -26,6 +26,9 @@ type StartRequest struct {
 	Inputs  []Input  `json:"inputs,omitempty"`
 	// Class names the job class; empty is the manager's default.
 	Class string `json:"class,omitempty"`
+	// Outputs names the files the command leaves at /pomar/outputs/NAME, to
+	// be copied into the record when it exits. They need a source.
+	Outputs []string `json:"outputs,omitempty"`
 }
 
 // Serve listens on the Unix socket until ctx ends: the owner's socket with every
@@ -127,7 +130,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		e, err := m.StartIn(req.Class, req.ID, req.Command, req.Source, req.Inputs...)
+		e, err := m.StartOut(req.Class, req.ID, req.Command, req.Source, req.Outputs, req.Inputs...)
 		if errors.Is(err, ErrExists) {
 			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -161,6 +164,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 		})
 	}
 	m.resultRoutes(mux) // reads: on both sockets
+	m.outputRoutes(mux) // reads: on both sockets
 	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
 	})

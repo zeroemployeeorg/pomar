@@ -25,7 +25,7 @@ let usage = """
                                  --image REF --image-digest D --id ID
            pomar-host helper --attempt ID --state-dir DIR --store S --kernel K \\
                              --init REF --init-digest D --image REF --image-digest D [--base ROOTFS] [--source FILE [--source-kind tar|bundle --source-sha SHA] [--inputs DIR]] \\
-                             [--goproxy-socket SOCK --shim BIN] \\
+                             [--goproxy-socket SOCK --shim BIN] [--outputs NAME,NAME... --outputs-dir DIR --outputs-max BYTES] \\
                              [--cpus N] [--memory-bytes N] -- CMD...
            pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N \\
                                  [--extra-layers PATH,PATH...]
@@ -85,12 +85,16 @@ case "helper":
     guard let kind = Helper.sourceKind(f["source-kind"], sha: f["source-sha"]) else {
         fail("helper: --source-kind is tar or bundle, and a bundle needs --source-sha with a full SHA", code: 2)
     }
+    guard let outs = Helper.outputsFlags(f["outputs"], dir: f["outputs-dir"], max: f["outputs-max"]) else {
+        fail("helper: --outputs, --outputs-dir and --outputs-max go together; names are letters, digits, dot, dash and underscore", code: 2)
+    }
     let command = Array(rest[(sep + 1)...])
     let code = await Helper.run(
         .init(
             attempt: a, stateDir: dir, store: s, kernel: k, initRef: ir, initDigest: idg,
             imageRef: mr, imageDigest: md, command: command, base: f["base"], source: f["source"],
             proxySocket: f["goproxy-socket"], shim: f["shim"], sourceBundleSHA: kind.sha, inputs: f["inputs"],
+            outputs: outs.names, outputsDir: outs.dir, outputsMax: outs.max,
             cpus: caps.cpus, memoryBytes: caps.memoryBytes))
     exit(code)
 case "build-base":

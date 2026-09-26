@@ -92,3 +92,47 @@ import Testing
     #expect(Rootfs.extraLayers("relative.tar.xz") == nil)
     #expect(Rootfs.extraLayers("") == nil)
 }
+
+@Test func shimWithoutOutputsIsUnchanged() {
+    #expect(Helper.shim(["make"], outputs: [], maxBytes: 64) == Helper.shim(["make"]))
+}
+
+@Test func shimWithOutputsRunsTheCommandAsAChildThenStagesChecked() {
+    let args = Helper.shim(["make", "report"], outputs: ["report.json", "log.txt"], maxBytes: 67_108_864)
+    let script = args[2]
+    #expect(Array(args.suffix(3)) == ["pomar-shim", "make", "report"])
+    #expect(!script.contains("exec \"$@\""))
+    // The command's status is kept, other job processes are killed before
+    // anything is checked, and the shim exits with the command's status.
+    #expect(script.contains("cd /work || exit 125; \"$@\"; rc=$?; kill -9 -1 2>/dev/null; "))
+    #expect(script.contains("S=/pomar/outputs/.pomar-stage; rm -rf \"$S\" && mkdir -m 700 \"$S\" || exit $rc; left=67108864; "))
+    #expect(script.contains("for n in report.json log.txt; do f=/pomar/outputs/$n; "))
+    #expect(script.contains("if [ -L \"$f\" ] || [ ! -f \"$f\" ]; then"))
+    #expect(script.contains("if [ \"$s\" -gt \"$left\" ]; then"))
+    #expect(script.hasSuffix("cp \"$f\" \"$S/$n\" && left=$((left - s)); done; exit $rc"))
+}
+
+@Test func extractMakesTheOutputsDirectoryOnlyWhenAsked() {
+    #expect(!Helper.extractCommand()[2].contains("/pomar/outputs"))
+    let script = Helper.extractCommand(outputs: true)[2]
+    #expect(script.hasSuffix("&& mkdir -p /pomar/outputs && chown 1000:1000 /pomar/outputs && touch /pomar/job/.pomar-ready"))
+}
+
+@Test func outputsFlagsParsing() {
+    let none = Helper.outputsFlags(nil, dir: nil, max: nil)
+    #expect(none?.names == [] && none?.dir == nil)
+    let ok = Helper.outputsFlags("report.json,log_1.txt", dir: "/r/outputs", max: "67108864")
+    #expect(ok?.names == ["report.json", "log_1.txt"] && ok?.dir == "/r/outputs" && ok?.max == 67_108_864)
+    for bad in [
+        "a;b", "a b", "../x", "a/b", ".hidden", "-x", "a,a", "a,", "", "$(x)", "é",
+        String(repeating: "a", count: 129),
+    ] {
+        #expect(Helper.outputsFlags(bad, dir: "/r", max: "1") == nil, "accepted \(bad)")
+    }
+    #expect(Helper.outputsFlags("a", dir: nil, max: "1") == nil)
+    #expect(Helper.outputsFlags("a", dir: "/r", max: nil) == nil)
+    #expect(Helper.outputsFlags("a", dir: "/r", max: "0") == nil)
+    #expect(Helper.outputsFlags(nil, dir: "/r", max: nil) == nil)
+    let many = (0..<17).map { "f\($0)" }.joined(separator: ",")
+    #expect(Helper.outputsFlags(many, dir: "/r", max: "1") == nil)
+}

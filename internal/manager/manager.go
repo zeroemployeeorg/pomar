@@ -380,6 +380,13 @@ func (m *Manager) jobClass(name string) (JobClass, error) {
 // StartIn is Start in a named job class: its caps and concurrency limit, its
 // guest and its base. An unknown class is refused before anything is done.
 func (m *Manager) StartIn(className, id string, command []string, src *Source, inputs ...Input) (Entry, error) {
+	return m.StartOut(className, id, command, src, nil, inputs...)
+}
+
+// StartOut is StartIn with named outputs: the files the command leaves at
+// /pomar/outputs/NAME, copied into the record when it exits. Outputs need a
+// source: the job user and its directories exist only with one.
+func (m *Manager) StartOut(className, id string, command []string, src *Source, outputs []string, inputs ...Input) (Entry, error) {
 	v := m.cfg.Venue
 	jc, err := m.jobClass(className)
 	if err != nil {
@@ -399,6 +406,12 @@ func (m *Manager) StartIn(className, id string, command []string, src *Source, i
 	}
 	inputRecs, err := checkInputs(inputs)
 	if err != nil {
+		return Entry{}, err
+	}
+	if len(outputs) > 0 && src == nil {
+		return Entry{}, errors.New("manager: outputs need a source: the job user writes them")
+	}
+	if err := checkOutputs(outputs); err != nil {
 		return Entry{}, err
 	}
 	// With configured mirrors, the named mirror is synced from its configured
@@ -511,6 +524,7 @@ func (m *Manager) StartIn(className, id string, command []string, src *Source, i
 		if len(inputs) > 0 {
 			args = append(args, "--inputs", filepath.Join(rec, inputsDir))
 		}
+		args = append(args, outputArgs(rec, outputs)...)
 	}
 	withProxy := src != nil && m.proxyEnabled()
 	if withProxy {
@@ -550,7 +564,7 @@ func (m *Manager) StartIn(className, id string, command []string, src *Source, i
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs, OutputNames: outputs}
 	if src != nil {
 		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git}
 		if src.Git {
@@ -915,6 +929,9 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		st, reason = StateFailed, e.HostCondition+" ("+detail+")"
 	}
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
+	if len(e.OutputNames) > 0 {
+		e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames)
+	}
 	m.closeProxy(id)
 	m.t.save()
 	final := *e

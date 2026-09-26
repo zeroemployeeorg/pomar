@@ -72,6 +72,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		}
 	}
 	doc["env"] = env
+	if len(e.OutputNames) > 0 {
+		doc["outputs"] = e.Outputs
+	}
 	return doc
 }
 

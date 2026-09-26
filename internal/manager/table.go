@@ -61,6 +61,10 @@ type Entry struct {
 	Pins *Pins `json:"pins,omitempty"`
 	// Inputs are the files the client sent with the request.
 	Inputs []InputRecord `json:"inputs,omitempty"`
+	// OutputNames are the outputs the start named; Outputs is what was
+	// copied out of each, filled when the attempt ends.
+	OutputNames []string       `json:"output_names,omitempty"`
+	Outputs     []OutputRecord `json:"outputs,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 
