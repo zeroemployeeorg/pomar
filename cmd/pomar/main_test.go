@@ -2,10 +2,15 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/zeroemployeeorg/pomar/internal/manager"
+	"github.com/zeroemployeeorg/pomar/internal/result"
 )
 
 func TestRun(t *testing.T) {
@@ -49,5 +54,42 @@ func TestVenueUnaccountedExit(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "unaccounted: 1") {
 		t.Fatalf("output = %q", out.String())
+	}
+}
+
+// A result reply as `pomar attempt result` prints it (indented) verifies, and
+// an edited copy does not. The printed reply re-indents the signed document.
+func TestResultVerifyAcceptsThePrintedReply(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "keys")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, err := result.LoadOrCreate(dir, os.Getuid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, _ := result.Canonical(map[string]any{"attempt": "a1", "exit_code": 0, "state": "exited", "command": []string{"make", "verify"}})
+	reply := manager.ResultReply{Result: doc, Signature: base64.StdEncoding.EncodeToString(s.Sign(doc)), KeyID: s.ID}
+	printed, _ := json.MarshalIndent(reply, "", "  ") // as attemptCmd prints it
+	pub := base64.StdEncoding.EncodeToString(s.Public())
+	check := func(b []byte) int {
+		f := filepath.Join(t.TempDir(), "reply.json")
+		os.WriteFile(f, b, 0o600)
+		var out, errb bytes.Buffer
+		return run([]string{"result", "verify", "-reply", f, "-public-key", pub}, &out, &errb)
+	}
+	if got := check(printed); got != 0 {
+		t.Fatalf("the printed reply did not verify: exit %d", got)
+	}
+	compact, _ := json.Marshal(reply)
+	if got := check(compact); got != 0 {
+		t.Fatalf("the compact reply did not verify: exit %d", got)
+	}
+	edited := bytes.Replace(printed, []byte(`"exit_code": 0`), []byte(`"exit_code": 1`), 1)
+	if bytes.Equal(edited, printed) {
+		t.Fatal("the test did not edit the reply")
+	}
+	if got := check(edited); got != 1 {
+		t.Fatalf("an edited reply verified: exit %d", got)
 	}
 }
