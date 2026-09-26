@@ -168,3 +168,9 @@ import Testing
     #expect(!Helper.extractCommand(bundleSHA: sha)[2].contains("safe.directory"))
     #expect(!Helper.extractCommand(readonlySource: true)[2].contains("safe.directory"))
 }
+
+@Test func guestsNameNoResolver() {
+    #expect(Helper.noResolver.nameservers.isEmpty)
+    #expect(Helper.noResolver.domain == nil)
+    #expect(Helper.noResolver.searchDomains.isEmpty)
+}

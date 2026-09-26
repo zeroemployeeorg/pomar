@@ -273,6 +273,9 @@ public enum Helper {
     static let shimInGuest = "/pomar/shim"
     public static let inputsInGuest = "/pomar/inputs"
     public static let pinsInGuest = "/pomar/pins.json"
+
+    /// The guest's DNS: no nameserver, since the guest has no interface.
+    public static let noResolver = DNS(nameservers: [])
     static let proxyReady = "/pomar/shim.ready"
 
     /// The environment a command gets with the module proxy: GOPROXY only.
@@ -424,6 +427,10 @@ public enum Helper {
                 config.process.stdout = out
                 config.process.stderr = out
                 config.interfaces = []
+                // With no interface there is nothing to resolve through: the
+                // guest's resolv.conf names no resolver, instead of whatever
+                // the image carries (elders' ruling r26 §4.3).
+                config.dns = Helper.noResolver
                 if let sock = o.proxySocket {
                     config.sockets = [
                         UnixSocketConfiguration(

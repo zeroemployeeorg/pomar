@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -17,8 +18,10 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/base"
+	"github.com/zeroemployeeorg/pomar/internal/boundary"
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/debs"
 	"github.com/zeroemployeeorg/pomar/internal/goproxy"
@@ -73,6 +76,9 @@ const usage = `usage:
   pomar volume rm [-root DIR] -id ID
   pomar smoke fetch-kernel [-root DIR] -host-bin PATH
   pomar smoke boot [-root DIR] -host-bin PATH -kernel-sha256 HEX -id ID
+  pomar smoke boundaries [-root DIR | -socket PATH] -mirror NAME [-ref REF] [-class NAME] [-id ID]
+                                    run the boundary probe as a job with a read-only source; grade it on
+                                    the host; exit 0 only if all four checks pass
 
 The data root comes from -root or POMAR_DATA_ROOT. It has no default.
 `
@@ -90,6 +96,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return venueStatus(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "venue" && (args[1] == "init" || args[1] == "classify"):
 		return venueChange(args[1], args[2:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "smoke" && args[1] == "boundaries":
+		return boundariesCmd(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "smoke" && (args[1] == "fetch-kernel" || args[1] == "boot"):
 		return smokeCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 1 && args[0] == "manager":
@@ -724,4 +732,83 @@ func fetchOutput(c *manager.Client, id, name, path string) (string, error) {
 		return "", err
 	}
 	return sum, nil
+}
+
+// boundariesCmd is the guest boundary self-test (POMAR-SOW-06 §4.3): it runs
+// the fixed probe as a real attempt with a read-only source, fetches its
+// report through copy-out (checked against its sha256), and grades it here.
+func boundariesCmd(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("smoke boundaries", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
+	socket := fs.String("socket", "", "talk to the manager on this socket instead of the data root's")
+	mirrorName := fs.String("mirror", "", "the source mirror the probe runs against (read-only)")
+	ref := fs.String("ref", "main", "the source ref")
+	className := fs.String("class", "", "the job class to test; empty is the manager's default")
+	id := fs.String("id", "boundaries-"+time.Now().UTC().Format("20060102-150405"), "attempt id")
+	wait := fs.Duration("timeout", 10*time.Minute, "how long to wait for the attempt to end")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *mirrorName == "" {
+		fmt.Fprintln(stderr, "smoke boundaries: -mirror is required: the read-only check needs a source")
+		return 2
+	}
+	var c *manager.Client
+	switch {
+	case *socket != "":
+		c = manager.NewSocketClient(*socket)
+	case *root != "":
+		c = manager.NewClient(*root)
+	default:
+		fmt.Fprintln(stderr, "smoke boundaries: data root not set (or give -socket)")
+		return 2
+	}
+	probe := []byte(boundary.Probe)
+	h := sha256.Sum256(probe)
+	req := manager.StartRequest{
+		ID: *id, Class: *className, Command: []string{"/bin/sh", "/pomar/inputs/probe.sh"},
+		Source:  &manager.Source{Mirror: *mirrorName, Ref: *ref, ReadOnly: true},
+		Inputs:  []manager.Input{{Name: "probe.sh", Data: probe, SHA256: hex.EncodeToString(h[:])}},
+		Outputs: []string{boundary.ReportName},
+	}
+	var e manager.Entry
+	if err := c.Do("POST", "/v1/attempts", req, &e); err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	deadline := time.Now().Add(*wait)
+	for !e.Terminal() {
+		if time.Now().After(deadline) {
+			fmt.Fprintf(stderr, "smoke boundaries: %s did not end within %s\n", *id, *wait)
+			return 1
+		}
+		time.Sleep(2 * time.Second)
+		var l []manager.Entry
+		if err := c.Do("GET", "/v1/attempts", nil, &l); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		for _, x := range l {
+			if x.Attempt == *id {
+				e = x
+			}
+		}
+	}
+	var report bytes.Buffer
+	sum, err := c.Output(*id, boundary.ReportName, &report)
+	if err != nil {
+		fmt.Fprintf(stderr, "smoke boundaries: %s ended %s with no report: %v\n", *id, e.State, err)
+		return 1
+	}
+	g := boundary.Grade(report.String())
+	b, _ := json.MarshalIndent(map[string]any{
+		"attempt": *id, "state": e.State, "exit_code": e.ExitCode, "report_sha256": sum,
+		"pass": g.Pass, "checks": g.Checks,
+	}, "", "  ")
+	fmt.Fprintln(stdout, string(b))
+	if !g.Pass {
+		return 1
+	}
+	return 0
 }
