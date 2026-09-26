@@ -158,6 +158,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
+	m.resultRoutes(mux) // reads: on both sockets
 	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
 	})

@@ -51,6 +51,8 @@ var Budgets = []Budget{
 	{Name: "attempt-records", Prefix: "attempts/", Bytes: 4 * GiB, Evict: true, Class: venue.ClassAttempt},
 	{Name: "manager", Prefix: "manager", Bytes: 1 * GiB, Evict: false, Class: venue.ClassCache},
 	{Name: "tmp", Prefix: "tmp", Bytes: 4 * GiB, Evict: false, Class: venue.ClassCache},
+	// The permanent manager's result-signing key: never evicted.
+	{Name: "keys", Prefix: "keys", Bytes: 1 << 20, Evict: false, Class: venue.ClassCache},
 }
 
 func (b Budget) covers(o venue.Object) bool {

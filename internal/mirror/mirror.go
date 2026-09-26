@@ -92,6 +92,14 @@ func (m *Mirrors) Sync(ctx context.Context, name, url string) error {
 	return v.Created(venue.KindVolume, id(name))
 }
 
+// Remote returns the URL the mirror fetches from, for the result document.
+func (m *Mirrors) Remote(ctx context.Context, name string) (string, error) {
+	if !m.Venue.IsOpen(venue.KindVolume, id(name)) {
+		return "", fmt.Errorf("mirror: no mirror %q", name)
+	}
+	return m.git(ctx, m.Path(name), "config", "--get", "remote.origin.url")
+}
+
 // Resolve pins ref to a full commit SHA in the mirror. A full SHA must exist
 // in the mirror; anything else is resolved as a ref.
 func (m *Mirrors) Resolve(ctx context.Context, name, ref string) (string, error) {

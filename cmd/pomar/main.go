@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -24,6 +25,7 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/zeroemployeeorg/pomar/internal/result"
 	"github.com/zeroemployeeorg/pomar/internal/sign"
 	"github.com/zeroemployeeorg/pomar/internal/smoke"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -40,6 +42,7 @@ const usage = `usage:
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
+                [-ctl-socket PATH] [-sign-results]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR] -id ID [-mirror NAME -ref REF [-git] [-input NAME=PATH]...] -- CMD...
@@ -50,7 +53,12 @@ const usage = `usage:
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile|vm-orphans [-root DIR]
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
-  pomar attempt stop|rm [-root DIR] -id ID
+  pomar attempt stop|rm|result [-root DIR | -socket PATH] -id ID
+                                    result: the attempt's result document and signature
+  pomar attempt signing-key [-root DIR | -socket PATH]
+                                    the public key the manager signs results with
+  pomar result verify -reply FILE -public-key BASE64
+                                    exit 0 only if the result verifies against the pinned key
   pomar attempt capacity [-root DIR] the job class, slots, space and how many fit when idle
   pomar attempt caches|evict [-root DIR]
                                     cache budgets and planned evictions; evict applies them
@@ -88,9 +96,53 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return attemptCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "volume" && (args[1] == "create" || args[1] == "rm"):
 		return volumeCmd(args[1], args[2:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "result" && args[1] == "verify":
+		return resultVerify(args[2:], stdout, stderr)
 	}
 	fmt.Fprint(stderr, usage)
 	return 2
+}
+
+// resultVerify checks a result reply (as `pomar attempt result` prints it)
+// against a pinned public key. It verifies the exact bytes the manager wrote.
+func resultVerify(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("result verify", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	replyFile := fs.String("reply", "", "a result reply, as `pomar attempt result` prints it")
+	pub := fs.String("public-key", "", "the pinned public key, base64 (as `pomar attempt signing-key` prints it)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *replyFile == "" || *pub == "" {
+		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	b, err := os.ReadFile(*replyFile)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	var r manager.ResultReply
+	if err := json.Unmarshal(b, &r); err != nil {
+		fmt.Fprintln(stderr, "result verify:", err)
+		return 1
+	}
+	key, err := base64.StdEncoding.DecodeString(*pub)
+	if err != nil {
+		fmt.Fprintln(stderr, "result verify: public key:", err)
+		return 1
+	}
+	sig, err := base64.StdEncoding.DecodeString(r.Signature)
+	if err != nil || len(sig) == 0 {
+		fmt.Fprintln(stderr, "result verify: the result is not signed")
+		return 1
+	}
+	if !result.Verify(key, r.Result, sig) {
+		fmt.Fprintln(stdout, "result verify: FAILED: the signature does not match this result and key")
+		return 1
+	}
+	fmt.Fprintf(stdout, "result verify: ok (key %s)\n", result.KeyID(key))
+	return 0
 }
 
 func venueStatus(args []string, stdout, stderr io.Writer) int {
@@ -225,12 +277,21 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	ctlSocket := fs.String("ctl-socket", "", "a second socket for the stream: start, stop and reads only (mode 0660; its directory must not be open to others)")
+	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *hostBin == "" || *kernelSum == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
+	}
+	// The stream's own manager never holds a key (r14 condition 4): refused
+	// before anything else is opened.
+	if *signResults {
+		if err := result.CheckRoleUser(os.Getuid()); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
 	}
 	// Helper identity is matched against this exact path on every restart.
 	bin, err := filepath.EvalSymlinks(*hostBin)
@@ -270,7 +331,21 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		proxy = &goproxy.Proxy{Cache: filepath.Join(v.Root(), "goproxy")}
 	}
+	var signer *result.Signer
+	if *signResults {
+		if err := v.EnsureCache(venue.KindVolume, "keys", "keys"); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		signer, err = result.LoadOrCreate(filepath.Join(v.Root(), "keys"), os.Getuid())
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		fmt.Fprintf(stdout, "manager: signing results with key %s\n", signer.ID)
+	}
 	m, err := manager.Open(manager.Config{
+		Signer:  signer,
 		Venue:   v,
 		HostBin: bin,
 		Guest: manager.Guest{
@@ -396,6 +471,14 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "result":
+		var r manager.ResultReply
+		err = c.Do("GET", "/v1/attempts/"+*id+"/result", nil, &r)
+		out = r
+	case "signing-key":
+		var k manager.KeyReply
+		err = c.Do("GET", "/v1/signing-key", nil, &k)
+		out = k
 	case "vm-orphans":
 		var o []manager.VMOrphan
 		err = c.Do("GET", "/v1/vm-orphans", nil, &o)
