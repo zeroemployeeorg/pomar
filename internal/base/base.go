@@ -243,3 +243,18 @@ func fileSHA256(path string) (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
+// RecordedSHA256 returns the sha256 recorded when the base at rootfs (a path
+// Path or Verify returned) was built. It reads the record; it does not hash
+// the rootfs, which is gigabytes (elders' ruling r26 §4.1).
+func RecordedSHA256(rootfs string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(rootfs), "rootfs.sha256"))
+	if err != nil {
+		return "", err
+	}
+	sum := strings.TrimSpace(string(b))
+	if len(sum) != 64 || strings.Trim(sum, "0123456789abcdef") != "" {
+		return "", fmt.Errorf("base: %s holds no sha256", filepath.Join(filepath.Dir(rootfs), "rootfs.sha256"))
+	}
+	return sum, nil
+}

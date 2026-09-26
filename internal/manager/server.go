@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"net/http"
@@ -165,6 +166,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 	}
 	m.resultRoutes(mux) // reads: on both sockets
 	m.outputRoutes(mux) // reads: on both sockets
+	m.pinsRoutes(mux)   // reads: on both sockets
 	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
 	})
@@ -248,4 +250,20 @@ func (c *Client) Do(method, path string, body, out any) error {
 		return json.NewDecoder(resp.Body).Decode(out)
 	}
 	return nil
+}
+
+// raw GETs path and returns the reply's bytes unchanged, for documents whose
+// exact bytes matter.
+func (c *Client) raw(path string) ([]byte, error) {
+	resp, err := c.http.Get("http://manager" + path)
+	if err != nil {
+		return nil, fmt.Errorf("manager not reachable: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		var e map[string]string
+		json.NewDecoder(resp.Body).Decode(&e)
+		return nil, fmt.Errorf("manager: %s: %s", resp.Status, e["error"])
+	}
+	return io.ReadAll(resp.Body)
 }

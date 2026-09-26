@@ -57,6 +57,8 @@ const usage = `usage:
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
   pomar attempt stop|rm|result [-root DIR | -socket PATH] -id ID
                                     result: the attempt's result document and signature
+  pomar attempt pins [-root DIR | -socket PATH] -id ID
+                                    the pins document, the same bytes the guest reads at /pomar/pins.json
   pomar attempt output [-root DIR | -socket PATH] -id ID -name NAME -o PATH
                                     write a copied-out output to PATH, checked against its recorded sha256
   pomar attempt signing-key [-root DIR | -socket PATH]
@@ -506,6 +508,16 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "pins":
+		// The document's exact bytes, not re-encoded: they are what the
+		// guest reads at /pomar/pins.json.
+		b, perr := c.Pins(*id)
+		if perr != nil {
+			fmt.Fprintln(stderr, perr)
+			return 1
+		}
+		stdout.Write(b)
+		return 0
 	case "output":
 		if *outName == "" || *outPath == "" {
 			fmt.Fprintln(stderr, "attempt output: -name and -o are required")

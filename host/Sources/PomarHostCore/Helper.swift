@@ -40,6 +40,9 @@ public enum Helper {
         /// With no source, run the command as the job user anyway (a class
         /// that never runs a job as root).
         public var jobUser: Bool
+        /// The attempt's pins document, copied to /pomar/pins.json (root,
+        /// 0444) before the command is released; needs a source.
+        public var pins: String?
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
 
@@ -49,7 +52,7 @@ public enum Helper {
             command: [String], base: String? = nil, source: String? = nil,
             proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil, inputs: String? = nil,
             outputs: [String] = [], outputsDir: String? = nil, outputsMax: Int64 = 0,
-            readonlySource: Bool = false, jobUser: Bool = false,
+            readonlySource: Bool = false, jobUser: Bool = false, pins: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
@@ -63,6 +66,7 @@ public enum Helper {
             self.outputsMax = outputsMax
             self.readonlySource = readonlySource
             self.jobUser = jobUser
+            self.pins = pins
             self.cpus = cpus
             self.memoryBytes = memoryBytes
             self.attempt = attempt
@@ -268,6 +272,7 @@ public enum Helper {
     public static let proxyListen = "127.0.0.1:7070"
     static let shimInGuest = "/pomar/shim"
     public static let inputsInGuest = "/pomar/inputs"
+    public static let pinsInGuest = "/pomar/pins.json"
     static let proxyReady = "/pomar/shim.ready"
 
     /// The environment a command gets with the module proxy: GOPROXY only.
@@ -467,6 +472,13 @@ public enum Helper {
                 if withProxy, let shim = o.shim {
                     proxyShim = try await startProxyShim(container, shim: shim, output: log)
                     metrics["goproxy"] = "http://" + proxyListen
+                }
+                if let pins = o.pins {
+                    // Root-owned and read-only in the guest: the job reads
+                    // what it runs with, and cannot change it.
+                    try await container.copyIn(
+                        from: URL(fileURLWithPath: pins), to: URL(fileURLWithPath: pinsInGuest), mode: 0o444)
+                    metrics["pins"] = pinsInGuest
                 }
                 if let dir = o.inputs {
                     // The client's files, as a directory; unpacked in the guest,

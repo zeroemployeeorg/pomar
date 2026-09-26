@@ -183,4 +183,7 @@ type Pins struct {
 	Pomar       string `json:"pomar_version"`
 	HostBin     string `json:"host_bin_sha256"`
 	CommandHash string `json:"command_sha256"`
+	// RootfsSHA256 is the cloned base's sha256, recorded when the base was
+	// built (never rehashed per start); empty when the image was unpacked.
+	RootfsSHA256 string `json:"rootfs_sha256,omitempty"`
 }

@@ -169,3 +169,22 @@ func TestPackageSetKeysTheBase(t *testing.T) {
 		t.Fatalf("ids %s %s", withA.objID(h), plain.objID(h))
 	}
 }
+
+func TestRecordedSHA256ReadsTheRecordNotTheRootfs(t *testing.T) {
+	dir := t.TempDir()
+	rootfs := filepath.Join(dir, "rootfs.ext4")
+	os.WriteFile(rootfs, []byte("not what the record says"), 0o400)
+	sum := strings.Repeat("d", 64)
+	os.WriteFile(filepath.Join(dir, "rootfs.sha256"), []byte(sum+"\n"), 0o400)
+	if got, err := RecordedSHA256(rootfs); err != nil || got != sum {
+		t.Fatalf("RecordedSHA256 = %q, %v", got, err)
+	}
+	os.Remove(filepath.Join(dir, "rootfs.sha256"))
+	os.WriteFile(filepath.Join(dir, "rootfs.sha256"), []byte("garbage\n"), 0o600)
+	if _, err := RecordedSHA256(rootfs); err == nil {
+		t.Fatal("a record with no sha256 was accepted")
+	}
+	if _, err := RecordedSHA256(filepath.Join(t.TempDir(), "rootfs.ext4")); err == nil {
+		t.Fatal("a missing record was accepted")
+	}
+}
