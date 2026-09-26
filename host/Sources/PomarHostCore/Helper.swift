@@ -30,6 +30,11 @@ public enum Helper {
         /// A directory of input files, copied into the guest at /pomar/inputs.
         public var inputs: String?
         public var shim: String?
+        /// Named outputs, copied out of the guest into outputsDir when the
+        /// command exits; the shim stages at most outputsMax bytes of them.
+        public var outputs: [String]
+        public var outputsDir: String?
+        public var outputsMax: Int64
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
 
@@ -38,6 +43,7 @@ public enum Helper {
             initRef: String, initDigest: String, imageRef: String, imageDigest: String,
             command: [String], base: String? = nil, source: String? = nil,
             proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil, inputs: String? = nil,
+            outputs: [String] = [], outputsDir: String? = nil, outputsMax: Int64 = 0,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
@@ -46,6 +52,9 @@ public enum Helper {
             self.sourceBundleSHA = sourceBundleSHA
             self.inputs = inputs
             self.shim = shim
+            self.outputs = outputs
+            self.outputsDir = outputsDir
+            self.outputsMax = outputsMax
             self.cpus = cpus
             self.memoryBytes = memoryBytes
             self.attempt = attempt
@@ -112,10 +121,80 @@ public enum Helper {
         return ["/bin/sh", "-c", script, "pomar-shim"] + command
     }
 
+    /// Where a job leaves its named outputs, and where the shim stages the
+    /// ones that pass its checks for the helper to copy out.
+    public static let outputsInGuest = "/pomar/outputs"
+    public static let outputsStage = "/pomar/outputs/.pomar-stage"
+
+    /// The guest's main process when the attempt names outputs: as shim, but
+    /// the command runs as a child, not in its place. When it exits, the shim
+    /// kills every other process of the job's uid, so nothing can change a
+    /// file after it is checked, then stages each named output that is a
+    /// regular file (not a symbolic link) within what is left of the cap, and
+    /// exits with the command's status. Names are the manager's (letters,
+    /// digits, dot, dash and underscore; never a path or a leading dot).
+    public static func shim(_ command: [String], outputs: [String], maxBytes: Int64) -> [String] {
+        if outputs.isEmpty { return shim(command) }
+        let names = outputs.joined(separator: " ")
+        let script =
+            "while [ ! -e \(readyMarker) ]; do sleep 0.05; done; rm -f \(readyMarker); "
+            + "cd \(workDir) || exit 125; \"$@\"; rc=$?; kill -9 -1 2>/dev/null; "
+            + "S=\(outputsStage); rm -rf \"$S\" && mkdir -m 700 \"$S\" || exit $rc; left=\(maxBytes); "
+            + "for n in \(names); do f=\(outputsInGuest)/$n; "
+            + "if [ -L \"$f\" ] || [ ! -f \"$f\" ]; then echo \"pomar: output $n: missing or not a regular file\" >&2; continue; fi; "
+            + "s=$(wc -c < \"$f\"); s=$((s + 0)); "
+            + "if [ \"$s\" -gt \"$left\" ]; then echo \"pomar: output $n: $s bytes, over what is left of the cap\" >&2; continue; fi; "
+            + "cp \"$f\" \"$S/$n\" && left=$((left - s)); done; exit $rc"
+        return ["/bin/sh", "-c", script, "pomar-shim"] + command
+    }
+
+    /// Parses --outputs, --outputs-dir and --outputs-max: all three or none.
+    /// The names go into the shim's script, so each is checked here as the
+    /// manager checks it: 1 to 128 of letters, digits, dot, dash and
+    /// underscore, starting with a letter or digit, and none repeated.
+    /// Returns nil on a bad set.
+    public static func outputsFlags(_ names: String?, dir: String?, max: String?) -> (
+        names: [String], dir: String?, max: Int64
+    )? {
+        guard let names else {
+            return dir == nil && max == nil ? ([], nil, 0) : nil
+        }
+        guard let dir, let m = max.flatMap({ Int64($0) }), m > 0 else { return nil }
+        let list = names.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
+        let alnum = { (c: Character) in c.isASCII && (c.isLetter || c.isNumber) }
+        for n in list {
+            guard let first = n.first, alnum(first), n.count <= 128,
+                n.allSatisfy({ alnum($0) || $0 == "." || $0 == "-" || $0 == "_" })
+            else { return nil }
+        }
+        guard Set(list).count == list.count, list.count <= 16 else { return nil }
+        return (list, dir, m)
+    }
+
+    /// Copies the staged outputs out of the guest, each on its own, into dir.
+    /// A name the shim did not stage fails to copy and is left out; the
+    /// manager records it as missing. Returns how many were copied.
+    static func copyOutputs(_ container: LinuxContainer, names: [String], to dir: String) async -> Int {
+        try? FileManager.default.createDirectory(
+            atPath: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        var copied = 0
+        for n in names {
+            let dst = URL(fileURLWithPath: dir).appendingPathComponent(n)
+            do {
+                try await container.copyOut(
+                    from: URL(fileURLWithPath: outputsStage + "/" + n), to: dst, createParents: false)
+                copied += 1
+            } catch {
+                try? FileManager.default.removeItem(at: dst)
+            }
+        }
+        return copied
+    }
+
     /// The guest-side step that unpacks the copied archive and releases the
     /// shim. With the module proxy, it first waits (up to 10 s) for the
     /// proxy shim to be listening, so the command never starts without it.
-    public static func extractCommand(waitForProxy: Bool = false, bundleSHA: String? = nil) -> [String] {
+    public static func extractCommand(waitForProxy: Bool = false, bundleSHA: String? = nil, outputs: Bool = false) -> [String] {
         let wait =
             waitForProxy
             ? "n=0; until [ -e \(proxyReady) ]; do n=$((n+1)); [ $n -gt 200 ] && { echo 'pomar: proxy shim not ready' >&2; exit 97; }; sleep 0.05; done; "
@@ -133,7 +212,9 @@ public enum Helper {
             "/bin/sh", "-c",
             wait + unpack + " && rm -f \(archiveInGuest) && \(registerJobUser) && mkdir -p \(jobHome) "
                 + "&& chown -R \(jobUID):\(jobUID) \(workDir) \(jobHome) "
-                + "&& { [ ! -d \(inputsInGuest) ] || chown -R \(jobUID):\(jobUID) \(inputsInGuest); } && touch \(readyMarker)",
+                + "&& { [ ! -d \(inputsInGuest) ] || chown -R \(jobUID):\(jobUID) \(inputsInGuest); } "
+                + (outputs ? "&& mkdir -p \(outputsInGuest) && chown \(jobUID):\(jobUID) \(outputsInGuest) " : "")
+                + "&& touch \(readyMarker)",
         ]
     }
 
@@ -184,7 +265,8 @@ public enum Helper {
     /// it there, and releases the command. Returns the copy and unpack times
     /// in milliseconds.
     static func copyIn(
-        _ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false, bundleSHA: String? = nil
+        _ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false, bundleSHA: String? = nil,
+        outputs: Bool = false
     ) async throws -> (copy: Int, extract: Int) {
         let clock = ContinuousClock()
         let t0 = clock.now
@@ -192,7 +274,7 @@ public enum Helper {
             from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: archiveInGuest), mode: 0o600)
         let t1 = clock.now
         let p = try await container.exec("pomar-extract") { config in
-            config.arguments = extractCommand(waitForProxy: waitForProxy, bundleSHA: bundleSHA)
+            config.arguments = extractCommand(waitForProxy: waitForProxy, bundleSHA: bundleSHA, outputs: outputs)
             config.stdout = output
             config.stderr = output
         }
@@ -291,7 +373,8 @@ public enum Helper {
             let configure: (inout LinuxContainer.Configuration) throws -> Void = { config in
                 config.cpus = o.cpus
                 config.memoryInBytes = o.memoryBytes
-                config.process.arguments = o.source == nil ? o.command : Helper.shim(o.command)
+                config.process.arguments =
+                    o.source == nil ? o.command : Helper.shim(o.command, outputs: o.outputs, maxBytes: o.outputsMax)
                 if o.source != nil {
                     // The job runs unprivileged in its guest: its tests may
                     // rely on permissions root would bypass.
@@ -360,7 +443,8 @@ public enum Helper {
                 let attrs = try FileManager.default.attributesOfItem(atPath: src)
                 metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
                 let t = try await copyIn(
-                    container, source: src, output: log, waitForProxy: withProxy, bundleSHA: o.sourceBundleSHA)
+                    container, source: src, output: log, waitForProxy: withProxy, bundleSHA: o.sourceBundleSHA,
+                    outputs: !o.outputs.isEmpty)
                 if o.sourceBundleSHA != nil { metrics["source_kind"] = "bundle" }
                 metrics["copy_in_ms"] = String(t.copy)
                 metrics["extract_ms"] = String(t.extract)
@@ -388,6 +472,11 @@ public enum Helper {
                 exitCode = status.exitCode
                 break
             }
+        }
+        // The command exited, and with it the shim's staging: copy the staged
+        // outputs out while the guest is still up. A stopped attempt has none.
+        if !stopped, !o.outputs.isEmpty, let dir = o.outputsDir {
+            metrics["outputs_copied"] = String(await copyOutputs(container, names: o.outputs, to: dir))
         }
         try? await container.stop()
         // Read before deleting the guest, which frees its clone's blocks.

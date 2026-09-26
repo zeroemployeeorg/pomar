@@ -45,8 +45,9 @@ const usage = `usage:
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-git] [-input NAME=PATH]...] -- CMD...
+  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-git] [-input NAME=PATH]... [-output NAME]...] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission
+                                    -output: a file the command leaves at /pomar/outputs/NAME, copied out when it exits
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
   pomar mirror sync [-root DIR] -name NAME -url URL
@@ -55,6 +56,8 @@ const usage = `usage:
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
   pomar attempt stop|rm|result [-root DIR | -socket PATH] -id ID
                                     result: the attempt's result document and signature
+  pomar attempt output [-root DIR | -socket PATH] -id ID -name NAME -o PATH
+                                    write a copied-out output to PATH, checked against its recorded sha256
   pomar attempt signing-key [-root DIR | -socket PATH]
                                     the public key the manager signs results with
   pomar result verify -reply FILE -public-key BASE64
@@ -427,6 +430,13 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
+	var outputs []string
+	fs.Func("output", "NAME: a file the command leaves at /pomar/outputs/NAME, copied out when it exits (start; repeatable)", func(v string) error {
+		outputs = append(outputs, v)
+		return nil
+	})
+	outName := fs.String("name", "", "the output to fetch (output)")
+	outPath := fs.String("o", "", "the file to write the output to; it must not exist (output)")
 	var inputs []manager.Input
 	fs.Func("input", "NAME=PATH: send a file, copied into the guest at /pomar/inputs/NAME (start; repeatable)", func(v string) error {
 		name, path, ok := strings.Cut(v, "=")
@@ -463,7 +473,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
-		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs, Class: *className}
+		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs, Class: *className, Outputs: outputs}
 		if *mirrorName != "" || *ref != "" {
 			if *mirrorName == "" || *ref == "" {
 				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")
@@ -488,6 +498,17 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "output":
+		if *outName == "" || *outPath == "" {
+			fmt.Fprintln(stderr, "attempt output: -name and -o are required")
+			return 2
+		}
+		sum, oerr := fetchOutput(c, *id, *outName, *outPath)
+		if oerr != nil {
+			fmt.Fprintln(stderr, oerr)
+			return 1
+		}
+		out = map[string]string{"output": *outName, "path": *outPath, "sha256": sum}
 	case "result":
 		var r manager.ResultReply
 		err = c.Do("GET", "/v1/attempts/"+*id+"/result", nil, &r)
@@ -654,4 +675,33 @@ func ciClass(vcpu int, memMiB, diskGiB int64, concurrency int) capacity.Class {
 		c.VCPU, c.MemoryBytes, c.DiskPeakBytes, c.Measured = vcpu, memMiB<<20, diskGiB<<30, false
 	}
 	return c
+}
+
+// fetchOutput writes a copied-out output to path, which must not exist: into
+// a file beside it first, renamed into place only once its sha256 matches
+// what the manager recorded.
+func fetchOutput(c *manager.Client, id, name, path string) (string, error) {
+	if _, err := os.Lstat(path); err == nil {
+		return "", fmt.Errorf("attempt output: %s exists", path)
+	}
+	f, err := os.OpenFile(path+".part", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	sum, err := c.Output(id, name, f)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		if _, serr := os.Lstat(path); serr == nil {
+			err = fmt.Errorf("attempt output: %s exists", path)
+		} else {
+			err = os.Rename(path+".part", path)
+		}
+	}
+	if err != nil {
+		os.Remove(path + ".part")
+		return "", err
+	}
+	return sum, nil
 }
