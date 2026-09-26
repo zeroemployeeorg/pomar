@@ -55,6 +55,9 @@ type JobClass struct {
 	// Base returns a verified base rootfs for the class's helpers to clone, or
 	// "" to have them unpack the image. Nil means always unpack.
 	Base func() (string, error)
+	// JobUser runs a start with no source as the job user too, so the class
+	// never runs a job as root.
+	JobUser bool
 }
 
 // Config is what a manager needs.
@@ -116,6 +119,8 @@ type Config struct {
 	// start names a mirror and a ref, never a URL. Nil keeps the development
 	// behaviour: mirrors are synced by hand with `pomar mirror sync`.
 	MirrorURLs map[string]string
+	// JobUser is the default class's JobClass.JobUser, when Classes is empty.
+	JobUser bool
 	// Classes are the job classes a start may name, the first being the
 	// default. Empty means one class made of Class, Guest and Base.
 	Classes []JobClass
@@ -169,7 +174,7 @@ func Open(cfg Config) (*Manager, error) {
 		cfg.Class = capacity.CI
 	}
 	if len(cfg.Classes) == 0 {
-		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base}}
+		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser}}
 	}
 	seen := map[string]bool{}
 	for _, jc := range cfg.Classes {
@@ -353,6 +358,9 @@ type Source struct {
 	// out at the pinned commit. Jobs that read their own history need it.
 	Git  bool   `json:"git,omitempty"`
 	Base string `json:"base,omitempty"` // default "main"
+	// ReadOnly leaves /work root-owned and not writable by the job (POMAR-
+	// SOW-06 §4.2): the job writes only to its home, /tmp and its outputs.
+	ReadOnly bool `json:"readonly,omitempty"`
 }
 
 // Start ledgers an attempt's objects and spawns its helper in a new session,
@@ -526,6 +534,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		}
 		args = append(args, outputArgs(rec, outputs)...)
 	}
+	args = append(args, accessArgs(src, jc)...)
 	withProxy := src != nil && m.proxyEnabled()
 	if withProxy {
 		// Its own socket, relayed into its guest only; the shim serves it on
@@ -564,9 +573,9 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs, OutputNames: outputs}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
 	if src != nil {
-		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git}
+		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git, ReadOnly: src.ReadOnly}
 		if src.Git {
 			e.Source.Base = src.base()
 		}
@@ -972,4 +981,17 @@ func (m *Manager) writeSource(ctx context.Context, src *Source, sha, rec string)
 		return m.cfg.Mirrors.Bundle(ctx, src.Mirror, sha, src.Ref, src.base(), dst)
 	}
 	return m.cfg.Mirrors.Snapshot(ctx, src.Mirror, sha, dst)
+}
+
+// accessArgs are the helper's flags for who the job runs as and what it may
+// write: a read-only source, or, with no source in a class that requires it,
+// the job user (POMAR-SOW-06 §4.2).
+func accessArgs(src *Source, jc JobClass) []string {
+	switch {
+	case src != nil && src.ReadOnly:
+		return []string{"--readonly-source", "yes"}
+	case src == nil && jc.JobUser:
+		return []string{"--job-user", "yes"}
+	}
+	return nil
 }

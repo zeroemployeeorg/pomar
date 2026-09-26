@@ -136,3 +136,35 @@ import Testing
     let many = (0..<17).map { "f\($0)" }.joined(separator: ",")
     #expect(Helper.outputsFlags(many, dir: "/r", max: "1") == nil)
 }
+
+@Test func extractLeavesTheSourceRootOwnedAndReadOnlyWhenAsked() {
+    let plain = Helper.extractCommand()[2]
+    #expect(plain.contains("&& chown -R 1000:1000 /work /pomar/job "))
+    #expect(!plain.contains("chmod -R a-w"))
+    let ro = Helper.extractCommand(readonlySource: true)[2]
+    #expect(ro.contains("&& chown -R 0:0 /work && chmod -R a-w /work && chown -R 1000:1000 /pomar/job "))
+    #expect(!ro.contains("chown -R 1000:1000 /work"))
+    #expect(ro.hasSuffix("&& touch /pomar/job/.pomar-ready"))
+    // The job keeps somewhere to write its outputs.
+    #expect(Helper.extractCommand(outputs: true, readonlySource: true)[2].contains("mkdir -p /pomar/outputs && chown 1000:1000 /pomar/outputs"))
+}
+
+@Test func jobEnvironmentWithoutASourceUsesTmpAsHome() {
+    #expect(Helper.jobEnvironment(["PATH=/bin", "HOME=/root"], home: Helper.jobHomeWithoutSource) == ["PATH=/bin", "HOME=/tmp"])
+    #expect(Helper.jobEnvironment(["HOME=/root"]) == ["HOME=/pomar/job"])
+}
+
+@Test func yesFlagParsing() {
+    #expect(Helper.yesFlag(nil) == false)
+    #expect(Helper.yesFlag("yes") == true)
+    #expect(Helper.yesFlag("no") == nil)
+    #expect(Helper.yesFlag("true") == nil)
+    #expect(Helper.yesFlag("") == nil)
+}
+
+@Test func readOnlyRepositoryIsMarkedSafeForGit() {
+    let sha = String(repeating: "a", count: 40)
+    #expect(Helper.extractCommand(bundleSHA: sha, readonlySource: true)[2].contains("&& git config --system --add safe.directory /work "))
+    #expect(!Helper.extractCommand(bundleSHA: sha)[2].contains("safe.directory"))
+    #expect(!Helper.extractCommand(readonlySource: true)[2].contains("safe.directory"))
+}

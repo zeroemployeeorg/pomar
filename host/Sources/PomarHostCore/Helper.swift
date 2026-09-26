@@ -35,6 +35,11 @@ public enum Helper {
         public var outputs: [String]
         public var outputsDir: String?
         public var outputsMax: Int64
+        /// Leave /work root-owned and not writable, instead of the job's.
+        public var readonlySource: Bool
+        /// With no source, run the command as the job user anyway (a class
+        /// that never runs a job as root).
+        public var jobUser: Bool
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
 
@@ -44,6 +49,7 @@ public enum Helper {
             command: [String], base: String? = nil, source: String? = nil,
             proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil, inputs: String? = nil,
             outputs: [String] = [], outputsDir: String? = nil, outputsMax: Int64 = 0,
+            readonlySource: Bool = false, jobUser: Bool = false,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
@@ -55,6 +61,8 @@ public enum Helper {
             self.outputs = outputs
             self.outputsDir = outputsDir
             self.outputsMax = outputsMax
+            self.readonlySource = readonlySource
+            self.jobUser = jobUser
             self.cpus = cpus
             self.memoryBytes = memoryBytes
             self.attempt = attempt
@@ -107,8 +115,21 @@ public enum Helper {
         + "&& { getent group \(jobUID) >/dev/null || echo 'pomar:x:\(jobUID):' >> /etc/group; }"
 
     /// The image's environment with HOME pointed at the job's home.
-    public static func jobEnvironment(_ env: [String]) -> [String] {
-        env.filter { !$0.hasPrefix("HOME=") } + ["HOME=\(jobHome)"]
+    public static func jobEnvironment(_ env: [String], home: String = jobHome) -> [String] {
+        env.filter { !$0.hasPrefix("HOME=") } + ["HOME=\(home)"]
+    }
+
+    /// The job's HOME when it runs as the job user with no source.
+    public static let jobHomeWithoutSource = "/tmp"
+
+    /// Parses a yes-or-absent flag (--readonly-source, --job-user): nil is
+    /// false, "yes" is true, and anything else is refused (nil).
+    public static func yesFlag(_ v: String?) -> Bool? {
+        switch v {
+        case nil: return false
+        case "yes": return true
+        default: return nil
+        }
     }
 
     /// The guest's main process when the attempt has a source: it waits for
@@ -194,7 +215,9 @@ public enum Helper {
     /// The guest-side step that unpacks the copied archive and releases the
     /// shim. With the module proxy, it first waits (up to 10 s) for the
     /// proxy shim to be listening, so the command never starts without it.
-    public static func extractCommand(waitForProxy: Bool = false, bundleSHA: String? = nil, outputs: Bool = false) -> [String] {
+    public static func extractCommand(
+        waitForProxy: Bool = false, bundleSHA: String? = nil, outputs: Bool = false, readonlySource: Bool = false
+    ) -> [String] {
         let wait =
             waitForProxy
             ? "n=0; until [ -e \(proxyReady) ]; do n=$((n+1)); [ $n -gt 200 ] && { echo 'pomar: proxy shim not ready' >&2; exit 97; }; sleep 0.05; done; "
@@ -211,7 +234,12 @@ public enum Helper {
         return [
             "/bin/sh", "-c",
             wait + unpack + " && rm -f \(archiveInGuest) && \(registerJobUser) && mkdir -p \(jobHome) "
-                + "&& chown -R \(jobUID):\(jobUID) \(workDir) \(jobHome) "
+                + (readonlySource
+                    ? "&& chown -R 0:0 \(workDir) && chmod -R a-w \(workDir) && chown -R \(jobUID):\(jobUID) \(jobHome) "
+                        // Git refuses a repository its user does not own; the
+                        // ownership is Pomar's choice, so this one is marked safe.
+                        + (bundleSHA != nil ? "&& git config --system --add safe.directory \(workDir) " : "")
+                    : "&& chown -R \(jobUID):\(jobUID) \(workDir) \(jobHome) ")
                 + "&& { [ ! -d \(inputsInGuest) ] || chown -R \(jobUID):\(jobUID) \(inputsInGuest); } "
                 + (outputs ? "&& mkdir -p \(outputsInGuest) && chown \(jobUID):\(jobUID) \(outputsInGuest) " : "")
                 + "&& touch \(readyMarker)",
@@ -266,7 +294,7 @@ public enum Helper {
     /// in milliseconds.
     static func copyIn(
         _ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false, bundleSHA: String? = nil,
-        outputs: Bool = false
+        outputs: Bool = false, readonlySource: Bool = false
     ) async throws -> (copy: Int, extract: Int) {
         let clock = ContinuousClock()
         let t0 = clock.now
@@ -274,7 +302,8 @@ public enum Helper {
             from: URL(fileURLWithPath: source), to: URL(fileURLWithPath: archiveInGuest), mode: 0o600)
         let t1 = clock.now
         let p = try await container.exec("pomar-extract") { config in
-            config.arguments = extractCommand(waitForProxy: waitForProxy, bundleSHA: bundleSHA, outputs: outputs)
+            config.arguments = extractCommand(
+                waitForProxy: waitForProxy, bundleSHA: bundleSHA, outputs: outputs, readonlySource: readonlySource)
             config.stdout = output
             config.stderr = output
         }
@@ -380,6 +409,12 @@ public enum Helper {
                     // rely on permissions root would bypass.
                     config.process.user = .init(uid: Helper.jobUID, gid: Helper.jobUID)
                     config.process.environmentVariables = Helper.jobEnvironment(config.process.environmentVariables)
+                } else if o.jobUser {
+                    // No source step made the job's home: the job runs as its
+                    // uid with HOME at /tmp, and never as root.
+                    config.process.user = .init(uid: Helper.jobUID, gid: Helper.jobUID)
+                    config.process.environmentVariables = Helper.jobEnvironment(
+                        config.process.environmentVariables, home: Helper.jobHomeWithoutSource)
                 }
                 config.process.stdout = out
                 config.process.stderr = out
@@ -444,7 +479,7 @@ public enum Helper {
                 metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
                 let t = try await copyIn(
                     container, source: src, output: log, waitForProxy: withProxy, bundleSHA: o.sourceBundleSHA,
-                    outputs: !o.outputs.isEmpty)
+                    outputs: !o.outputs.isEmpty, readonlySource: o.readonlySource)
                 if o.sourceBundleSHA != nil { metrics["source_kind"] = "bundle" }
                 metrics["copy_in_ms"] = String(t.copy)
                 metrics["extract_ms"] = String(t.extract)
