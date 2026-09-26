@@ -26,39 +26,95 @@ type StartRequest struct {
 	Inputs  []Input  `json:"inputs,omitempty"`
 }
 
-// Serve listens on the Unix socket until ctx ends. A stale socket left by a
-// dead manager is replaced; the lock taken in Open guarantees it is stale.
+// Serve listens on the Unix socket until ctx ends: the owner's socket with every
+// route, and, when configured, the stream's control socket with the stream's
+// routes only. A stale socket left by a dead manager is replaced; the lock taken
+// in Open guarantees it is stale.
 func (m *Manager) Serve(ctx context.Context) error {
-	sock := SocketPath(m.cfg.Venue.Root())
-	if fi, err := os.Lstat(sock); err == nil {
-		if fi.Mode()&fs.ModeSocket == 0 {
-			return fmt.Errorf("manager: %s exists and is not a socket", sock)
-		}
-		if err := os.Remove(sock); err != nil {
-			return err
-		}
-	}
-	ln, err := net.Listen("unix", sock)
+	ln, err := listen(SocketPath(m.cfg.Venue.Root()), 0o600)
 	if err != nil {
 		return err
 	}
-	if err := os.Chmod(sock, 0o600); err != nil {
-		ln.Close()
-		return err
+	servers := []*http.Server{{Handler: m.mux(true)}}
+	listeners := []net.Listener{ln}
+	if m.cfg.CtlSocket != "" {
+		if err := checkCtlDir(filepath.Dir(m.cfg.CtlSocket)); err != nil {
+			ln.Close()
+			return err
+		}
+		cl, err := listen(m.cfg.CtlSocket, 0o660)
+		if err != nil {
+			ln.Close()
+			return err
+		}
+		servers = append(servers, &http.Server{Handler: m.mux(false)})
+		listeners = append(listeners, cl)
 	}
-	srv := &http.Server{Handler: m.mux()}
 	go func() {
 		<-ctx.Done()
-		srv.Close()
+		for _, s := range servers {
+			s.Close()
+		}
 	}()
-	err = srv.Serve(ln)
+	errs := make(chan error, len(servers))
+	for i := range servers {
+		go func(s *http.Server, l net.Listener) { errs <- s.Serve(l) }(servers[i], listeners[i])
+	}
+	// The first server to stop stops the others; ctx ending stops them all.
+	err = <-errs
+	for _, s := range servers {
+		s.Close()
+	}
+	for range servers[1:] {
+		<-errs
+	}
 	if errors.Is(err, http.ErrServerClosed) {
 		return nil
 	}
 	return err
 }
 
-func (m *Manager) mux() *http.ServeMux {
+// listen replaces a stale socket at path, listens, and sets its mode.
+func listen(path string, mode fs.FileMode) (net.Listener, error) {
+	if fi, err := os.Lstat(path); err == nil {
+		if fi.Mode()&fs.ModeSocket == 0 {
+			return nil, fmt.Errorf("manager: %s exists and is not a socket", path)
+		}
+		if err := os.Remove(path); err != nil {
+			return nil, err
+		}
+	}
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, mode); err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return ln, nil
+}
+
+// checkCtlDir refuses a control-socket directory that others can enter: the
+// socket's reach is its directory's owner and group, and nobody else.
+func checkCtlDir(dir string) error {
+	fi, err := os.Stat(dir)
+	if err != nil {
+		return fmt.Errorf("manager: control socket directory: %w", err)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("manager: control socket directory %s is not a directory", dir)
+	}
+	if fi.Mode().Perm()&0o007 != 0 {
+		return fmt.Errorf("manager: control socket directory %s is open to others (mode %o); want 0750", dir, fi.Mode().Perm())
+	}
+	return nil
+}
+
+// mux serves the API. The owner's socket gets every route (full); the stream's
+// control socket gets start, stop and reads, and never a route that removes a
+// record, evicts a cache or changes configuration (DESIGN-02 approach A).
+func (m *Manager) mux(full bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.List())
@@ -93,13 +149,15 @@ func (m *Manager) mux() *http.ServeMux {
 		}
 		reply(w, http.StatusOK, e)
 	})
-	mux.HandleFunc("DELETE /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
-		if err := m.Remove(r.PathValue("id")); err != nil {
-			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	})
+	if full {
+		mux.HandleFunc("DELETE /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
+			if err := m.Remove(r.PathValue("id")); err != nil {
+				reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
+				return
+			}
+			w.WriteHeader(http.StatusNoContent)
+		})
+	}
 	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
 	})
@@ -117,7 +175,9 @@ func (m *Manager) mux() *http.ServeMux {
 		}
 	}
 	mux.HandleFunc("GET /v1/caches", caches(false))
-	mux.HandleFunc("POST /v1/caches/evict", caches(true))
+	if full {
+		mux.HandleFunc("POST /v1/caches/evict", caches(true))
+	}
 	mux.HandleFunc("GET /v1/capacity", func(w http.ResponseWriter, r *http.Request) {
 		c, err := m.Capacity()
 		if err != nil {
@@ -139,8 +199,11 @@ func reply(w http.ResponseWriter, code int, v any) {
 type Client struct{ http *http.Client }
 
 // NewClient returns a client for the manager of the data root.
-func NewClient(root string) *Client {
-	sock := SocketPath(root)
+func NewClient(root string) *Client { return NewSocketClient(SocketPath(root)) }
+
+// NewSocketClient talks to a manager over the socket at sock: the stream uses
+// it for the permanent manager's control socket.
+func NewSocketClient(sock string) *Client {
 	return &Client{http: &http.Client{Transport: &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", sock)
