@@ -53,6 +53,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		doc["kernel_sha256"] = p.Kernel
 		doc["vminit_digest"] = p.Init
 		doc["host_bin_sha256"] = p.HostBin
+		if p.RootfsSHA256 != "" {
+			doc["rootfs_sha256"] = p.RootfsSHA256
+		}
 	}
 	env := map[string]any{}
 	if s := e.Source; s != nil {

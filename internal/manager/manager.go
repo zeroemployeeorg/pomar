@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/zeroemployeeorg/pomar/internal/base"
 	"github.com/zeroemployeeorg/pomar/internal/cache"
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/goproxy"
@@ -467,8 +468,14 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		if basePath, err = jc.Base(); err != nil {
 			return Entry{}, err
 		}
+		if basePath != "" {
+			if pins.RootfsSHA256, err = base.RecordedSHA256(basePath); err != nil {
+				return Entry{}, err
+			}
+		}
 	}
 	ctx := context.Background()
+	var pinsPath string // the pins document, with a source
 	var sha string
 	if src != nil {
 		var err error
@@ -511,6 +518,13 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		if err := os.WriteFile(filepath.Join(rec, "source.json"), append(b, '\n'), 0o600); err != nil {
 			return abandon(err, false)
 		}
+		doc, err := pinsDoc(id, class, pins, pinnedSource(src, sha))
+		if err != nil {
+			return abandon(err, false)
+		}
+		if pinsPath, err = writePins(rec, doc); err != nil {
+			return abandon(err, false)
+		}
 	}
 	if err := v.Intent(venue.KindVM, venue.ClassAttempt, id, filepath.Join(storeDir, "containers", id), "helper-owned guest"); err != nil {
 		return abandon(err, false)
@@ -533,6 +547,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 			args = append(args, "--inputs", filepath.Join(rec, inputsDir))
 		}
 		args = append(args, outputArgs(rec, outputs)...)
+		args = append(args, "--pins", pinsPath)
 	}
 	args = append(args, accessArgs(src, jc)...)
 	withProxy := src != nil && m.proxyEnabled()
@@ -575,10 +590,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	}
 	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
 	if src != nil {
-		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git, ReadOnly: src.ReadOnly}
-		if src.Git {
-			e.Source.Base = src.base()
-		}
+		e.Source = pinnedSource(src, sha)
 	}
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
