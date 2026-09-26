@@ -20,6 +20,7 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/goproxy"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
+	"github.com/zeroemployeeorg/pomar/internal/result"
 	"github.com/zeroemployeeorg/pomar/internal/sign"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
@@ -94,6 +95,10 @@ type Config struct {
 	// start, stop and reads; never a route that removes a record, evicts a
 	// cache or changes configuration.
 	CtlSocket string
+	// Signer signs each terminal attempt's result document; nil writes the
+	// document unsigned. Only the role user's permanent manager has one (the
+	// signing-identity design, approach A); the stream's never does.
+	Signer *result.Signer
 }
 
 // Manager supervises helpers.
@@ -473,6 +478,9 @@ func (m *Manager) Start(id string, command []string, src *Source, inputs ...Inpu
 	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs}
 	if src != nil {
 		e.Source = &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git}
+		if src.Git {
+			e.Source.Base = src.base()
+		}
 	}
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
@@ -828,8 +836,10 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
 	m.closeProxy(id)
 	m.t.save()
+	final := *e
 	m.mu.Unlock()
 	m.event("ended-"+string(st), id, e.PID, reason)
+	m.writeResult(final)
 	m.teardownVM(id)
 	m.evict()
 }

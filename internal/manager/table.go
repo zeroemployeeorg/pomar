@@ -74,6 +74,9 @@ type PinnedSource struct {
 	Ref    string `json:"ref"`
 	SHA    string `json:"sha"`
 	Git    bool   `json:"git,omitempty"`
+	// Base is the other branch a repository source carries (Source.Base):
+	// the result records it as the gate's release base.
+	Base string `json:"base,omitempty"`
 }
 
 // claimClass is the class the entry holds a claim as.
