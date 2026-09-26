@@ -29,6 +29,7 @@ let usage = """
                              [--cpus N] [--memory-bytes N] -- CMD...
            pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N \\
                                  [--extra-layers PATH,PATH...]
+           pomar-host key-probe --dir DIR
     """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -109,6 +110,13 @@ case "build-base":
     } catch {
         fail("build-base: \(error)")
     }
+case "key-probe":
+    guard let f = flags(args.dropFirst()), let d = f["dir"] else {
+        fail(usage, code: 2)
+    }
+    let r = KeyProbe.run(dir: d)
+    r.lines.forEach { print($0) }
+    exit(r.ok ? 0 : 1)
 default:
     fail(usage, code: 2)
 }
