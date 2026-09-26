@@ -59,6 +59,10 @@ type JobClass struct {
 	// JobUser runs a start with no source as the job user too, so the class
 	// never runs a job as root.
 	JobUser bool
+	// VerifyBase hashes the class's base and records it verified for this
+	// boot. The manager calls it once when it starts, before it serves; an
+	// attempt never waits on it. Nil means the class has no base to verify.
+	VerifyBase func() error
 }
 
 // Config is what a manager needs.
@@ -122,6 +126,9 @@ type Config struct {
 	MirrorURLs map[string]string
 	// JobUser is the default class's JobClass.JobUser, when Classes is empty.
 	JobUser bool
+	// VerifyBase is the default class's JobClass.VerifyBase, when Classes is
+	// empty.
+	VerifyBase func() error
 	// Classes are the job classes a start may name, the first being the
 	// default. Empty means one class made of Class, Guest and Base.
 	Classes []JobClass
@@ -175,7 +182,7 @@ func Open(cfg Config) (*Manager, error) {
 		cfg.Class = capacity.CI
 	}
 	if len(cfg.Classes) == 0 {
-		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser}}
+		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser, VerifyBase: cfg.VerifyBase}}
 	}
 	seen := map[string]bool{}
 	for _, jc := range cfg.Classes {
@@ -232,6 +239,7 @@ func Open(cfg Config) (*Manager, error) {
 		m.Close()
 		return nil, err
 	}
+	m.verifyBases()
 	m.reopenProxies()
 	m.evict()
 	go m.watch()
@@ -452,6 +460,19 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		m.event("start-refused", id, 0, err.Error())
 		return Entry{}, err
 	}
+	// The class's base, verified since this boot: part of admission. It is
+	// never hashed here; the manager verified it when it started.
+	var basePath string
+	if jc.Base != nil {
+		var err error
+		if basePath, err = jc.Base(); errors.Is(err, base.ErrUnverified) {
+			ref := &capacity.Refusal{Reason: capacity.ReasonBaseUnverified, Detail: err.Error()}
+			m.event("start-refused", id, 0, ref.Error())
+			return Entry{}, ref
+		} else if err != nil {
+			return Entry{}, err
+		}
+	}
 	// Refuse an unentitled helper binary before creating anything.
 	if err := sign.Check(m.cfg.HostBin); err != nil {
 		return Entry{}, err
@@ -462,16 +483,9 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	if err != nil {
 		return Entry{}, err
 	}
-	var basePath string
-	if jc.Base != nil {
-		var err error
-		if basePath, err = jc.Base(); err != nil {
+	if basePath != "" {
+		if pins.RootfsSHA256, err = base.RecordedSHA256(basePath); err != nil {
 			return Entry{}, err
-		}
-		if basePath != "" {
-			if pins.RootfsSHA256, err = base.RecordedSHA256(basePath); err != nil {
-				return Entry{}, err
-			}
 		}
 	}
 	ctx := context.Background()
@@ -1006,4 +1020,21 @@ func accessArgs(src *Source, jc JobClass) []string {
 		return []string{"--job-user", "yes"}
 	}
 	return nil
+}
+
+// verifyBases verifies each class's base once, at the manager's start and
+// before either socket is open (elders' note of 2026-09-26 on POMAR-SOW-06
+// §9). A base that fails stays unverified: starts in its class are refused
+// with base-unverified until it passes, rather than hashed inline.
+func (m *Manager) verifyBases() {
+	for _, jc := range m.cfg.Classes {
+		if jc.VerifyBase == nil {
+			continue
+		}
+		if err := jc.VerifyBase(); err != nil {
+			m.event("base-verify-failed", "", 0, jc.Class.Name+": "+err.Error())
+			continue
+		}
+		m.event("base-verified", "", 0, jc.Class.Name)
+	}
 }

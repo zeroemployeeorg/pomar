@@ -258,3 +258,39 @@ func RecordedSHA256(rootfs string) (string, error) {
 	}
 	return sum, nil
 }
+
+// ErrUnverified is returned when a base has not been verified since this
+// machine booted: its hash is checked when the manager starts, never on an
+// attempt's path (elders' note of 2026-09-26 on POMAR-SOW-06 §9).
+var ErrUnverified = errors.New("base: not verified since this boot")
+
+// Verified returns the rootfs path of a base that was verified since this
+// boot and is still read-only. It never hashes the rootfs: an attempt never
+// waits on a rehash. Anything else is ErrUnverified.
+func (b *Bases) Verified(arm64Digest string) (string, error) {
+	h, err := hexOf(arm64Digest)
+	if err != nil {
+		return "", err
+	}
+	if !b.Exists(arm64Digest) {
+		return "", fmt.Errorf("base: no base for %s", arm64Digest)
+	}
+	dir := filepath.Join(b.Venue.Root(), Dir, b.key(h))
+	rootfs := filepath.Join(dir, "rootfs.ext4")
+	fi, err := os.Stat(rootfs)
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode().Perm()&0o222 != 0 {
+		return "", fmt.Errorf("%w: %s is writable", ErrUnverified, rootfs)
+	}
+	boot, err := b.bootID()
+	if err != nil {
+		return "", err
+	}
+	marker, err := os.ReadFile(filepath.Join(dir, "verified-boot"))
+	if err != nil || strings.TrimSpace(string(marker)) != boot {
+		return "", fmt.Errorf("%w: %s", ErrUnverified, rootfs)
+	}
+	return rootfs, nil
+}

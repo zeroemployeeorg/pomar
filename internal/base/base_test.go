@@ -188,3 +188,48 @@ func TestRecordedSHA256ReadsTheRecordNotTheRootfs(t *testing.T) {
 		t.Fatal("a missing record was accepted")
 	}
 }
+
+// Verified never hashes: it answers from the boot marker Verify leaves, so an
+// attempt never waits on a rehash, and a base not verified this boot is
+// refused rather than hashed inline.
+func TestVerifiedAnswersFromTheBootMarker(t *testing.T) {
+	b, boot := fakeBase(t, "base-v1")
+	if _, err := b.Verified(digest); !errors.Is(err, ErrUnverified) {
+		t.Fatalf("before any verify: %v, want ErrUnverified", err)
+	}
+	p, err := b.Verify(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := b.Verified(digest); err != nil || got != p {
+		t.Fatalf("after verify: %q, %v", got, err)
+	}
+	// It does not read the rootfs: a change in the same boot is not seen here;
+	// the next boot's Verify at the manager's start catches it.
+	tamper(t, p, "base-v2")
+	if _, err := b.Verified(digest); err != nil {
+		t.Fatalf("Verified hashed the rootfs: %v", err)
+	}
+	*boot = "2000"
+	if _, err := b.Verified(digest); !errors.Is(err, ErrUnverified) {
+		t.Fatalf("new boot: %v, want ErrUnverified", err)
+	}
+	if _, err := b.Verify(digest); !errors.Is(err, ErrTampered) {
+		t.Fatalf("new boot verify = %v, want ErrTampered", err)
+	}
+	if _, err := b.Verified(digest); !errors.Is(err, ErrUnverified) {
+		t.Fatal("a tampered base became verified")
+	}
+}
+
+func TestVerifiedRefusesAWritableBase(t *testing.T) {
+	b, _ := fakeBase(t, "base-v1")
+	p, err := b.Verify(digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Chmod(p, 0o644)
+	if _, err := b.Verified(digest); !errors.Is(err, ErrUnverified) {
+		t.Fatalf("writable base: %v, want ErrUnverified", err)
+	}
+}
