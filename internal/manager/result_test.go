@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -146,5 +147,39 @@ func TestUnsignedManagerWritesTheResultButServesNoKey(t *testing.T) {
 	}
 	if err := ctl.Do("GET", "/v1/attempts/no-such/result", nil, nil); err == nil || !strings.Contains(err.Error(), "404") {
 		t.Fatalf("a missing result: %v, want 404", err)
+	}
+}
+
+// Through the control socket, the result document arrives byte for byte as
+// signed, with <, >, & and non-ASCII in it, and verifies as received.
+func TestResultIsServedExactlyAsSigned(t *testing.T) {
+	m, ctl, v := openSigning(t, true)
+	id := "res-exact"
+	if err := os.MkdirAll(filepath.Join(v.Root(), attemptsDir, id), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	e := terminalEntry(id)
+	e.Command = []string{"/bin/sh", "-c", "make verify RELEASE_BASE=abc > out.log 2>&1 && echo 'déjà' < in"}
+	m.writeResult(e)
+	signed, sig, err := result.Read(filepath.Join(v.Root(), attemptsDir, id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := ctl.Result(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r ResultReply
+	if err := json.Unmarshal(b, &r); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(r.Result, signed) {
+		t.Fatalf("served document differs from the signed one:\n%s\n%s", r.Result, signed)
+	}
+	if !result.Verify(m.cfg.Signer.Public(), r.Result, sig) {
+		t.Fatal("the received document does not verify")
+	}
+	if bytes.Contains(b, []byte("\\u003c")) || bytes.Contains(b, []byte("\\u0026")) || bytes.Contains(b, []byte("\\u003e")) {
+		t.Fatalf("the reply escaped the document: %s", b)
 	}
 }
