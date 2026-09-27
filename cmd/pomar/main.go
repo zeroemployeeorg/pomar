@@ -60,6 +60,9 @@ const usage = `usage:
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
   pomar attempt stop|rm|result [-root DIR | -socket PATH] -id ID
                                     result: the attempt's result document and signature
+  pomar attempt log [-root DIR | -socket PATH] -id ID [-o PATH]
+                                    an ended attempt's output log, checked against its recorded sha256
+                                    (capped; says so on stderr when truncated)
   pomar attempt pins [-root DIR | -socket PATH] -id ID
                                     the pins document, the same bytes the guest reads at /pomar/pins.json
   pomar attempt output [-root DIR | -socket PATH] -id ID -name NAME -o PATH
@@ -535,6 +538,30 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "log":
+		// The ended attempt's output log, as recorded: checked against the
+		// sha256 in its entry and signed result before a byte is written.
+		b, sum, truncated, lerr := c.Log(*id)
+		if lerr != nil {
+			fmt.Fprintln(stderr, lerr)
+			return 1
+		}
+		if *outPath != "" {
+			if _, err := os.Lstat(*outPath); err == nil {
+				fmt.Fprintf(stderr, "attempt log: %s exists\n", *outPath)
+				return 1
+			}
+			if err := os.WriteFile(*outPath, b, 0o600); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+		} else {
+			stdout.Write(b)
+		}
+		if truncated {
+			fmt.Fprintf(stderr, "attempt log: truncated to its first %d bytes (sha256 %s)\n", len(b), sum)
+		}
+		return 0
 	case "pins":
 		// The document's exact bytes, not re-encoded: they are what the
 		// guest reads at /pomar/pins.json.
