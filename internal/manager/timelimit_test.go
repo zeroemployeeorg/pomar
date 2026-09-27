@@ -158,3 +158,22 @@ func TestEntryWithoutAdmissionTimeIsNeverJudged(t *testing.T) {
 		t.Fatalf("entry = %+v, want running", e)
 	}
 }
+
+// One attempt is read through the control socket without paging the list.
+func TestGetOneAttemptThroughTheControlSocket(t *testing.T) {
+	m, ctl, _ := openSigning(t, false)
+	e := terminalEntry("one-1")
+	m.mu.Lock()
+	m.t.entries["one-1"] = &e
+	m.mu.Unlock()
+	var got Entry
+	if err := ctl.Do("GET", "/v1/attempts/one-1", nil, &got); err != nil || got.Attempt != "one-1" || got.State != StateExited {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if err := ctl.Do("GET", "/v1/attempts/no-such", nil, nil); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("a missing attempt: %v, want 404", err)
+	}
+	if err := ctl.Do("GET", "/v1/attempts/Bad_ID", nil, nil); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Fatalf("an invalid id: %v, want 400", err)
+	}
+}

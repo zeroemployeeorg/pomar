@@ -58,7 +58,7 @@ const usage = `usage:
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile|vm-orphans [-root DIR]
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
-  pomar attempt stop|rm|result [-root DIR | -socket PATH] -id ID
+  pomar attempt get|stop|rm|result [-root DIR | -socket PATH] -id ID
                                     result: the attempt's result document and signature
   pomar attempt log [-root DIR | -socket PATH] -id ID [-o PATH]
                                     an ended attempt's output log, checked against its recorded sha256
@@ -522,6 +522,10 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, Git: *gitSrc, ReadOnly: *readonlySrc}
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
+		out = e
+	case "get":
+		var e manager.Entry
+		err = c.Do("GET", "/v1/attempts/"+*id, nil, &e)
 		out = e
 	case "list":
 		var l []manager.Entry
