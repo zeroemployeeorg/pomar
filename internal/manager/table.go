@@ -91,6 +91,9 @@ type PinnedSource struct {
 	Base string `json:"base,omitempty"`
 	// ReadOnly records that /work was left read-only to the job.
 	ReadOnly bool `json:"readonly,omitempty"`
+	// BaseSHA is the base commit a head-and-base start named; the signed
+	// result records it as base_sha.
+	BaseSHA string `json:"base_sha,omitempty"`
 }
 
 // claimClass is the class the entry holds a claim as.

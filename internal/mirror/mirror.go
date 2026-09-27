@@ -169,3 +169,82 @@ func (m *Mirrors) Bundle(ctx context.Context, name, sha, branch, base, dst strin
 	_, err := m.git(ctx, dir, append([]string{"bundle", "create", "-q", dst}, refs...)...)
 	return err
 }
+
+// ResolveAt checks that sha, a full commit SHA the caller names, is a commit of
+// mirror name and in the history of its branch, and returns it. A start that
+// names its exact commit gets that commit, never whatever the branch has
+// moved to since (the elders' ruling r30 §4.2).
+func (m *Mirrors) ResolveAt(ctx context.Context, name, branch, sha string) (string, error) {
+	if !fullSHA.MatchString(sha) {
+		return "", fmt.Errorf("mirror: %q is not a full commit SHA", sha)
+	}
+	if !validBranch.MatchString(branch) || strings.HasPrefix(branch, "-") || strings.Contains(branch, "..") {
+		return "", fmt.Errorf("mirror: invalid branch %q", branch)
+	}
+	got, err := m.Resolve(ctx, name, sha)
+	if err != nil {
+		return "", err
+	}
+	if got != sha {
+		return "", fmt.Errorf("mirror: %s resolved to %s", sha, got)
+	}
+	if _, err := m.git(ctx, m.Path(name), "merge-base", "--is-ancestor", sha, "refs/heads/"+branch); err != nil {
+		return "", fmt.Errorf("mirror: %s is not in the history of %s's %s", sha, name, branch)
+	}
+	return sha, nil
+}
+
+// Commit checks that sha, a full commit SHA, is a commit the mirror has: a
+// branch's, or a pull request's head (the mirror fetches refs/pull/*).
+func (m *Mirrors) Commit(ctx context.Context, name, sha string) error {
+	if !fullSHA.MatchString(sha) {
+		return fmt.Errorf("mirror: %q is not a full commit SHA", sha)
+	}
+	got, err := m.Resolve(ctx, name, sha)
+	if err != nil {
+		return err
+	}
+	if got != sha {
+		return fmt.Errorf("mirror: %s resolved to %s", sha, got)
+	}
+	return nil
+}
+
+// BundleAt writes a git bundle of exactly two commits, head and base, and
+// the history they reach, as refs/heads/head and refs/heads/base: a guest
+// that fetches it can check out head and run `git diff base...HEAD`, the
+// merge base included. The bundle is made in a throwaway bare repository
+// that borrows the mirror's objects (git alternates), so the shared mirror
+// is never written. dst must not exist (the elders' ruling of 2026-09-27
+// §2.4).
+func (m *Mirrors) BundleAt(ctx context.Context, name, head, base, dst string) error {
+	for _, sha := range []string{head, base} {
+		if err := m.Commit(ctx, name, sha); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("mirror: %s already exists", dst)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	tmp, err := os.MkdirTemp(filepath.Dir(dst), ".bundle-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if _, err := m.git(ctx, "", "init", "--quiet", "--bare", tmp); err != nil {
+		return err
+	}
+	objects := filepath.Join(m.Path(name), "objects")
+	if err := os.WriteFile(filepath.Join(tmp, "objects", "info", "alternates"), []byte(objects+"\n"), 0o600); err != nil {
+		return err
+	}
+	for ref, sha := range map[string]string{"refs/heads/head": head, "refs/heads/base": base} {
+		if _, err := m.git(ctx, tmp, "update-ref", ref, sha); err != nil {
+			return err
+		}
+	}
+	_, err = m.git(ctx, tmp, "bundle", "create", "-q", dst, "refs/heads/head", "refs/heads/base")
+	return err
+}
