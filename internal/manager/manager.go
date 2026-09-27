@@ -1087,3 +1087,14 @@ func (m *Manager) checkTimeLimits(live []Entry, now time.Time) {
 		m.event(what, e.Attempt, e.PID, fmt.Sprintf("class %s time limit %s", e.claimClass().Name, lim))
 	}
 }
+
+// Get returns one attempt's entry.
+func (m *Manager) Get(id string) (Entry, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	e, ok := m.t.entries[id]
+	if !ok {
+		return Entry{}, false
+	}
+	return *e, true
+}
