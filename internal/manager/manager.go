@@ -154,6 +154,9 @@ type Manager struct {
 	// syncMu serialises the manager's own mirror syncs: two fetches into one
 	// mirror would contend for git's locks.
 	syncMu sync.Mutex
+	// draining refuses every new start (ReasonDraining) while live attempts
+	// finish. It is the owner's to set, and a new manager starts undrained.
+	draining bool
 }
 
 // Open takes the manager lock, loads the table and reconciles it against the
@@ -474,6 +477,12 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	// Claim-time admission, under the lock so that two starts cannot both
 	// take the last slot. Nothing is created before it passes.
 	class := jc.Class
+	if m.draining {
+		ref := &capacity.Refusal{Reason: capacity.ReasonDraining,
+			Detail: "the manager is draining: attempts already live finish, and no new one is admitted until the owner lifts the drain"}
+		m.event("start-refused", id, 0, ref.Error())
+		return Entry{}, ref
+	}
 	if err := m.admit(class); err != nil {
 		m.event("start-refused", id, 0, err.Error())
 		return Entry{}, err
@@ -673,6 +682,28 @@ type Capacity struct {
 	FitsIdle int `json:"fits_idle"`
 	// Classes are every job class a start may name; Class is the default.
 	Classes []capacity.Class `json:"classes"`
+	// Draining is true while the owner has set the manager draining: no new
+	// start is admitted, and Live counts what is left to finish.
+	Draining bool `json:"draining"`
+}
+
+// Drain sets (on) or lifts (off) the drain, and reports the admission state:
+// while draining, every start is refused with ReasonDraining, and attempts
+// already live run to their end. It is decided under the lock that admission
+// takes, so a start either was admitted before the drain or is refused.
+func (m *Manager) Drain(on bool) (Capacity, error) {
+	m.mu.Lock()
+	changed := m.draining != on
+	m.draining = on
+	m.mu.Unlock()
+	if changed {
+		kind := "drain-lifted"
+		if on {
+			kind = "drain-set"
+		}
+		m.event(kind, "", 0, "")
+	}
+	return m.Capacity()
 }
 
 // Capacity reports the admission state.
@@ -682,7 +713,7 @@ func (m *Manager) Capacity() (Capacity, error) {
 		return Capacity{}, err
 	}
 	m.mu.Lock()
-	live := 0
+	live, draining := 0, m.draining
 	for _, e := range m.t.entries {
 		if !e.Terminal() {
 			live++
@@ -695,7 +726,7 @@ func (m *Manager) Capacity() (Capacity, error) {
 		classes = append(classes, jc.Class)
 	}
 	return Capacity{Class: m.cfg.Class, Host: m.cfg.Host, Space: sp, Live: live,
-		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d), Classes: classes}, nil
+		FitsIdle: capacity.Fits(m.cfg.Class, m.cfg.Host, d), Classes: classes, Draining: draining}, nil
 }
 
 func (m *Manager) startTime(pid int) (string, error) {
