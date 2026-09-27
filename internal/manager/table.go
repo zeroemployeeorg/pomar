@@ -20,13 +20,14 @@ import (
 type State string
 
 const (
-	StateStarting State = "starting" // helper spawned, guest not yet running
-	StateRunning  State = "running"  // helper reports the guest running
-	StateStopping State = "stopping" // stop requested; helper still alive
-	StateExited   State = "exited"   // command ended on its own
-	StateStopped  State = "stopped"  // ended by a stop request
-	StateFailed   State = "failed"   // helper reported a failure
-	StateLost     State = "lost"     // helper gone without a terminal status
+	StateStarting State = "starting"  // helper spawned, guest not yet running
+	StateRunning  State = "running"   // helper reports the guest running
+	StateStopping State = "stopping"  // stop requested; helper still alive
+	StateExited   State = "exited"    // command ended on its own
+	StateStopped  State = "stopped"   // ended by a stop request
+	StateFailed   State = "failed"    // helper reported a failure
+	StateLost     State = "lost"      // helper gone without a terminal status
+	StateTimedOut State = "timed-out" // stopped by its class's time limit
 )
 
 // Entry is one attempt.
@@ -67,6 +68,11 @@ type Entry struct {
 	Outputs     []OutputRecord `json:"outputs,omitempty"`
 	// JobUser records that a start with no source ran as the job user.
 	JobUser bool `json:"job_user,omitempty"`
+	// TimedOut records that the class's time limit stopped the attempt; it
+	// ends timed-out, whatever the helper reports.
+	TimedOut bool `json:"timed_out,omitempty"`
+	// Log is what was recorded of the output log when the attempt ended.
+	Log *LogRecord `json:"output_log,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 
@@ -98,7 +104,7 @@ func (e Entry) claimClass() capacity.Class {
 // Terminal reports whether the attempt has ended.
 func (e Entry) Terminal() bool {
 	switch e.State {
-	case StateExited, StateStopped, StateFailed, StateLost:
+	case StateExited, StateStopped, StateFailed, StateLost, StateTimedOut:
 		return true
 	}
 	return false

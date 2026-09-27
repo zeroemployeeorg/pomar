@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -82,6 +83,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		env["uid"], env["gid"], env["HOME"] = jobUID, jobUID, jobHomeWithoutSource
 	}
 	doc["env"] = env
+	if e.Log != nil {
+		doc["output_log"] = e.Log
+	}
 	if len(e.OutputNames) > 0 {
 		doc["outputs"] = e.Outputs
 	}
@@ -146,7 +150,9 @@ func (m *Manager) resultRoutes(mux *http.ServeMux) {
 				out.KeyID = m.cfg.Signer.ID
 			}
 		}
-		reply(w, http.StatusOK, out)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write(out.exact())
 	})
 	mux.HandleFunc("GET /v1/signing-key", func(w http.ResponseWriter, r *http.Request) {
 		if m.cfg.Signer == nil {
@@ -156,4 +162,28 @@ func (m *Manager) resultRoutes(mux *http.ServeMux) {
 		reply(w, http.StatusOK, KeyReply{Algorithm: "ed25519", KeyID: m.cfg.Signer.ID,
 			PublicKey: base64.StdEncoding.EncodeToString(m.cfg.Signer.Public())})
 	})
+}
+
+// exact is the reply with the result document written in exactly as it was
+// signed (the elders' ruling of 2026-09-27 §2.1). An encoder would re-encode
+// it: Go's escapes <, > and & by default, and the bytes a verifier received
+// would then differ from the bytes the manager signed.
+func (r ResultReply) exact() []byte {
+	var b bytes.Buffer
+	b.WriteString(`{"result":`)
+	b.Write(r.Result)
+	if r.Signature != "" { // base64: nothing in it needs escaping
+		b.WriteString(`,"signature":"` + r.Signature + `"`)
+	}
+	if r.KeyID != "" { // hex
+		b.WriteString(`,"key_id":"` + r.KeyID + `"`)
+	}
+	b.WriteString("}\n")
+	return b.Bytes()
+}
+
+// Result fetches an attempt's result reply as the exact bytes served, so the
+// signed document inside it can be verified as it arrived.
+func (c *Client) Result(id string) ([]byte, error) {
+	return c.raw("/v1/attempts/" + id + "/result")
 }

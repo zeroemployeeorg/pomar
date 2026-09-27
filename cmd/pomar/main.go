@@ -45,7 +45,7 @@ const usage = `usage:
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
-                [-budget-vcpu N -budget-memory-gib G]
+                [-class-time-limit D] [-budget-vcpu N -budget-memory-gib G]
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
@@ -59,8 +59,11 @@ const usage = `usage:
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile|vm-orphans [-root DIR]
                                     vm-orphans: VM services no live attempt accounts for (reported, never signalled)
-  pomar attempt stop|rm|result [-root DIR | -socket PATH] -id ID
+  pomar attempt get|stop|rm|result [-root DIR | -socket PATH] -id ID
                                     result: the attempt's result document and signature
+  pomar attempt log [-root DIR | -socket PATH] -id ID [-o PATH]
+                                    an ended attempt's output log, checked against its recorded sha256
+                                    (capped; says so on stderr when truncated)
   pomar attempt pins [-root DIR | -socket PATH] -id ID
                                     the pins document, the same bytes the guest reads at /pomar/pins.json
   pomar attempt output [-root DIR | -socket PATH] -id ID -name NAME -o PATH
@@ -152,16 +155,12 @@ func resultVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "result verify: the result is not signed")
 		return 1
 	}
-	// `pomar attempt result` prints the reply indented, which re-indents the
-	// document inside it. The signature is over the canonical (compact)
-	// bytes; compacting removes only whitespace between tokens, so any change
-	// to the document itself still fails.
-	var doc bytes.Buffer
-	if err := json.Compact(&doc, r.Result); err != nil {
-		fmt.Fprintln(stderr, "result verify:", err)
-		return 1
-	}
-	if !result.Verify(key, doc.Bytes(), sig) {
+	// The document is checked exactly as it arrived: as the manager signed
+	// it, and as `pomar attempt result` prints it. Nothing re-encodes or
+	// re-compacts it first (the elders' ruling of 2026-09-27 §2.1): a
+	// verifier that rebuilds the document checks something other than what
+	// it received.
+	if !result.Verify(key, r.Result, sig) {
 		fmt.Fprintln(stdout, "result verify: FAILED: the signature does not match this result and key")
 		return 1
 	}
@@ -301,6 +300,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	className := fs.String("class-name", capacity.CI.Name, "the CI class's name, for example ci-example (lower-case letters, digits and dashes)")
 	budgetVCPU := fs.Int("budget-vcpu", 0, "the host-wide CI budget in vCPUs across every class (with -budget-memory-gib; 0: the host after Pomar's reserve)")
 	budgetGiB := fs.Int64("budget-memory-gib", 0, "the host-wide CI budget in GiB of memory across every class (with -budget-vcpu)")
+	timeLimit := fs.Duration("class-time-limit", time.Duration(capacity.CI.TimeLimitSeconds)*time.Second, "the CI class's wall-clock limit per attempt; one still live that long after admission is stopped and ends timed-out (0: none)")
 	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	ctlSocket := fs.String("ctl-socket", "", "a second socket for the stream: start, stop and reads only (mode 0660; its directory must not be open to others)")
@@ -423,7 +423,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		GoProxy: proxy,
 		// Caps can be raised to measure a job; the class stays unmeasured
 		// until a SOW states its figures.
-		Class:   ciClass(*className, *vcpu, *memMiB, *diskGiB, *concurrency),
+		Class:   ciClass(*className, *vcpu, *memMiB, *diskGiB, *concurrency, *timeLimit),
 		Host:    host,
 		ShimBin: *shimBin,
 		Base: func() (string, error) {
@@ -543,6 +543,10 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e
+	case "get":
+		var e manager.Entry
+		err = c.Do("GET", "/v1/attempts/"+*id, nil, &e)
+		out = e
 	case "list":
 		var l []manager.Entry
 		err = c.Do("GET", "/v1/attempts", nil, &l)
@@ -558,6 +562,30 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "rm":
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
+	case "log":
+		// The ended attempt's output log, as recorded: checked against the
+		// sha256 in its entry and signed result before a byte is written.
+		b, sum, truncated, lerr := c.Log(*id)
+		if lerr != nil {
+			fmt.Fprintln(stderr, lerr)
+			return 1
+		}
+		if *outPath != "" {
+			if _, err := os.Lstat(*outPath); err == nil {
+				fmt.Fprintf(stderr, "attempt log: %s exists\n", *outPath)
+				return 1
+			}
+			if err := os.WriteFile(*outPath, b, 0o600); err != nil {
+				fmt.Fprintln(stderr, err)
+				return 1
+			}
+		} else {
+			stdout.Write(b)
+		}
+		if truncated {
+			fmt.Fprintf(stderr, "attempt log: truncated to its first %d bytes (sha256 %s)\n", len(b), sum)
+		}
+		return 0
 	case "pins":
 		// The document's exact bytes, not re-encoded: they are what the
 		// guest reads at /pomar/pins.json.
@@ -580,9 +608,15 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		out = map[string]string{"output": *outName, "path": *outPath, "sha256": sum}
 	case "result":
-		var r manager.ResultReply
-		err = c.Do("GET", "/v1/attempts/"+*id+"/result", nil, &r)
-		out = r
+		// The reply's exact bytes, never re-encoded: the signed document is
+		// inside it as signed, so `pomar result verify` can check it as is.
+		b, rerr := c.Result(*id)
+		if rerr != nil {
+			fmt.Fprintln(stderr, rerr)
+			return 1
+		}
+		stdout.Write(b)
+		return 0
 	case "signing-key":
 		var k manager.KeyReply
 		err = c.Do("GET", "/v1/signing-key", nil, &k)
@@ -738,9 +772,10 @@ func volumeCmd(step string, args []string, stdout, stderr io.Writer) int {
 // ciClass is the CI class with the manager's settings. The class stays
 // measured only at the figures the elders set; any other caps are a
 // measurement run's, and no capacity claim is made from them.
-func ciClass(name string, vcpu int, memMiB, diskGiB int64, concurrency int) capacity.Class {
+func ciClass(name string, vcpu int, memMiB, diskGiB int64, concurrency int, limit time.Duration) capacity.Class {
 	c := capacity.CI
 	c.Name, c.Concurrency = name, concurrency
+	c.TimeLimitSeconds = int64(limit / time.Second)
 	if vcpu != c.VCPU || memMiB<<20 != c.MemoryBytes || diskGiB<<30 != c.DiskPeakBytes {
 		c.VCPU, c.MemoryBytes, c.DiskPeakBytes, c.Measured = vcpu, memMiB<<20, diskGiB<<30, false
 	}
