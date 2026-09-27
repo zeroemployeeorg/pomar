@@ -89,7 +89,7 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	out, err := exec.Command(*hostBin, "load-image", "--store", filepath.Join(v.Root(), "store"),
-		"--layout", staged, "--manifest", *pin).CombinedOutput()
+		"--layout", staged, "--manifest", *pin, "--reference", *name).CombinedOutput()
 	if err != nil {
 		fmt.Fprintf(stderr, "image load: %v: %s", err, out)
 		imageReport(r, nil, stdout, stderr)
