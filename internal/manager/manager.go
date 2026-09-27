@@ -971,7 +971,7 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		st, reason = StateTimedOut, fmt.Sprintf("time limit %s (%s)", lim, detail)
 	}
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
-	e.Log = recordLog(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id))
+	e.Log = recordLog(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.claimClass().LogCapBytes)
 	if len(e.OutputNames) > 0 {
 		e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames)
 	}

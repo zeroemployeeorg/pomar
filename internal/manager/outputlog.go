@@ -16,11 +16,15 @@ import (
 // 2026-09-27): the guest's stdout and stderr, which the helper writes to
 // output.log in the record. When the attempt ends, the manager records the
 // log's size and the sha256 of what it will serve: the whole log, or its
-// first MaxLogBytes, marked truncated. The record goes in the entry and the
+// first bytes up to its class's cap, marked truncated. The record goes in the entry and the
 // signed result, and GET /v1/attempts/{id}/log serves exactly those bytes.
 
-// MaxLogBytes caps what is recorded and served of an attempt's output log.
-const MaxLogBytes = 16 << 20
+// DefaultLogCapBytes caps what is recorded and served of an attempt's output
+// log when its class sets no cap of its own.
+const DefaultLogCapBytes = 16 << 20
+
+// maxLogRead bounds what a client reads of a served log, whatever it is told.
+const maxLogRead = 1 << 30
 
 const logName = "output.log"
 
@@ -29,12 +33,15 @@ type LogRecord struct {
 	Bytes       int64  `json:"bytes"`        // the log's whole size
 	ServedBytes int64  `json:"served_bytes"` // what is served and hashed
 	SHA256      string `json:"sha256"`       // of the served bytes
-	Truncated   bool   `json:"truncated"`    // the log was longer than MaxLogBytes
+	Truncated   bool   `json:"truncated"`    // the log was longer than the cap
 }
 
 // recordLog hashes the served part of the record's log and makes the file
 // read-only, so what was hashed is what is served. No log, no record.
-func recordLog(rec string) *LogRecord {
+func recordLog(rec string, capBytes int64) *LogRecord {
+	if capBytes <= 0 {
+		capBytes = DefaultLogCapBytes
+	}
 	p := filepath.Join(rec, logName)
 	f, err := os.Open(p)
 	if err != nil {
@@ -45,7 +52,7 @@ func recordLog(rec string) *LogRecord {
 	if err != nil || !fi.Mode().IsRegular() {
 		return nil
 	}
-	served := min(fi.Size(), MaxLogBytes)
+	served := min(fi.Size(), capBytes)
 	h := sha256.New()
 	n, err := io.Copy(h, io.LimitReader(f, served))
 	if err != nil || n != served {
@@ -119,7 +126,7 @@ func (c *Client) Log(id string) ([]byte, string, bool, error) {
 		json.NewDecoder(resp.Body).Decode(&e)
 		return nil, "", false, fmt.Errorf("manager: %s: %s", resp.Status, e["error"])
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, MaxLogBytes+1))
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxLogRead))
 	if err != nil {
 		return nil, "", false, err
 	}

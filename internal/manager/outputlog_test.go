@@ -11,12 +11,12 @@ import (
 
 func TestRecordLog(t *testing.T) {
 	rec := t.TempDir()
-	if recordLog(rec) != nil {
+	if recordLog(rec, 0) != nil {
 		t.Fatal("a record with no log has a log record")
 	}
 	p := filepath.Join(rec, logName)
 	os.WriteFile(p, []byte("hello from the guest\n"), 0o600)
-	r := recordLog(rec)
+	r := recordLog(rec, 0)
 	if r == nil || r.Bytes != 21 || r.ServedBytes != 21 || r.Truncated || r.SHA256 != sha("hello from the guest\n") {
 		t.Fatalf("record = %+v", r)
 	}
@@ -25,18 +25,25 @@ func TestRecordLog(t *testing.T) {
 	}
 }
 
-// A log over the cap is recorded as truncated, and its sha256 covers exactly
-// the first MaxLogBytes, which is what is served.
+// A log over its class's cap is recorded as truncated, and its sha256 covers
+// exactly the first cap bytes, which is what is served; no cap means the
+// default.
 func TestRecordLogOverTheCapIsTruncated(t *testing.T) {
 	rec := t.TempDir()
-	f, _ := os.Create(filepath.Join(rec, logName))
-	f.Truncate(MaxLogBytes + 1000) // sparse: zeros
-	f.Close()
-	r := recordLog(rec)
-	if r == nil || r.Bytes != MaxLogBytes+1000 || r.ServedBytes != MaxLogBytes || !r.Truncated {
-		t.Fatalf("record = %+v", r)
+	os.WriteFile(filepath.Join(rec, logName), []byte(strings.Repeat("x", 5000)), 0o600)
+	r := recordLog(rec, 1000)
+	if r == nil || r.Bytes != 5000 || r.ServedBytes != 1000 || !r.Truncated || r.SHA256 != sha(strings.Repeat("x", 1000)) {
+		t.Fatalf("class cap 1000: %+v", r)
 	}
-	if r.SHA256 != sha(string(make([]byte, MaxLogBytes))) {
+	rec = t.TempDir()
+	f, _ := os.Create(filepath.Join(rec, logName))
+	f.Truncate(DefaultLogCapBytes + 1000) // sparse: zeros
+	f.Close()
+	r = recordLog(rec, 0)
+	if r == nil || r.Bytes != DefaultLogCapBytes+1000 || r.ServedBytes != DefaultLogCapBytes || !r.Truncated {
+		t.Fatalf("default cap: %+v", r)
+	}
+	if r.SHA256 != sha(string(make([]byte, DefaultLogCapBytes))) {
 		t.Fatal("the sha256 does not cover exactly the served bytes")
 	}
 }

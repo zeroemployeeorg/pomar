@@ -56,6 +56,10 @@ type Class struct {
 	// attempt still live that long after it was admitted is stopped, and
 	// ends timed-out (elders' ruling r30 §4.1 item 2). Zero means none.
 	TimeLimitSeconds int64 `json:"time_limit_s,omitempty"`
+	// LogCapBytes caps what is recorded, signed and served of an attempt's
+	// output log; a longer log is marked truncated. Zero means the manager's
+	// default (the elders' ruling of 2026-09-27 §2.2: a per-class cap).
+	LogCapBytes int64 `json:"log_cap_bytes,omitempty"`
 }
 
 // VMOverhead is the per-guest memory the host pays above the cap: measured
@@ -68,7 +72,7 @@ const VMOverhead = 300 << 20
 // failed its timing tests under load.
 var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true,
 	// The CI gate takes about 6 minutes, 7 at once, on the host it was measured on.
-	TimeLimitSeconds: 30 * 60}
+	TimeLimitSeconds: 30 * 60, LogCapBytes: 16 << 20}
 
 // MemoryClaim returns the memory a class's attempt claims at admission.
 func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
@@ -77,7 +81,7 @@ func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
 func (c Class) Claim() int64 { return c.DiskPeakBytes + HeadroomBytes }
 
 func (c Class) validate() error {
-	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 || c.TimeLimitSeconds < 0 {
+	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 {
 		return fmt.Errorf("capacity: invalid class %+v", c)
 	}
 	return nil
