@@ -67,7 +67,7 @@ const VMOverhead = 300 << 20
 // The 1-vCPU shape was refused for the measured gate: single-vCPU guests
 // failed its timing tests under load.
 var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true,
-	// zero-employee's gate takes about 6 minutes, 7 at once (POMAR-SOW-04 §29).
+	// The CI gate takes about 6 minutes, 7 at once, on the host it was measured on.
 	TimeLimitSeconds: 30 * 60}
 
 // MemoryClaim returns the memory a class's attempt claims at admission.
