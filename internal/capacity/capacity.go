@@ -91,6 +91,9 @@ func (c Class) validate() error {
 type Host struct {
 	CPUSlots    int   `json:"cpu_slots"`
 	MemoryBytes int64 `json:"memory_bytes"`
+	// Budget marks slots set as the operator's CI budget rather than read from
+	// the host: a start beyond them is refused as host-budget.
+	Budget bool `json:"budget,omitempty"`
 }
 
 // Reserved for the host itself before slots are counted. Provisional, like
@@ -186,9 +189,15 @@ func Admit(c Class, live []Class, h Host, d Disk) error {
 		return &Refusal{ReasonClassConcurrency, fmt.Sprintf("%d attempts of class %s with this one, measured limit %d", same, c.Name, c.Concurrency)}
 	}
 	if cpu > h.CPUSlots {
+		if h.Budget {
+			return &Refusal{ReasonHostBudget, fmt.Sprintf("%d vCPU claimed with this attempt, a budget of %d", cpu, h.CPUSlots)}
+		}
 		return &Refusal{ReasonCPU, fmt.Sprintf("%d vCPU claimed with this attempt, %d slots", cpu, h.CPUSlots)}
 	}
 	if mem > h.MemoryBytes {
+		if h.Budget {
+			return &Refusal{ReasonHostBudget, fmt.Sprintf("%s claimed with this attempt, a budget of %s", gib(mem), gib(h.MemoryBytes))}
+		}
 		return &Refusal{ReasonMemory, fmt.Sprintf("%s claimed with this attempt, %s of slots", gib(mem), gib(h.MemoryBytes))}
 	}
 	if disk > d.Avail {
@@ -219,3 +228,22 @@ func Fits(c Class, h Host, d Disk) int {
 }
 
 func gib(b int64) string { return strconv.FormatFloat(float64(b)/float64(GiB), 'f', 1, 64) + " GiB" }
+
+// ReasonHostBudget names a start refused because it would exceed the host-wide
+// CI budget, in vCPUs or memory, across every class (the elders' ruling of
+// 2026-09-27 §1.2).
+const ReasonHostBudget = "host-budget"
+
+// WithBudget returns the host's slots cut to a CI budget of vcpu and mem. The
+// budget must fit in what the host has after Pomar's reserve (ReservedCPUs,
+// ReservedMemory), so the reserve stays a stated part of it.
+func (h Host) WithBudget(vcpu int, mem int64) (Host, error) {
+	if vcpu < 1 || mem < 1 {
+		return Host{}, fmt.Errorf("capacity: a budget needs vCPUs and memory (%d, %d)", vcpu, mem)
+	}
+	if vcpu > h.CPUSlots || mem > h.MemoryBytes {
+		return Host{}, fmt.Errorf("capacity: a budget of %d vCPU and %s exceeds the host after the reserve (%d vCPU, %s)",
+			vcpu, gib(mem), h.CPUSlots, gib(h.MemoryBytes))
+	}
+	return Host{CPUSlots: vcpu, MemoryBytes: mem, Budget: true}, nil
+}

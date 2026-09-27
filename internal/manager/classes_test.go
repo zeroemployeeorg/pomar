@@ -92,3 +92,29 @@ func TestStartChoosesTheNamedClass(t *testing.T) {
 		t.Fatalf("capacity %+v (%v)", c, err)
 	}
 }
+
+// Class names follow the attempt-id pattern: lower-case letters, digits and
+// dashes (the elders' ruling of 2026-09-27 §1.3).
+func TestJobClassNamesArePatternChecked(t *testing.T) {
+	v, _ := venue.Open(t.TempDir())
+	v.Init()
+	self, _ := os.Executable()
+	for _, name := range []string{"CI", "ci zero", "ci_zero", "-ci", "", strings.Repeat("a", 41)} {
+		c := capacity.CI
+		c.Name = name
+		cfg := Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
+			Host: capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB}, Classes: []JobClass{{Class: c}}}
+		if m, err := Open(cfg); err == nil {
+			m.Close()
+			t.Errorf("class name %q accepted", name)
+		}
+	}
+	c := capacity.CI
+	c.Name = "ci-example"
+	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
+		Host: capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB}, Classes: []JobClass{{Class: c}}})
+	if err != nil {
+		t.Fatalf("ci-example refused: %v", err)
+	}
+	m.Close()
+}

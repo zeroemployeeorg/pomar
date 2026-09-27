@@ -186,8 +186,8 @@ func Open(cfg Config) (*Manager, error) {
 	}
 	seen := map[string]bool{}
 	for _, jc := range cfg.Classes {
-		if jc.Class.Name == "" || seen[jc.Class.Name] {
-			return nil, fmt.Errorf("manager: job classes need distinct, non-empty names (%q)", jc.Class.Name)
+		if !validID.MatchString(jc.Class.Name) || seen[jc.Class.Name] {
+			return nil, fmt.Errorf("manager: job classes need distinct names of lower-case letters, digits and dashes, like attempt ids (%q)", jc.Class.Name)
 		}
 		seen[jc.Class.Name] = true
 	}
