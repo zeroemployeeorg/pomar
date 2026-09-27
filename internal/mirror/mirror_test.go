@@ -214,3 +214,37 @@ func TestBundle(t *testing.T) {
 		t.Error("an existing destination was overwritten")
 	}
 }
+
+// ResolveAt returns exactly the named commit when it is in the branch's
+// history, and refuses anything else.
+func TestResolveAt(t *testing.T) {
+	m, env, up, sha1 := setup(t)
+	ctx := context.Background()
+	run(t, env, up, "checkout", "--quiet", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(up, "hello.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, env, up, "commit", "--quiet", "-am", "two")
+	sha2 := run(t, env, up, "rev-parse", "HEAD")
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ branch, sha string }{{"main", sha1}, {"feature", sha1}, {"feature", sha2}} {
+		if got, err := m.ResolveAt(ctx, "demo", tc.branch, tc.sha); err != nil || got != tc.sha {
+			t.Errorf("ResolveAt(%s, %s) = %q, %v", tc.branch, tc.sha[:8], got, err)
+		}
+	}
+	for name, tc := range map[string]struct{ branch, sha string }{
+		"a commit outside the branch": {"main", sha2},
+		"an unknown commit":           {"main", strings.Repeat("0", 40)},
+		"a short SHA":                 {"main", sha1[:12]},
+		"a ref, not a SHA":            {"main", "main"},
+		"a branch like an option":     {"--all", sha1},
+		"a revision range":            {"main..feature", sha1},
+		"a missing branch":            {"nope", sha1},
+	} {
+		if got, err := m.ResolveAt(ctx, "demo", tc.branch, tc.sha); err == nil {
+			t.Errorf("%s: accepted, %q", name, got)
+		}
+	}
+}

@@ -169,3 +169,27 @@ func (m *Mirrors) Bundle(ctx context.Context, name, sha, branch, base, dst strin
 	_, err := m.git(ctx, dir, append([]string{"bundle", "create", "-q", dst}, refs...)...)
 	return err
 }
+
+// ResolveAt checks that sha, a full commit SHA the caller names, is a commit of
+// mirror name and in the history of its branch, and returns it. A start that
+// names its exact commit gets that commit, never whatever the branch has
+// moved to since (the elders' ruling r30 §4.2).
+func (m *Mirrors) ResolveAt(ctx context.Context, name, branch, sha string) (string, error) {
+	if !fullSHA.MatchString(sha) {
+		return "", fmt.Errorf("mirror: %q is not a full commit SHA", sha)
+	}
+	if !validBranch.MatchString(branch) || strings.HasPrefix(branch, "-") || strings.Contains(branch, "..") {
+		return "", fmt.Errorf("mirror: invalid branch %q", branch)
+	}
+	got, err := m.Resolve(ctx, name, sha)
+	if err != nil {
+		return "", err
+	}
+	if got != sha {
+		return "", fmt.Errorf("mirror: %s resolved to %s", sha, got)
+	}
+	if _, err := m.git(ctx, m.Path(name), "merge-base", "--is-ancestor", sha, "refs/heads/"+branch); err != nil {
+		return "", fmt.Errorf("mirror: %s is not in the history of %s's %s", sha, name, branch)
+	}
+	return sha, nil
+}

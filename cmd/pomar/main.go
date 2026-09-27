@@ -48,8 +48,9 @@ const usage = `usage:
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
-                                    with a mirror, REF is pinned to a commit SHA at admission
+  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-sha SHA] [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
+                                    with a mirror, REF is pinned to a commit SHA at admission; with -sha, to exactly
+                                    that commit, which must be in REF's history (refused otherwise)
                                     -output: a file the command leaves at /pomar/outputs/NAME, copied out when it exits
                                     -readonly-source: /work stays root-owned and not writable by the job
   pomar base build [-root DIR] -host-bin PATH
@@ -460,6 +461,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
+	exactSHA := fs.String("sha", "", "the exact commit to run, a full SHA in the history of -ref (start; needs -mirror)")
 	readonlySrc := fs.Bool("readonly-source", false, "leave /work root-owned and not writable by the job; it writes to its home, /tmp and /pomar/outputs (start; needs -mirror)")
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
 	var outputs []string
@@ -505,8 +507,8 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
-		if *readonlySrc && *mirrorName == "" {
-			fmt.Fprintln(stderr, "attempt start: -readonly-source needs -mirror and -ref")
+		if (*readonlySrc || *exactSHA != "") && *mirrorName == "" {
+			fmt.Fprintln(stderr, "attempt start: -readonly-source and -sha need -mirror and -ref")
 			return 2
 		}
 		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs, Class: *className, Outputs: outputs}
@@ -515,7 +517,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")
 				return 2
 			}
-			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, Git: *gitSrc, ReadOnly: *readonlySrc}
+			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, SHA: *exactSHA, Git: *gitSrc, ReadOnly: *readonlySrc}
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e

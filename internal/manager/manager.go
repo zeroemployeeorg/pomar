@@ -353,6 +353,9 @@ func (m *Manager) teardownVM(attempt string) {
 
 var validID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
+// fullSHA is a full, lower-case commit SHA.
+var fullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
+
 // ErrExists is returned when an attempt id is already in the table.
 var ErrExists = errors.New("manager: attempt exists")
 
@@ -370,6 +373,10 @@ type Source struct {
 	// ReadOnly leaves /work root-owned and not writable by the job (POMAR-
 	// SOW-06 §4.2): the job writes only to its home, /tmp and its outputs.
 	ReadOnly bool `json:"readonly,omitempty"`
+	// SHA, when set, is the exact commit to run: it must be in Ref's history,
+	// and the start is refused otherwise. Without it, Ref is pinned to its tip
+	// at admission (the elders' ruling r30 §4.2).
+	SHA string `json:"sha,omitempty"`
 }
 
 // Start ledgers an attempt's objects and spawns its helper in a new session,
@@ -424,6 +431,9 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	inputRecs, err := checkInputs(inputs)
 	if err != nil {
 		return Entry{}, err
+	}
+	if src != nil && src.SHA != "" && !fullSHA.MatchString(src.SHA) {
+		return Entry{}, fmt.Errorf("manager: source sha %q is not a full commit SHA", src.SHA)
 	}
 	if len(outputs) > 0 && src == nil {
 		return Entry{}, errors.New("manager: outputs need a source: the job user writes them")
@@ -493,7 +503,12 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	var sha string
 	if src != nil {
 		var err error
-		if sha, err = m.cfg.Mirrors.Resolve(ctx, src.Mirror, src.Ref); err != nil {
+		if src.SHA != "" {
+			sha, err = m.cfg.Mirrors.ResolveAt(ctx, src.Mirror, src.Ref, src.SHA)
+		} else {
+			sha, err = m.cfg.Mirrors.Resolve(ctx, src.Mirror, src.Ref)
+		}
+		if err != nil {
 			return Entry{}, err
 		}
 	}
