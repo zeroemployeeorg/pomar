@@ -68,6 +68,10 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		if s.BaseSHA != "" {
 			doc["base_sha"] = s.BaseSHA
 		}
+		if s.Reach != nil {
+			// How the commits were reachable at the sync that admitted it.
+			doc["reach"] = s.Reach
+		}
 		if m.cfg.Mirrors != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if url, err := m.cfg.Mirrors.Remote(ctx, s.Mirror); err == nil {

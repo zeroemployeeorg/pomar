@@ -449,21 +449,17 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	if err := checkOutputs(outputs); err != nil {
 		return Entry{}, err
 	}
-	// With configured mirrors, the named mirror is synced from its configured
-	// URL now, before the lock: a fetch must not hold up the other routes.
-	if src != nil && m.cfg.MirrorURLs != nil {
-		url, ok := m.cfg.MirrorURLs[src.Mirror]
-		if !ok {
-			return Entry{}, fmt.Errorf("manager: mirror %q is not one this manager syncs", src.Mirror)
-		}
-		m.syncMu.Lock()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		err := m.cfg.Mirrors.Sync(ctx, src.Mirror, url)
-		cancel()
-		m.syncMu.Unlock()
-		if err != nil {
-			m.event("start-refused", id, 0, "mirror sync: "+err.Error())
-			return Entry{}, fmt.Errorf("manager: syncing mirror %q: %w", src.Mirror, err)
+	// The source is settled before capacity is claimed: the mirror synced
+	// (with configured mirrors), the commits found and their reachability
+	// judged at that sync, all before the lock, since a fetch must not hold
+	// up the other routes. A mirror that cannot be synced and a commit the
+	// mirror does not reach are refused by name, apart (the elders' ruling of
+	// 2026-09-27 17:21Z §4).
+	var sha string
+	var reach *mirror.Reach
+	if src != nil {
+		if sha, reach, err = m.settleSource(id, src); err != nil {
+			return Entry{}, err
 		}
 	}
 	m.mu.Lock()
@@ -508,25 +504,6 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	}
 	ctx := context.Background()
 	var pinsPath string // the pins document, with a source
-	var sha string
-	if src != nil {
-		var err error
-		if src.BaseSHA != "" {
-			// Head and base, both named: the head need not be on any branch
-			// (a pull request's head is refs/pull/N/head in the mirror).
-			sha, err = src.SHA, m.cfg.Mirrors.Commit(ctx, src.Mirror, src.SHA)
-			if err == nil {
-				err = m.cfg.Mirrors.Commit(ctx, src.Mirror, src.BaseSHA)
-			}
-		} else if src.SHA != "" {
-			sha, err = m.cfg.Mirrors.ResolveAt(ctx, src.Mirror, src.Ref, src.SHA)
-		} else {
-			sha, err = m.cfg.Mirrors.Resolve(ctx, src.Mirror, src.Ref)
-		}
-		if err != nil {
-			return Entry{}, err
-		}
-	}
 	recRel := filepath.Join(attemptsDir, id)
 	recID := "attempt-" + id
 	if err := v.Intent(venue.KindVolume, venue.ClassAttempt, recID, recRel, "attempt record"); err != nil {
@@ -558,7 +535,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		if _, err := writeInputs(rec, inputs); err != nil {
 			return abandon(err, false)
 		}
-		b, _ := json.Marshal(map[string]any{"mirror": src.Mirror, "ref": src.Ref, "sha": sha, "git": src.Git, "base": src.base()})
+		b, _ := json.Marshal(sourceJSON(src, sha, reach))
 		if err := os.WriteFile(filepath.Join(rec, "source.json"), append(b, '\n'), 0o600); err != nil {
 			return abandon(err, false)
 		}
@@ -635,6 +612,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
 	if src != nil {
 		e.Source = pinnedSource(src, sha)
+		e.Source.Reach = reach
 	}
 	m.t.entries[id] = e
 	if err := m.t.save(); err != nil {
@@ -1104,6 +1082,69 @@ func checkExactSource(src *Source) error {
 	return nil
 }
 
+// settleSource syncs a start's mirror (when the manager syncs its own), pins
+// its commit, and judges reachability at that sync, all under the sync lock
+// so no other start's fetch runs between them:
+//   - a ref alone is pinned to its tip; a ref that is a raw SHA must be
+//     reachable like any head;
+//   - a SHA with a ref must be in that branch's history;
+//   - a head with a base: the head reachable from a synced branch or pull
+//     request (refs/heads/*, refs/pull/*), the base from its branch
+//     (Source.Base, default main).
+//
+// The refs that reached them are returned with their tips at that sync. A
+// mirror that cannot be synced or is not there is refused with
+// mirror-unavailable; a commit it lacks or does not reach, with
+// commit-unknown; both before any capacity is claimed.
+func (m *Manager) settleSource(id string, src *Source) (string, *mirror.Reach, error) {
+	refuse := func(reason string, err error) (string, *mirror.Reach, error) {
+		ref := &capacity.Refusal{Reason: reason, Detail: err.Error()}
+		m.event("start-refused", id, 0, ref.Error())
+		return "", nil, ref
+	}
+	m.syncMu.Lock()
+	defer m.syncMu.Unlock()
+	if m.cfg.MirrorURLs != nil {
+		url, ok := m.cfg.MirrorURLs[src.Mirror]
+		if !ok {
+			return "", nil, fmt.Errorf("manager: mirror %q is not one this manager syncs", src.Mirror)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		err := m.cfg.Mirrors.Sync(ctx, src.Mirror, url)
+		cancel()
+		if err != nil {
+			return refuse(capacity.ReasonMirrorUnavailable, fmt.Errorf("syncing mirror %q: %w", src.Mirror, err))
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var sha string
+	var r mirror.Reach
+	var err error
+	switch {
+	case src.BaseSHA != "":
+		sha = src.SHA
+		r, err = m.cfg.Mirrors.Reachable(ctx, src.Mirror, src.SHA, src.BaseSHA, src.base())
+	case src.SHA != "":
+		if sha, err = m.cfg.Mirrors.ResolveAt(ctx, src.Mirror, src.Ref, src.SHA); err == nil {
+			r, err = m.cfg.Mirrors.Reachable(ctx, src.Mirror, sha, "", "")
+		}
+	default:
+		if sha, err = m.cfg.Mirrors.Resolve(ctx, src.Mirror, src.Ref); err == nil {
+			r, err = m.cfg.Mirrors.Reachable(ctx, src.Mirror, sha, "", "")
+		}
+	}
+	switch {
+	case errors.Is(err, mirror.ErrNoMirror):
+		return refuse(capacity.ReasonMirrorUnavailable, err)
+	case errors.Is(err, mirror.ErrUnknownCommit):
+		return refuse(capacity.ReasonCommitUnknown, err)
+	case err != nil:
+		return "", nil, err
+	}
+	return sha, &r, nil
+}
+
 // checkTimeLimits stops each live attempt that has outlived its class's time
 // limit (elders' ruling r30 §4.1 item 2): SIGTERM first, then SIGKILL once a
 // further StallWait has passed with the helper still alive. The attempt is
@@ -1155,4 +1196,18 @@ func (m *Manager) Get(id string) (Entry, bool) {
 		return Entry{}, false
 	}
 	return *e, true
+}
+
+// sourceJSON is an attempt's source.json: what was asked for, what it was
+// pinned to, and how it was reachable at admission. A head-and-base start
+// records the base SHA it named, not a branch (the elders' ruling of
+// 2026-09-27 17:21Z §4).
+func sourceJSON(src *Source, sha string, reach *mirror.Reach) map[string]any {
+	sj := map[string]any{"mirror": src.Mirror, "ref": src.Ref, "sha": sha, "git": src.Git, "reach": reach}
+	if src.BaseSHA != "" {
+		sj["base_sha"] = src.BaseSHA
+	} else if src.Git {
+		sj["base"] = src.base()
+	}
+	return sj
 }

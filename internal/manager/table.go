@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/zeroemployeeorg/pomar/internal/mirror"
 )
 
 // State is an attempt's state as the manager knows it.
@@ -94,6 +95,9 @@ type PinnedSource struct {
 	// BaseSHA is the base commit a head-and-base start named; the signed
 	// result records it as base_sha.
 	BaseSHA string `json:"base_sha,omitempty"`
+	// Reach is how the commits were found reachable in the mirror at the
+	// sync that admitted the attempt: the refs, with their tips then.
+	Reach *mirror.Reach `json:"reach,omitempty"`
 }
 
 // claimClass is the class the entry holds a claim as.

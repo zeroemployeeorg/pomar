@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -25,6 +26,15 @@ const Dir = "mirrors"
 var (
 	validName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 	fullSHA   = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
+
+// ErrNoMirror is a mirror that is not there: never synced, or not ledgered.
+// ErrUnknownCommit is a commit the mirror does not have, or does not reach
+// the way a start requires. The manager names them apart when it refuses a
+// start (the elders' ruling of 2026-09-27 17:21Z §4).
+var (
+	ErrNoMirror      = errors.New("mirror: no such mirror")
+	ErrUnknownCommit = errors.New("mirror: unknown commit")
 )
 
 // Mirrors operates on the mirrors in one data root.
@@ -104,14 +114,14 @@ func (m *Mirrors) Remote(ctx context.Context, name string) (string, error) {
 // in the mirror; anything else is resolved as a ref.
 func (m *Mirrors) Resolve(ctx context.Context, name, ref string) (string, error) {
 	if !m.Venue.IsOpen(venue.KindVolume, id(name)) {
-		return "", fmt.Errorf("mirror: no mirror %q; sync it first", name)
+		return "", fmt.Errorf("%w %q; sync it first", ErrNoMirror, name)
 	}
 	if ref == "" || strings.HasPrefix(ref, "-") {
 		return "", fmt.Errorf("mirror: invalid ref %q", ref)
 	}
 	sha, err := m.git(ctx, m.Path(name), "rev-parse", "--verify", "--quiet", ref+"^{commit}")
 	if err != nil {
-		return "", fmt.Errorf("mirror: %s has no commit %q", name, ref)
+		return "", fmt.Errorf("%w: %s has no commit %q", ErrUnknownCommit, name, ref)
 	}
 	if !fullSHA.MatchString(sha) {
 		return "", fmt.Errorf("mirror: unexpected rev-parse output %q", sha)
@@ -189,7 +199,7 @@ func (m *Mirrors) ResolveAt(ctx context.Context, name, branch, sha string) (stri
 		return "", fmt.Errorf("mirror: %s resolved to %s", sha, got)
 	}
 	if _, err := m.git(ctx, m.Path(name), "merge-base", "--is-ancestor", sha, "refs/heads/"+branch); err != nil {
-		return "", fmt.Errorf("mirror: %s is not in the history of %s's %s", sha, name, branch)
+		return "", fmt.Errorf("%w: %s is not in the history of %s's %s", ErrUnknownCommit, sha, name, branch)
 	}
 	return sha, nil
 }
@@ -247,4 +257,69 @@ func (m *Mirrors) BundleAt(ctx context.Context, name, head, base, dst string) er
 	}
 	_, err = m.git(ctx, tmp, "bundle", "create", "-q", dst, "refs/heads/head", "refs/heads/base")
 	return err
+}
+
+// MaxReachRefs caps how many of the refs that reach a head are recorded; the
+// count records how many there were.
+const MaxReachRefs = 8
+
+// Reach is how a start's commits were found in the mirror when it was
+// admitted: the refs that reached them, each with its tip at that moment. A
+// ref that moves later does not change what was accepted.
+type Reach struct {
+	Head         string   `json:"head"`
+	HeadRefs     []string `json:"head_refs"`      // "REF TIP", sorted, at most MaxReachRefs
+	HeadRefCount int      `json:"head_ref_count"` // every ref that reached the head
+	Base         string   `json:"base,omitempty"`
+	BaseRef      string   `json:"base_ref,omitempty"` // "refs/heads/BRANCH TIP"
+}
+
+// Reachable checks that head is a commit of mirror name reachable from a ref
+// the mirror syncs (a branch, refs/heads/*, or a pull request's,
+// refs/pull/*), and, when base is set, that base is in the history of
+// refs/heads/baseBranch. It is judged now, so the caller calls it right after
+// the sync that admits the attempt; the Reach it returns records the refs
+// and their tips as they were (the elders' ruling of 2026-09-27 17:21Z §4).
+func (m *Mirrors) Reachable(ctx context.Context, name, head, base, baseBranch string) (Reach, error) {
+	if !m.Venue.IsOpen(venue.KindVolume, id(name)) {
+		return Reach{}, fmt.Errorf("%w %q; sync it first", ErrNoMirror, name)
+	}
+	if err := m.Commit(ctx, name, head); err != nil {
+		return Reach{}, err
+	}
+	out, err := m.git(ctx, m.Path(name), "for-each-ref", "--contains", head,
+		"--format=%(refname) %(objectname)", "refs/heads", "refs/pull")
+	if err != nil {
+		return Reach{}, err
+	}
+	var refs []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			refs = append(refs, l)
+		}
+	}
+	if len(refs) == 0 {
+		return Reach{}, fmt.Errorf("%w: %s is in %s but no branch or pull request reaches it", ErrUnknownCommit, head, name)
+	}
+	sort.Strings(refs)
+	r := Reach{Head: head, HeadRefs: refs[:min(len(refs), MaxReachRefs)], HeadRefCount: len(refs)}
+	if base == "" {
+		return r, nil
+	}
+	if !validBranch.MatchString(baseBranch) || strings.HasPrefix(baseBranch, "-") || strings.Contains(baseBranch, "..") {
+		return Reach{}, fmt.Errorf("mirror: invalid branch %q", baseBranch)
+	}
+	if err := m.Commit(ctx, name, base); err != nil {
+		return Reach{}, err
+	}
+	ref := "refs/heads/" + baseBranch
+	tip, err := m.git(ctx, m.Path(name), "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil {
+		return Reach{}, fmt.Errorf("%w: %s has no branch %s", ErrUnknownCommit, name, baseBranch)
+	}
+	if _, err := m.git(ctx, m.Path(name), "merge-base", "--is-ancestor", base, ref); err != nil {
+		return Reach{}, fmt.Errorf("%w: the base %s is not in the history of %s's %s", ErrUnknownCommit, base, name, baseBranch)
+	}
+	r.Base, r.BaseRef = base, ref+" "+tip
+	return r, nil
 }

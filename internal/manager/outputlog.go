@@ -2,6 +2,7 @@ package manager
 
 import (
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+
+	"github.com/zeroemployeeorg/pomar/internal/result"
 )
 
 // The attempt's output log (the elders' ruling r30 §4.2, and their note of
@@ -112,10 +115,44 @@ func (m *Manager) logRoutes(mux *http.ServeMux) {
 	})
 }
 
-// Log fetches an ended attempt's log and checks it against the sha256 the
-// manager recorded. It returns the bytes, their sha256, and whether the log
-// was truncated.
-func (c *Client) Log(id string) ([]byte, string, bool, error) {
+// Log fetches an ended attempt's log and checks it against the output_log of
+// the attempt's result document, never against anything the log's own
+// response says: a header travels with the bytes it describes, so it proves
+// nothing about them (the elders' ruling of 2026-09-27 17:21Z §4). With pub,
+// the result's signature is verified first, so the log is checked against
+// what the manager signed; without it, against the document as served. It
+// returns the bytes, their sha256, and whether the log was truncated.
+func (c *Client) Log(id string, pub []byte) ([]byte, string, bool, error) {
+	raw, err := c.Result(id)
+	if err != nil {
+		return nil, "", false, err
+	}
+	var r ResultReply
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return nil, "", false, fmt.Errorf("manager: result of %s: %w", id, err)
+	}
+	if pub != nil {
+		sig, err := base64.StdEncoding.DecodeString(r.Signature)
+		if err != nil || len(sig) == 0 {
+			return nil, "", false, fmt.Errorf("manager: the result of %s is not signed", id)
+		}
+		if !result.Verify(pub, r.Result, sig) {
+			return nil, "", false, fmt.Errorf("manager: the result of %s does not verify against the pinned key", id)
+		}
+	}
+	var doc struct {
+		Attempt string     `json:"attempt"`
+		Log     *LogRecord `json:"output_log"`
+	}
+	if err := json.Unmarshal(r.Result, &doc); err != nil {
+		return nil, "", false, fmt.Errorf("manager: result of %s: %w", id, err)
+	}
+	if doc.Attempt != id {
+		return nil, "", false, fmt.Errorf("manager: the result served for %s is attempt %q's", id, doc.Attempt)
+	}
+	if doc.Log == nil {
+		return nil, "", false, fmt.Errorf("manager: the result of %s records no output log", id)
+	}
 	resp, err := c.http.Get("http://manager/v1/attempts/" + id + "/log")
 	if err != nil {
 		return nil, "", false, fmt.Errorf("manager not reachable: %w", err)
@@ -126,14 +163,15 @@ func (c *Client) Log(id string) ([]byte, string, bool, error) {
 		json.NewDecoder(resp.Body).Decode(&e)
 		return nil, "", false, fmt.Errorf("manager: %s: %s", resp.Status, e["error"])
 	}
-	b, err := io.ReadAll(io.LimitReader(resp.Body, maxLogRead))
+	// One byte more than the record says is served, so a longer body is caught.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, min(doc.Log.ServedBytes, maxLogRead)+1))
 	if err != nil {
 		return nil, "", false, err
 	}
-	want := resp.Header.Get(LogSHA256Header)
 	h := sha256.Sum256(b)
-	if got := hex.EncodeToString(h[:]); got != want {
-		return nil, "", false, fmt.Errorf("manager: log of %s: sha256 %s, not the recorded %s", id, got, want)
+	if got := hex.EncodeToString(h[:]); int64(len(b)) != doc.Log.ServedBytes || got != doc.Log.SHA256 {
+		return nil, "", false, fmt.Errorf("manager: log of %s: %d bytes with sha256 %s, not the %d bytes with sha256 %s its result records",
+			id, len(b), got, doc.Log.ServedBytes, doc.Log.SHA256)
 	}
-	return b, want, resp.Header.Get(LogTruncatedHeader) == "true", nil
+	return b, doc.Log.SHA256, doc.Log.Truncated, nil
 }

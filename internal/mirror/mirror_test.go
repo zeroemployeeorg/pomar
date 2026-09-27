@@ -3,6 +3,8 @@ package mirror
 import (
 	"archive/tar"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -302,5 +304,78 @@ func TestBundleAtPullRequestHead(t *testing.T) {
 	}
 	if err := m.BundleAt(ctx, "demo", head, sha1, dst); err == nil {
 		t.Error("an existing destination was overwritten")
+	}
+}
+
+// Reachable judges, at the sync, that a head is reached by a synced branch or
+// pull request and a base by its branch, and records the refs with their
+// tips; it names a commit it cannot place apart from a missing mirror (the
+// elders' ruling of 2026-09-27 17:21Z §4).
+func TestReachable(t *testing.T) {
+	m, env, up, sha1 := setup(t)
+	ctx := context.Background()
+	if _, err := m.Reachable(ctx, "demo", sha1, "", ""); !errors.Is(err, ErrNoMirror) {
+		t.Fatalf("before any sync: %v, want ErrNoMirror", err)
+	}
+	// A pull request's head, on no branch.
+	run(t, env, up, "checkout", "--quiet", "--detach")
+	os.WriteFile(filepath.Join(up, "pr.txt"), []byte("pr\n"), 0o644)
+	run(t, env, up, "add", "pr.txt")
+	run(t, env, up, "commit", "--quiet", "-m", "pr")
+	pr := run(t, env, up, "rev-parse", "HEAD")
+	run(t, env, up, "update-ref", "refs/pull/7/head", pr)
+	// A commit on a side branch only, not in main's history.
+	run(t, env, up, "checkout", "--quiet", "-b", "side", "main")
+	os.WriteFile(filepath.Join(up, "side.txt"), []byte("side\n"), 0o644)
+	run(t, env, up, "add", "side.txt")
+	run(t, env, up, "commit", "--quiet", "-m", "side")
+	side := run(t, env, up, "rev-parse", "HEAD")
+	run(t, env, up, "checkout", "--quiet", "main")
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	// A commit the mirror has that nothing reaches: made in the mirror itself.
+	tree := run(t, env, m.Path("demo"), "rev-parse", sha1+"^{tree}")
+	dangling := run(t, env, m.Path("demo"), "commit-tree", tree, "-p", sha1, "-m", "dangling")
+
+	r, err := m.Reachable(ctx, "demo", pr, sha1, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Head != pr || r.HeadRefCount != 1 || r.HeadRefs[0] != "refs/pull/7/head "+pr || r.Base != sha1 || r.BaseRef != "refs/heads/main "+sha1 {
+		t.Fatalf("reach = %+v", r)
+	}
+	if r, err := m.Reachable(ctx, "demo", sha1, "", ""); err != nil || r.HeadRefCount != 3 || r.Base != "" {
+		// main, side and the pull request all reach the first commit.
+		t.Fatalf("the first commit: %+v, %v", r, err)
+	}
+	for name, tc := range map[string]struct{ head, base, branch string }{
+		"a commit the mirror lacks":           {strings.Repeat("0", 40), "", ""},
+		"a commit nothing reaches":            {dangling, "", ""},
+		"a base not in main's history":        {pr, side, "main"},
+		"a base on a branch the mirror lacks": {pr, sha1, "nope"},
+	} {
+		if _, err := m.Reachable(ctx, "demo", tc.head, tc.base, tc.branch); !errors.Is(err, ErrUnknownCommit) {
+			t.Errorf("%s: %v, want ErrUnknownCommit", name, err)
+		}
+	}
+	if _, err := m.Reachable(ctx, "demo", pr, sha1, "-x"); err == nil || errors.Is(err, ErrUnknownCommit) {
+		t.Errorf("an invalid branch name: %v", err)
+	}
+}
+
+// Only MaxReachRefs refs are recorded, with the count of all of them.
+func TestReachableCapsTheRefsItRecords(t *testing.T) {
+	m, env, up, sha1 := setup(t)
+	ctx := context.Background()
+	for i := 0; i < MaxReachRefs+4; i++ {
+		run(t, env, up, "update-ref", fmt.Sprintf("refs/pull/%d/head", i), sha1)
+	}
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	r, err := m.Reachable(ctx, "demo", sha1, "", "")
+	if err != nil || len(r.HeadRefs) != MaxReachRefs || r.HeadRefCount != MaxReachRefs+5 {
+		t.Fatalf("reach = %d refs of %d, %v", len(r.HeadRefs), r.HeadRefCount, err)
 	}
 }
