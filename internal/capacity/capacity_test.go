@@ -114,3 +114,49 @@ func TestClassConcurrencyLimit(t *testing.T) {
 		t.Fatalf("slots: %q", got)
 	}
 }
+
+func TestBudgetFitsTheHostAfterTheReserve(t *testing.T) {
+	h := HostFrom(16, 48*GiB) // 14 vCPU and 40 GiB after the reserve
+	b, err := h.WithBudget(12, 24*GiB)
+	if err != nil || b.CPUSlots != 12 || b.MemoryBytes != 24*GiB || !b.Budget {
+		t.Fatalf("budget = %+v, %v", b, err)
+	}
+	for name, v := range map[string]struct {
+		cpu int
+		mem int64
+	}{
+		"over the host's vCPUs": {15, 24 * GiB},
+		"into the reserve":      {12, 41 * GiB},
+		"no vCPUs":              {0, 24 * GiB},
+		"no memory":             {12, 0},
+	} {
+		if _, err := h.WithBudget(v.cpu, v.mem); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+// Across every class, a start beyond the budget is refused as host-budget.
+func TestBudgetRefusesAsHostBudget(t *testing.T) {
+	b, _ := HostFrom(16, 48*GiB).WithBudget(8, 24*GiB)
+	c := CI
+	c.Name, c.VCPU, c.MemoryBytes, c.Concurrency = "ci-example", 4, 6*GiB, 3
+	disk := Disk{Avail: 500 * GiB}
+	if err := Admit(c, []Class{c}, b, disk); err != nil {
+		t.Fatalf("the 2nd start (8 vCPU) was refused: %v", err)
+	}
+	err := Admit(c, []Class{c, c}, b, disk)
+	var r *Refusal
+	if !errors.As(err, &r) || r.Reason != ReasonHostBudget {
+		t.Fatalf("the 3rd start (12 vCPU over 8): %v, want host-budget", err)
+	}
+	d := c
+	d.Name, d.VCPU, d.MemoryBytes, d.Concurrency = "ci-other", 1, 20*GiB, 1
+	if err := Admit(d, []Class{c}, b, disk); !errors.As(err, &r) || r.Reason != ReasonHostBudget {
+		t.Fatalf("another class over the memory budget: %v, want host-budget", err)
+	}
+	// Without a budget the reasons stay the resources'.
+	if err := Admit(c, []Class{c, c, c}, HostFrom(16, 48*GiB), disk); !errors.As(err, &r) || r.Reason == ReasonHostBudget {
+		t.Fatalf("no budget: %v", err)
+	}
+}

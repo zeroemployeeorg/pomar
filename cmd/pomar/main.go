@@ -44,7 +44,8 @@ const usage = `usage:
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
                                     class an object ledgered before classes existed
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
-                [-class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
+                [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
+                [-budget-vcpu N -budget-memory-gib G]
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
@@ -297,6 +298,9 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	vcpu := fs.Int("class-vcpu", capacity.CI.VCPU, "the CI class's vCPU cap")
 	memMiB := fs.Int64("class-memory-mib", capacity.CI.MemoryBytes>>20, "the CI class's memory cap in MiB")
 	diskGiB := fs.Int64("class-disk-peak-gib", capacity.CI.DiskPeakBytes>>30, "the CI class's disk peak in GiB")
+	className := fs.String("class-name", capacity.CI.Name, "the CI class's name, for example ci-example (lower-case letters, digits and dashes)")
+	budgetVCPU := fs.Int("budget-vcpu", 0, "the host-wide CI budget in vCPUs across every class (with -budget-memory-gib; 0: the host after Pomar's reserve)")
+	budgetGiB := fs.Int64("budget-memory-gib", 0, "the host-wide CI budget in GiB of memory across every class (with -budget-vcpu)")
 	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	ctlSocket := fs.String("ctl-socket", "", "a second socket for the stream: start, stop and reads only (mode 0660; its directory must not be open to others)")
@@ -383,6 +387,25 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(stdout, "manager: signing results with key %s\n", signer.ID)
 	}
+	// The CI budget: what every class together may claim. Without one, the
+	// host's own slots after Pomar's reserve.
+	var host capacity.Host
+	if (*budgetVCPU > 0) != (*budgetGiB > 0) {
+		fmt.Fprintln(stderr, "manager: -budget-vcpu and -budget-memory-gib go together")
+		return 2
+	}
+	if *budgetVCPU > 0 {
+		h, err := capacity.ReadHost()
+		if err == nil {
+			h, err = h.WithBudget(*budgetVCPU, *budgetGiB*capacity.GiB)
+		}
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		host = h
+		fmt.Fprintf(stdout, "manager: CI budget %d vCPU, %d GiB (Pomar's reserve: %d CPUs, %d GiB)\n", h.CPUSlots, *budgetGiB, capacity.ReservedCPUs, capacity.ReservedMemory/capacity.GiB)
+	}
 	m, err := manager.Open(manager.Config{
 		Signer:     signer,
 		MirrorURLs: mirrorURLs,
@@ -400,7 +423,8 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		GoProxy: proxy,
 		// Caps can be raised to measure a job; the class stays unmeasured
 		// until a SOW states its figures.
-		Class:   ciClass(*vcpu, *memMiB, *diskGiB, *concurrency),
+		Class:   ciClass(*className, *vcpu, *memMiB, *diskGiB, *concurrency),
+		Host:    host,
 		ShimBin: *shimBin,
 		Base: func() (string, error) {
 			// Clone the pinned image's base when one has been built.
@@ -714,9 +738,9 @@ func volumeCmd(step string, args []string, stdout, stderr io.Writer) int {
 // ciClass is the CI class with the manager's settings. The class stays
 // measured only at the figures the elders set; any other caps are a
 // measurement run's, and no capacity claim is made from them.
-func ciClass(vcpu int, memMiB, diskGiB int64, concurrency int) capacity.Class {
+func ciClass(name string, vcpu int, memMiB, diskGiB int64, concurrency int) capacity.Class {
 	c := capacity.CI
-	c.Concurrency = concurrency
+	c.Name, c.Concurrency = name, concurrency
 	if vcpu != c.VCPU || memMiB<<20 != c.MemoryBytes || diskGiB<<30 != c.DiskPeakBytes {
 		c.VCPU, c.MemoryBytes, c.DiskPeakBytes, c.Measured = vcpu, memMiB<<20, diskGiB<<30, false
 	}
