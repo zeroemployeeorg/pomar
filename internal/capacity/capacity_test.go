@@ -114,3 +114,25 @@ func TestClassConcurrencyLimit(t *testing.T) {
 		t.Fatalf("slots: %q", got)
 	}
 }
+
+func TestCIClassHasATimeLimit(t *testing.T) {
+	if CI.TimeLimitSeconds != 30*60 {
+		t.Fatalf("CI time limit = %ds, want 1800", CI.TimeLimitSeconds)
+	}
+	c := CI
+	c.TimeLimitSeconds = -1
+	if err := c.validate(); err == nil {
+		t.Fatal("a negative time limit was accepted")
+	}
+}
+
+func TestCIClassHasALogCap(t *testing.T) {
+	if CI.LogCapBytes != 16<<20 {
+		t.Fatalf("CI log cap = %d, want 16 MiB", CI.LogCapBytes)
+	}
+	c := CI
+	c.LogCapBytes = -1
+	if err := c.validate(); err == nil {
+		t.Fatal("a negative log cap was accepted")
+	}
+}

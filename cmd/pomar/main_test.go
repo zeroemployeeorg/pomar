@@ -57,9 +57,11 @@ func TestVenueUnaccountedExit(t *testing.T) {
 	}
 }
 
-// A result reply as `pomar attempt result` prints it (indented) verifies, and
-// an edited copy does not. The printed reply re-indents the signed document.
-func TestResultVerifyAcceptsThePrintedReply(t *testing.T) {
+// A result reply as the manager serves it (and `pomar attempt result` prints
+// it) verifies as received, with <, >, & and non-ASCII in the document. A
+// re-indented or edited copy does not: the verifier checks the bytes it
+// received, never a rebuilt document (the elders' ruling of 2026-09-27 §2.1).
+func TestResultVerifyChecksTheReceivedBytes(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "keys")
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		t.Fatal(err)
@@ -68,9 +70,12 @@ func TestResultVerifyAcceptsThePrintedReply(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	doc, _ := result.Canonical(map[string]any{"attempt": "a1", "exit_code": 0, "state": "exited", "command": []string{"make", "verify"}})
-	reply := manager.ResultReply{Result: doc, Signature: base64.StdEncoding.EncodeToString(s.Sign(doc)), KeyID: s.ID}
-	printed, _ := json.MarshalIndent(reply, "", "  ") // as attemptCmd prints it
+	doc, _ := result.Canonical(map[string]any{"attempt": "a1", "exit_code": 0, "state": "exited",
+		"command": []string{"/bin/sh", "-c", "make verify > /pomar/outputs/output.log 2>&1 && echo 'déjà vu' <in"}})
+	if !bytes.Contains(doc, []byte("> /pomar")) || !bytes.Contains(doc, []byte("&&")) || !bytes.Contains(doc, []byte("déjà")) {
+		t.Fatalf("the canonical document escaped something: %s", doc)
+	}
+	served := []byte(`{"result":` + string(doc) + `,"signature":"` + base64.StdEncoding.EncodeToString(s.Sign(doc)) + `","key_id":"` + s.ID + `"}` + "\n")
 	pub := base64.StdEncoding.EncodeToString(s.Public())
 	check := func(b []byte) int {
 		f := filepath.Join(t.TempDir(), "reply.json")
@@ -78,15 +83,24 @@ func TestResultVerifyAcceptsThePrintedReply(t *testing.T) {
 		var out, errb bytes.Buffer
 		return run([]string{"result", "verify", "-reply", f, "-public-key", pub}, &out, &errb)
 	}
-	if got := check(printed); got != 0 {
-		t.Fatalf("the printed reply did not verify: exit %d", got)
+	if got := check(served); got != 0 {
+		t.Fatalf("the served reply did not verify: exit %d", got)
 	}
-	compact, _ := json.Marshal(reply)
-	if got := check(compact); got != 0 {
-		t.Fatalf("the compact reply did not verify: exit %d", got)
+	var r manager.ResultReply
+	json.Unmarshal(served, &r)
+	indented, _ := json.MarshalIndent(r, "", "  ")
+	if got := check(indented); got != 1 {
+		t.Fatalf("a re-indented copy verified: exit %d", got)
 	}
-	edited := bytes.Replace(printed, []byte(`"exit_code": 0`), []byte(`"exit_code": 1`), 1)
-	if bytes.Equal(edited, printed) {
+	escaped, _ := json.Marshal(r) // Go's default encoder escapes <, > and &
+	if bytes.Equal(escaped, bytes.TrimSpace(served)) {
+		t.Fatal("the test needs an escaping encoder")
+	}
+	if got := check(escaped); got != 1 {
+		t.Fatalf("an escaped copy verified: exit %d", got)
+	}
+	edited := bytes.Replace(served, []byte(`"exit_code":0`), []byte(`"exit_code":1`), 1)
+	if bytes.Equal(edited, served) {
 		t.Fatal("the test did not edit the reply")
 	}
 	if got := check(edited); got != 1 {

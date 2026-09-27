@@ -125,6 +125,20 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 	mux.HandleFunc("GET /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.List())
 	})
+	// One attempt: a read, on both sockets, so a client need not page the list.
+	mux.HandleFunc("GET /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !validID.MatchString(id) {
+			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id"})
+			return
+		}
+		e, ok := m.Get(id)
+		if !ok {
+			reply(w, http.StatusNotFound, map[string]string{"error": "no attempt " + id})
+			return
+		}
+		reply(w, http.StatusOK, e)
+	})
 	mux.HandleFunc("POST /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
 		var req StartRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -167,6 +181,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 	m.resultRoutes(mux) // reads: on both sockets
 	m.outputRoutes(mux) // reads: on both sockets
 	m.pinsRoutes(mux)   // reads: on both sockets
+	m.logRoutes(mux)    // reads: on both sockets
 	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
 	})
