@@ -1,0 +1,41 @@
+package main
+
+import (
+	"bytes"
+	"strings"
+	"testing"
+)
+
+func TestImageNameMustBeTaggedAndNotPomarsOwn(t *testing.T) {
+	for _, ok := range []string{"example.org/ci:20260926-fonts", "localhost:5000/team/ci:1", "ci:v2"} {
+		if err := checkImageName(ok); err != nil {
+			t.Errorf("checkImageName(%q) = %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"example.org/ci", "localhost:5000/team/ci", "example.org/ci:", "example.org/ci@sha256:ab",
+		"docker.io/library/golang:any", "ghcr.io/apple/containerization/vminit:0.45.0"} {
+		if err := checkImageName(bad); err == nil {
+			t.Errorf("checkImageName(%q) was accepted", bad)
+		}
+	}
+}
+
+func TestImageCommandsRefuseAMalformedPin(t *testing.T) {
+	for _, args := range [][]string{
+		{"image", "check", "-layout", t.TempDir(), "-digest", "5670320a"},
+		{"image", "load", "-layout", t.TempDir(), "-digest", "sha256:12", "-host-bin", "/x", "-name", "a:b"},
+	} {
+		var out, errb bytes.Buffer
+		if got := run(args, &out, &errb); got != 2 || !strings.Contains(errb.String(), "not a sha256 digest") {
+			t.Errorf("run(%v) = %d, stderr %q", args, got, errb.String())
+		}
+	}
+}
+
+func TestImageCheckOfAMissingLayoutFails(t *testing.T) {
+	var out, errb bytes.Buffer
+	pin := "sha256:" + strings.Repeat("0", 64)
+	if got := run([]string{"image", "check", "-layout", t.TempDir(), "-digest", pin}, &out, &errb); got != 1 || !strings.Contains(errb.String(), "oci-layout") {
+		t.Fatalf("run = %d, stderr %q", got, errb.String())
+	}
+}

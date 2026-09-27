@@ -29,6 +29,7 @@ let usage = """
                              [--cpus N] [--memory-bytes N] -- CMD...
            pomar-host build-base --store S --image REF --image-digest D --out ROOTFS --size-bytes N \\
                                  [--extra-layers PATH,PATH...]
+           pomar-host load-image --store S --layout DIR --manifest D
            pomar-host key-probe --dir DIR
     """
 
@@ -119,6 +120,18 @@ case "build-base":
         print("unpack_ms=\(r.ms)")
     } catch {
         fail("build-base: \(error)")
+    }
+case "load-image":
+    guard let f = flags(args.dropFirst()), let s = f["store"], let l = f["layout"], let m = f["manifest"] else {
+        fail(usage, code: 2)
+    }
+    do {
+        let r = try await ImageLoad.load(store: s, layout: l, manifest: m)
+        print("reference=\(r.reference)")
+        print("index=\(r.index)")
+        print("arm64_manifest=\(m)")
+    } catch {
+        fail("load-image: \(error)")
     }
 case "key-probe":
     guard let f = flags(args.dropFirst()), let d = f["dir"] else {

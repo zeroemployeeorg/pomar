@@ -58,6 +58,11 @@ const usage = `usage:
                                     -readonly-source: /work stays root-owned and not writable by the job
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
+  pomar image check -layout DIR -digest D
+  pomar image load [-root DIR] -host-bin PATH -layout DIR -digest D -name REPO:TAG
+                                    an OCI image layout, pinned by its linux/arm64 manifest digest D: every blob
+                                    by hash, the platform, the diff IDs, no credential files or Env; load stages
+                                    a checked copy and loads that into the image store
   pomar mirror sync [-root DIR] -name NAME -url URL
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile|vm-orphans [-root DIR]
@@ -109,6 +114,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return smokeCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 1 && args[0] == "manager":
 		return managerCmd(args[1:], stdout, stderr)
+	case len(args) >= 2 && args[0] == "image" && (args[1] == "check" || args[1] == "load"):
+		return imageCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "base" && args[1] == "build":
 		return baseBuild(args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "mirror" && (args[1] == "sync" || args[1] == "resolve"):
