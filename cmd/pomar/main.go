@@ -151,16 +151,12 @@ func resultVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "result verify: the result is not signed")
 		return 1
 	}
-	// `pomar attempt result` prints the reply indented, which re-indents the
-	// document inside it. The signature is over the canonical (compact)
-	// bytes; compacting removes only whitespace between tokens, so any change
-	// to the document itself still fails.
-	var doc bytes.Buffer
-	if err := json.Compact(&doc, r.Result); err != nil {
-		fmt.Fprintln(stderr, "result verify:", err)
-		return 1
-	}
-	if !result.Verify(key, doc.Bytes(), sig) {
+	// The document is checked exactly as it arrived: as the manager signed
+	// it, and as `pomar attempt result` prints it. Nothing re-encodes or
+	// re-compacts it first (the elders' ruling of 2026-09-27 §2.1): a
+	// verifier that rebuilds the document checks something other than what
+	// it received.
+	if !result.Verify(key, r.Result, sig) {
 		fmt.Fprintln(stdout, "result verify: FAILED: the signature does not match this result and key")
 		return 1
 	}
@@ -556,9 +552,15 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		out = map[string]string{"output": *outName, "path": *outPath, "sha256": sum}
 	case "result":
-		var r manager.ResultReply
-		err = c.Do("GET", "/v1/attempts/"+*id+"/result", nil, &r)
-		out = r
+		// The reply's exact bytes, never re-encoded: the signed document is
+		// inside it as signed, so `pomar result verify` can check it as is.
+		b, rerr := c.Result(*id)
+		if rerr != nil {
+			fmt.Fprintln(stderr, rerr)
+			return 1
+		}
+		stdout.Write(b)
+		return 0
 	case "signing-key":
 		var k manager.KeyReply
 		err = c.Do("GET", "/v1/signing-key", nil, &k)
