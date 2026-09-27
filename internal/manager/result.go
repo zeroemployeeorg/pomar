@@ -83,6 +83,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		env["uid"], env["gid"], env["HOME"] = jobUID, jobUID, jobHomeWithoutSource
 	}
 	doc["env"] = env
+	if e.Log != nil {
+		doc["output_log"] = e.Log
+	}
 	if len(e.OutputNames) > 0 {
 		doc["outputs"] = e.Outputs
 	}

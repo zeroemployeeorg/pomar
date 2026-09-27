@@ -125,3 +125,14 @@ func TestCIClassHasATimeLimit(t *testing.T) {
 		t.Fatal("a negative time limit was accepted")
 	}
 }
+
+func TestCIClassHasALogCap(t *testing.T) {
+	if CI.LogCapBytes != 16<<20 {
+		t.Fatalf("CI log cap = %d, want 16 MiB", CI.LogCapBytes)
+	}
+	c := CI
+	c.LogCapBytes = -1
+	if err := c.validate(); err == nil {
+		t.Fatal("a negative log cap was accepted")
+	}
+}

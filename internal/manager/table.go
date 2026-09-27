@@ -71,6 +71,8 @@ type Entry struct {
 	// TimedOut records that the class's time limit stopped the attempt; it
 	// ends timed-out, whatever the helper reports.
 	TimedOut bool `json:"timed_out,omitempty"`
+	// Log is what was recorded of the output log when the attempt ended.
+	Log *LogRecord `json:"output_log,omitempty"`
 	// Peaks is what the attempt was measured to use.
 	Peaks Peaks `json:"peaks,omitzero"`
 
