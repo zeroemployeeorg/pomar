@@ -52,6 +52,10 @@ type Class struct {
 	// Measured is false while the figures are placeholders. No capacity
 	// claim is made from a class that is not measured.
 	Measured bool `json:"measured"`
+	// TimeLimitSeconds is the class's wall-clock limit per attempt: an
+	// attempt still live that long after it was admitted is stopped, and
+	// ends timed-out (elders' ruling r30 §4.1 item 2). Zero means none.
+	TimeLimitSeconds int64 `json:"time_limit_s,omitempty"`
 }
 
 // VMOverhead is the per-guest memory the host pays above the cap: measured
@@ -62,7 +66,9 @@ const VMOverhead = 300 << 20
 // (ruling r12 §2): 2 vCPU, 2 GiB plus the VM overhead, a 3 GiB disk peak.
 // The 1-vCPU shape was refused for the measured gate: single-vCPU guests
 // failed its timing tests under load.
-var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true}
+var CI = Class{Name: "ci", VCPU: 2, MemoryBytes: 2 * GiB, VMOverheadBytes: VMOverhead, DiskPeakBytes: 3 * GiB, Measured: true,
+	// zero-employee's gate takes about 6 minutes, 7 at once (POMAR-SOW-04 §29).
+	TimeLimitSeconds: 30 * 60}
 
 // MemoryClaim returns the memory a class's attempt claims at admission.
 func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
@@ -71,7 +77,7 @@ func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
 func (c Class) Claim() int64 { return c.DiskPeakBytes + HeadroomBytes }
 
 func (c Class) validate() error {
-	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 {
+	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 || c.TimeLimitSeconds < 0 {
 		return fmt.Errorf("capacity: invalid class %+v", c)
 	}
 	return nil

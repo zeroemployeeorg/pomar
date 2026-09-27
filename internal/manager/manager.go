@@ -785,6 +785,7 @@ func (m *Manager) poll() {
 	}
 	m.mu.Unlock()
 	m.checkDiskFull(live)
+	m.checkTimeLimits(live, time.Now())
 	for _, e := range live {
 		if m.isHelperOf(ps, e) {
 			m.observe(e.Attempt)
@@ -953,15 +954,21 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 	// bounded volume the guest's fsync got EIO and a command that went on
 	// exited 0, so a result produced while the host could not honour the
 	// guest is not a result. The exit code is kept.
-	if e.HostCondition != "" {
-		detail := string(st)
-		if code != nil {
-			detail += fmt.Sprintf(" %d", *code)
-		}
-		if reason != "" {
-			detail += ": " + reason
-		}
+	detail := string(st)
+	if code != nil {
+		detail += fmt.Sprintf(" %d", *code)
+	}
+	if reason != "" {
+		detail += ": " + reason
+	}
+	switch {
+	case e.HostCondition != "":
 		st, reason = StateFailed, e.HostCondition+" ("+detail+")"
+	case e.TimedOut:
+		// Stopped by the class's time limit: whatever the helper then reported,
+		// the attempt ran out of time. The exit code, if any, is kept.
+		lim := time.Duration(e.claimClass().TimeLimitSeconds) * time.Second
+		st, reason = StateTimedOut, fmt.Sprintf("time limit %s (%s)", lim, detail)
 	}
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
 	if len(e.OutputNames) > 0 {
@@ -1036,5 +1043,47 @@ func (m *Manager) verifyBases() {
 			continue
 		}
 		m.event("base-verified", "", 0, jc.Class.Name)
+	}
+}
+
+// checkTimeLimits stops each live attempt that has outlived its class's time
+// limit (elders' ruling r30 §4.1 item 2): SIGTERM first, then SIGKILL once a
+// further StallWait has passed with the helper still alive. The attempt is
+// marked timed out when first signalled, and finish records it timed-out
+// whatever the helper then reports: a hung job never holds a slot for ever.
+func (m *Manager) checkTimeLimits(live []Entry, now time.Time) {
+	for _, e := range live {
+		if e.Created.IsZero() {
+			continue // no admission time recorded: never judged against a limit
+		}
+		lim := time.Duration(e.claimClass().TimeLimitSeconds) * time.Second
+		if lim <= 0 {
+			continue
+		}
+		over := now.Sub(e.Created) - lim
+		if over < 0 {
+			continue
+		}
+		m.mu.Lock()
+		cur := m.t.entries[e.Attempt]
+		if cur == nil || cur.Terminal() || !m.sameHelperAlive(cur.PID, cur.Attempt) {
+			m.mu.Unlock()
+			continue
+		}
+		sig, what := syscall.SIGTERM, "time-limit-sigterm"
+		switch {
+		case !cur.TimedOut:
+			cur.TimedOut = true
+		case over >= m.cfg.StallWait:
+			sig, what = syscall.SIGKILL, "time-limit-sigkill"
+		default:
+			m.mu.Unlock()
+			continue
+		}
+		syscall.Kill(cur.PID, sig)
+		cur.State = StateStopping
+		m.t.save()
+		m.mu.Unlock()
+		m.event(what, e.Attempt, e.PID, fmt.Sprintf("class %s time limit %s", e.claimClass().Name, lim))
 	}
 }
