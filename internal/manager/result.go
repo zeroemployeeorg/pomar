@@ -64,6 +64,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		doc["sha"] = s.SHA
 		doc["git"] = s.Git
 		doc["release_base"] = s.Base
+		if s.BaseSHA != "" {
+			doc["base_sha"] = s.BaseSHA
+		}
 		if m.cfg.Mirrors != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if url, err := m.cfg.Mirrors.Remote(ctx, s.Mirror); err == nil {

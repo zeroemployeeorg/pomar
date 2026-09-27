@@ -35,3 +35,32 @@ func TestStartRefusesAMalformedExactSHA(t *testing.T) {
 		t.Fatal("a refused start left an entry")
 	}
 }
+
+// A head-and-base start is refused before anything unless it is a repository
+// source naming two full SHAs; a source with neither a ref nor that pair is
+// refused too.
+func TestCheckExactSource(t *testing.T) {
+	a, b := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	for _, ok := range []*Source{
+		nil,
+		{Mirror: "m", Ref: "main"},
+		{Mirror: "m", Ref: "main", SHA: a},
+		{Mirror: "m", SHA: a, BaseSHA: b, Git: true},
+		{Mirror: "m", Ref: "feature", SHA: a, BaseSHA: b, Git: true},
+	} {
+		if err := checkExactSource(ok); err != nil {
+			t.Errorf("%+v refused: %v", ok, err)
+		}
+	}
+	for name, bad := range map[string]*Source{
+		"no ref and no pair":  {Mirror: "m"},
+		"a base without git":  {Mirror: "m", SHA: a, BaseSHA: b},
+		"a base without head": {Mirror: "m", Ref: "main", BaseSHA: b, Git: true},
+		"a short base":        {Mirror: "m", SHA: a, BaseSHA: "bbbb", Git: true},
+		"a ref as head":       {Mirror: "m", SHA: "main", BaseSHA: b, Git: true},
+	} {
+		if err := checkExactSource(bad); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

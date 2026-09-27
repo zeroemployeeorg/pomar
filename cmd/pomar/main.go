@@ -48,9 +48,11 @@ const usage = `usage:
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
-  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-sha SHA] [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
+  pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-sha SHA] | -mirror NAME -sha SHA -base-sha SHA] [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
                                     with a mirror, REF is pinned to a commit SHA at admission; with -sha, to exactly
                                     that commit, which must be in REF's history (refused otherwise)
+                                    -sha with -base-sha (and -git): exactly that head, with history back to the base;
+                                    both must be commits the mirror has (a pull request's head is one)
                                     -output: a file the command leaves at /pomar/outputs/NAME, copied out when it exits
                                     -readonly-source: /work stays root-owned and not writable by the job
   pomar base build [-root DIR] -host-bin PATH
@@ -461,6 +463,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
 	gitSrc := fs.Bool("git", false, "give the guest a repository (a bundle of the branch -ref and of main) instead of a tree (start)")
+	baseSHA := fs.String("base-sha", "", "with -sha and -git: the base commit the job diffs against; the guest gets the history back to its merge base, and -ref is optional (start)")
 	exactSHA := fs.String("sha", "", "the exact commit to run, a full SHA in the history of -ref (start; needs -mirror)")
 	readonlySrc := fs.Bool("readonly-source", false, "leave /work root-owned and not writable by the job; it writes to its home, /tmp and /pomar/outputs (start; needs -mirror)")
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
@@ -507,17 +510,17 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 			cmd = cmd[1:]
 		}
 		var e manager.Entry
-		if (*readonlySrc || *exactSHA != "") && *mirrorName == "" {
+		if (*readonlySrc || *exactSHA != "" || *baseSHA != "") && *mirrorName == "" {
 			fmt.Fprintln(stderr, "attempt start: -readonly-source and -sha need -mirror and -ref")
 			return 2
 		}
 		req := manager.StartRequest{ID: *id, Command: cmd, Inputs: inputs, Class: *className, Outputs: outputs}
 		if *mirrorName != "" || *ref != "" {
-			if *mirrorName == "" || *ref == "" {
-				fmt.Fprintln(stderr, "attempt start: -mirror and -ref go together")
+			if *mirrorName == "" || (*ref == "" && (*exactSHA == "" || *baseSHA == "")) {
+				fmt.Fprintln(stderr, "attempt start: -mirror needs -ref, or -sha and -base-sha")
 				return 2
 			}
-			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, SHA: *exactSHA, Git: *gitSrc, ReadOnly: *readonlySrc}
+			req.Source = &manager.Source{Mirror: *mirrorName, Ref: *ref, SHA: *exactSHA, BaseSHA: *baseSHA, Git: *gitSrc, ReadOnly: *readonlySrc}
 		}
 		err = c.Do("POST", "/v1/attempts", req, &e)
 		out = e

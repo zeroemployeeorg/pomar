@@ -248,3 +248,59 @@ func TestResolveAt(t *testing.T) {
 		}
 	}
 }
+
+// A pull request's head, which is on no branch, and a base are bundled with
+// the history between them; the guest-side checkout sees head and can diff
+// against base; the mirror itself gains no ref.
+func TestBundleAtPullRequestHead(t *testing.T) {
+	m, env, up, sha1 := setup(t)
+	ctx := context.Background()
+	// A commit on no branch, reachable only as a pull request's head.
+	run(t, env, up, "checkout", "--quiet", "--detach")
+	if err := os.WriteFile(filepath.Join(up, "pr.txt"), []byte("from a fork\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, env, up, "add", "pr.txt")
+	run(t, env, up, "commit", "--quiet", "-m", "pr")
+	head := run(t, env, up, "rev-parse", "HEAD")
+	run(t, env, up, "update-ref", "refs/pull/1/head", head)
+	run(t, env, up, "checkout", "--quiet", "main")
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	before := run(t, env, m.Path("demo"), "for-each-ref", "--format=%(refname)")
+
+	dst := filepath.Join(t.TempDir(), "s.bundle")
+	if err := m.BundleAt(ctx, "demo", head, sha1, dst); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	run(t, env, work, "init", "--quiet")
+	run(t, env, work, "fetch", "--quiet", dst, "refs/heads/*:refs/remotes/origin/*")
+	run(t, env, work, "-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", head)
+	if got := run(t, env, work, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("HEAD %s, want %s", got, head)
+	}
+	if got := run(t, env, work, "diff", "--name-only", sha1+"...HEAD"); got != "pr.txt" {
+		t.Fatalf("diff base...HEAD = %q, want pr.txt", got)
+	}
+	if after := run(t, env, m.Path("demo"), "for-each-ref", "--format=%(refname)"); after != before {
+		t.Fatalf("the mirror's refs changed:\n%s\n---\n%s", before, after)
+	}
+	if ents, _ := os.ReadDir(filepath.Dir(dst)); len(ents) != 1 {
+		t.Fatalf("the scratch repository was left behind: %v", ents)
+	}
+	for name, tc := range map[string]struct{ head, base string }{
+		"an unknown head": {strings.Repeat("0", 40), sha1},
+		"an unknown base": {head, strings.Repeat("0", 40)},
+		"a short head":    {head[:12], sha1},
+		"a ref as base":   {head, "main"},
+	} {
+		if err := m.BundleAt(ctx, "demo", tc.head, tc.base, filepath.Join(t.TempDir(), "x.bundle")); err == nil {
+			t.Errorf("%s: bundled", name)
+		}
+	}
+	if err := m.BundleAt(ctx, "demo", head, sha1, dst); err == nil {
+		t.Error("an existing destination was overwritten")
+	}
+}

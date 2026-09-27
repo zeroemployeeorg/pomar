@@ -377,6 +377,11 @@ type Source struct {
 	// and the start is refused otherwise. Without it, Ref is pinned to its tip
 	// at admission (the elders' ruling r30 §4.2).
 	SHA string `json:"sha,omitempty"`
+	// BaseSHA, with SHA and Git, is the base commit the job diffs against
+	// (RELEASE_BASE): the guest gets a repository at SHA with the history
+	// back to BaseSHA's merge base, and Ref is then optional. Both must be
+	// commits the mirror has (the elders' ruling of 2026-09-27 §2.4).
+	BaseSHA string `json:"base_sha,omitempty"`
 }
 
 // Start ledgers an attempt's objects and spawns its helper in a new session,
@@ -430,6 +435,9 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	}
 	inputRecs, err := checkInputs(inputs)
 	if err != nil {
+		return Entry{}, err
+	}
+	if err := checkExactSource(src); err != nil {
 		return Entry{}, err
 	}
 	if src != nil && src.SHA != "" && !fullSHA.MatchString(src.SHA) {
@@ -503,7 +511,14 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 	var sha string
 	if src != nil {
 		var err error
-		if src.SHA != "" {
+		if src.BaseSHA != "" {
+			// Head and base, both named: the head need not be on any branch
+			// (a pull request's head is refs/pull/N/head in the mirror).
+			sha, err = src.SHA, m.cfg.Mirrors.Commit(ctx, src.Mirror, src.SHA)
+			if err == nil {
+				err = m.cfg.Mirrors.Commit(ctx, src.Mirror, src.BaseSHA)
+			}
+		} else if src.SHA != "" {
 			sha, err = m.cfg.Mirrors.ResolveAt(ctx, src.Mirror, src.Ref, src.SHA)
 		} else {
 			sha, err = m.cfg.Mirrors.Resolve(ctx, src.Mirror, src.Ref)
@@ -1018,6 +1033,9 @@ func (s *Source) file() string {
 // commit.
 func (m *Manager) writeSource(ctx context.Context, src *Source, sha, rec string) error {
 	dst := filepath.Join(rec, src.file())
+	if src.Git && src.BaseSHA != "" {
+		return m.cfg.Mirrors.BundleAt(ctx, src.Mirror, sha, src.BaseSHA, dst)
+	}
 	if src.Git {
 		return m.cfg.Mirrors.Bundle(ctx, src.Mirror, sha, src.Ref, src.base(), dst)
 	}
@@ -1052,4 +1070,28 @@ func (m *Manager) verifyBases() {
 		}
 		m.event("base-verified", "", 0, jc.Class.Name)
 	}
+}
+
+// checkExactSource refuses a malformed head-and-base start before anything is
+// synced or created: a base needs a head and a repository source, and both
+// must be full SHAs. Without a base, a start needs a ref.
+func checkExactSource(src *Source) error {
+	if src == nil {
+		return nil
+	}
+	if src.BaseSHA == "" {
+		if src.Ref == "" {
+			return errors.New("manager: a source needs a ref, or a sha and a base_sha")
+		}
+		return nil
+	}
+	switch {
+	case !src.Git:
+		return errors.New("manager: base_sha needs a repository source (git): a tree has no history to diff")
+	case src.SHA == "":
+		return errors.New("manager: base_sha needs sha, the head commit")
+	case !fullSHA.MatchString(src.SHA) || !fullSHA.MatchString(src.BaseSHA):
+		return fmt.Errorf("manager: sha %q and base_sha %q must both be full commit SHAs", src.SHA, src.BaseSHA)
+	}
+	return nil
 }

@@ -22,8 +22,8 @@ const (
 
 // pinnedSource is what the entry and the pins document record of a source.
 func pinnedSource(src *Source, sha string) *PinnedSource {
-	p := &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, Git: src.Git, ReadOnly: src.ReadOnly}
-	if src.Git {
+	p := &PinnedSource{Mirror: src.Mirror, Ref: src.Ref, SHA: sha, BaseSHA: src.BaseSHA, Git: src.Git, ReadOnly: src.ReadOnly}
+	if src.Git && src.BaseSHA == "" {
 		p.Base = src.base()
 	}
 	return p
