@@ -163,6 +163,10 @@ const (
 	// ruling of 2026-09-27 17:21Z §4).
 	ReasonMirrorUnavailable = "mirror-unavailable"
 	ReasonCommitUnknown     = "commit-unknown"
+	// ReasonDraining: the owner has set the manager draining. Attempts already
+	// live finish; no new one is admitted until the drain is lifted (the
+	// elders' ruling of 2026-09-27 17:21Z §2 item 2; a precondition of CI-4).
+	ReasonDraining = "draining"
 )
 
 // Refusal says which resource refused a claim.

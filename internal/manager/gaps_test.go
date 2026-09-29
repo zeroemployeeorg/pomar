@@ -83,6 +83,14 @@ func TestSourceIsSettledBeforeAdmission(t *testing.T) {
 	if n := len(m.List()); n != 1 {
 		t.Fatalf("%d entries; a refused start created one", n)
 	}
+	// While draining, a start is refused as draining before any fetch: the
+	// mirror that cannot be synced is never tried.
+	if _, err := m.Drain(true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Start("s2", []string{"true"}, &Source{Mirror: "gone", Ref: "main"}); reason(err) != capacity.ReasonDraining {
+		t.Fatalf("a start while draining: %v, want draining", err)
+	}
 }
 
 // source.json records the base SHA a head-and-base start named, not a

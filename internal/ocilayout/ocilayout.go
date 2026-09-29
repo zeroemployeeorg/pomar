@@ -14,12 +14,18 @@
 //     hashes to its name (sha256 only);
 //   - the config says linux/arm64, and each layer, uncompressed, hashes to
 //     its diff ID;
-//   - no layer holds a credential file (.npmrc, .netrc, .git-credentials,
-//     anything under .ssh/, .docker/config.json), even one a later layer
-//     deletes, since its bytes still ship in the image;
+//   - no layer holds one of the named credential files (.npmrc, .netrc,
+//     .git-credentials, anything under .ssh/, .docker/config.json), even one
+//     a later layer deletes, since its bytes still ship in the image; an
+//     entry named as a whiteout (.wh.*) is exempt only if it is an empty
+//     regular file, as a real whiteout is;
+//   - nothing but zero padding follows a layer's tar end-of-archive marker
+//     (a second gzip member, say), so what is checked is the whole blob;
 //   - no variable in the config's Env looks like a credential, by its name or
 //     by a known token prefix in its value.
 //
+// These checks refuse the named credential files and credential-like Env
+// entries; they do not prove that an image holds no credential of any kind.
 // A refusal is reported, never cleaned: Pomar does not edit an image.
 package ocilayout
 
@@ -322,7 +328,12 @@ func (w *walker) layer(mediaType string, r io.Reader) (string, error) {
 			return "", fmt.Errorf("ocilayout: layer tar: %w", err)
 		}
 		name := strings.TrimPrefix(path.Clean("/"+hdr.Name), "/")
-		if credentialPath(name) {
+		whiteout := strings.HasPrefix(path.Base(name), ".wh.")
+		if whiteout && (hdr.Typeflag != tar.TypeReg || hdr.Size != 0) {
+			w.r.Refusals = append(w.r.Refusals, fmt.Sprintf("%s is named as a whiteout but is not an empty regular file", name))
+			whiteout = false
+		}
+		if !whiteout && credentialPath(name) {
 			w.r.CredentialPaths = append(w.r.CredentialPaths, name)
 		}
 		if (name == "etc/os-release" || name == "usr/lib/os-release") && hdr.Typeflag == tar.TypeReg && hdr.Size <= 64<<10 {
@@ -335,9 +346,16 @@ func (w *walker) layer(mediaType string, r io.Reader) (string, error) {
 			}
 		}
 	}
-	// Whatever follows the tar's end-of-archive marker is part of the layer too.
-	if _, err := io.Copy(io.Discard, io.TeeReader(r, h)); err != nil {
+	// Whatever follows the tar's end-of-archive marker is part of the layer
+	// too: it is hashed, and it must be zero padding. An unpacker stops at the
+	// marker, so anything else (a second gzip member, say) would be stored in
+	// the blob without ever being checked as files.
+	var z zeros
+	if _, err := io.Copy(io.MultiWriter(h, &z), r); err != nil {
 		return "", fmt.Errorf("ocilayout: layer: %w", err)
+	}
+	if z.nonZero > 0 {
+		w.r.Refusals = append(w.r.Refusals, fmt.Sprintf("a layer has %d non-zero bytes after its tar end-of-archive marker", z.nonZero))
 	}
 	if len(w.r.CredentialPaths) > 0 && !contains(w.r.Refusals, credentialRefusal) {
 		w.r.Refusals = append(w.r.Refusals, credentialRefusal)
@@ -347,15 +365,24 @@ func (w *walker) layer(mediaType string, r io.Reader) (string, error) {
 
 const credentialRefusal = "a layer holds a credential file (see credential_paths)"
 
-// credentialPath reports whether a layer entry is a file that holds, or may
-// hold, a credential. A whiteout for one is not flagged; the file it hides
-// is, in the layer that holds its bytes.
-func credentialPath(name string) bool {
-	base := path.Base(name)
-	if strings.HasPrefix(base, ".wh.") {
-		return false
+// zeros counts the non-zero bytes written to it.
+type zeros struct{ nonZero int64 }
+
+func (z *zeros) Write(p []byte) (int, error) {
+	for _, b := range p {
+		if b != 0 {
+			z.nonZero++
+		}
 	}
-	switch base {
+	return len(p), nil
+}
+
+// credentialPath reports whether a layer entry is a file that holds, or may
+// hold, a credential. The caller exempts a real whiteout (an empty regular
+// file named .wh.*); the file it hides is flagged in the layer that holds its
+// bytes.
+func credentialPath(name string) bool {
+	switch path.Base(name) {
 	case ".npmrc", ".netrc", ".git-credentials":
 		return true
 	}
