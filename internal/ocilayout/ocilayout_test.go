@@ -318,3 +318,57 @@ func TestAPinThatIsNotSha256IsRefused(t *testing.T) {
 		t.Fatal("a short pin was accepted")
 	}
 }
+
+func TestOnlyZeroPaddingMayFollowTheTarEnd(t *testing.T) {
+	base := tarOf(t, osRelease)
+	for _, c := range []struct {
+		name   string
+		layer  []byte
+		gzip   bool
+		refuse bool
+	}{
+		{"zero padding", append(append([]byte{}, base...), make([]byte, 8192)...), false, false},
+		{"bytes after the marker", append(append([]byte{}, base...), []byte("root/.npmrc _authToken=x")...), false, true},
+		{"a second gzip member", nil, true, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := newLayout(t)
+			var m Descriptor
+			if c.gzip {
+				// Two gzip members: the second archive would never be unpacked,
+				// but its bytes are in the blob.
+				second := tarOf(t, file{"root/.npmrc", "//registry/:_authToken=x"})
+				raw := append(append([]byte{}, base...), second...)
+				blob := append(gz(t, base), gz(t, second)...)
+				layer := l.blob("application/vnd.oci.image.layer.v1.tar+gzip", blob)
+				var cfg config
+				cfg.OS, cfg.Architecture, cfg.RootFS.Type, cfg.RootFS.DiffIDs = "linux", "arm64", "layers", []string{digest(raw)}
+				cd := l.json("application/vnd.oci.image.config.v1+json", cfg)
+				m = l.json(OCIManifest, manifest{MediaType: OCIManifest, Config: cd, Layers: []Descriptor{layer}})
+			} else {
+				m = l.image(imageOpts{}, c.layer)
+			}
+			l.root(m)
+			_, err := Check(l.dir, m.Digest)
+			switch {
+			case c.refuse && (!errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "after its tar end-of-archive marker")):
+				t.Fatalf("err = %v", err)
+			case !c.refuse && err != nil:
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
+}
+
+func TestOnlyAnEmptyRegularFileIsAWhiteout(t *testing.T) {
+	l := newLayout(t)
+	m := l.image(imageOpts{}, tarOf(t, osRelease, file{"root/.ssh/.wh.payload", "not a whiteout"}, file{"etc/.wh.gone", ""}))
+	l.root(m)
+	r, err := Check(l.dir, m.Digest)
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "root/.ssh/.wh.payload is named as a whiteout but is not an empty regular file") {
+		t.Fatalf("err = %v", err)
+	}
+	if strings.Join(r.CredentialPaths, " ") != "root/.ssh/.wh.payload" || strings.Contains(err.Error(), "etc/.wh.gone") {
+		t.Fatalf("credential paths %v, err %v", r.CredentialPaths, err)
+	}
+}
