@@ -156,6 +156,13 @@ const (
 	// ReasonBaseUnverified: the class's base has not been verified since this
 	// boot; the manager verifies bases when it starts, never inline.
 	ReasonBaseUnverified = "base-unverified"
+	// ReasonMirrorUnavailable: the start's mirror could not be synced, or is
+	// not there. ReasonCommitUnknown: the mirror does not have the commit, or
+	// does not reach it from a synced branch or pull request (a base, from its
+	// branch). Both are decided before capacity is claimed (the elders'
+	// ruling of 2026-09-27 17:21Z §4).
+	ReasonMirrorUnavailable = "mirror-unavailable"
+	ReasonCommitUnknown     = "commit-unknown"
 	// ReasonDraining: the owner has set the manager draining. Attempts already
 	// live finish; no new one is admitted until the drain is lifted (the
 	// elders' ruling of 2026-09-27 17:21Z §2 item 2; a precondition of CI-4).

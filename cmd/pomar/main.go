@@ -501,6 +501,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	exactSHA := fs.String("sha", "", "the exact commit to run, a full SHA in the history of -ref (start; needs -mirror)")
 	readonlySrc := fs.Bool("readonly-source", false, "leave /work root-owned and not writable by the job; it writes to its home, /tmp and /pomar/outputs (start; needs -mirror)")
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
+	logKey := fs.String("public-key", "", "the pinned public key, base64 (log): the result's signature is verified, and the log checked against the output_log it signed")
 	drainOff := fs.Bool("off", false, "lift the drain instead of setting it (drain)")
 	var outputs []string
 	fs.Func("output", "NAME: a file the command leaves at /pomar/outputs/NAME, copied out when it exits (start; repeatable)", func(v string) error {
@@ -579,9 +580,17 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		err = c.Do("DELETE", "/v1/attempts/"+*id, nil, nil)
 		out = map[string]string{"removed": *id}
 	case "log":
-		// The ended attempt's output log, as recorded: checked against the
-		// sha256 in its entry and signed result before a byte is written.
-		b, sum, truncated, lerr := c.Log(*id)
+		// The ended attempt's output log, checked against the output_log of
+		// its result document before a byte is written: with -public-key,
+		// the result's signature is verified first.
+		var pub []byte
+		if *logKey != "" {
+			if pub, err = base64.StdEncoding.DecodeString(*logKey); err != nil {
+				fmt.Fprintln(stderr, "attempt log: public key:", err)
+				return 2
+			}
+		}
+		b, sum, truncated, lerr := c.Log(*id, pub)
 		if lerr != nil {
 			fmt.Fprintln(stderr, lerr)
 			return 1
@@ -600,6 +609,9 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		}
 		if truncated {
 			fmt.Fprintf(stderr, "attempt log: truncated to its first %d bytes (sha256 %s)\n", len(b), sum)
+		}
+		if pub == nil {
+			fmt.Fprintf(stderr, "attempt log: checked against the result's output_log (sha256 %s); its signature was not checked (no -public-key)\n", sum)
 		}
 		return 0
 	case "pins":
