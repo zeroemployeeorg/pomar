@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -322,4 +323,43 @@ func (m *Mirrors) Reachable(ctx context.Context, name, head, base, baseBranch st
 	}
 	r.Base, r.BaseRef = base, ref+" "+tip
 	return r, nil
+}
+
+// maxShow bounds a file Show reads.
+const maxShow = 64 << 20
+
+// Show returns the bytes of file path in commit sha of mirror name, read from
+// the mirror on the host: a lock the manager reads there cannot be changed by
+// the job it is for. A path the commit does not have is os.ErrNotExist.
+func (m *Mirrors) Show(ctx context.Context, name, sha, path string) ([]byte, error) {
+	if err := m.Commit(ctx, name, sha); err != nil {
+		return nil, err
+	}
+	if path == "" || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "-") || strings.Contains(path, "..") || strings.ContainsAny(path, ":\n") {
+		return nil, fmt.Errorf("mirror: invalid path %q", path)
+	}
+	obj := sha + ":" + path
+	kind, err := m.git(ctx, m.Path(name), "cat-file", "-t", obj)
+	if err != nil {
+		return nil, fmt.Errorf("mirror: %s has no %s at %s: %w", name, path, sha, os.ErrNotExist)
+	}
+	if kind != "blob" {
+		return nil, fmt.Errorf("mirror: %s at %s is a %s, not a file", path, sha, kind)
+	}
+	size, err := m.git(ctx, m.Path(name), "cat-file", "-s", obj)
+	if err != nil {
+		return nil, err
+	}
+	if n, err := strconv.ParseInt(size, 10, 64); err != nil || n > maxShow {
+		return nil, fmt.Errorf("mirror: %s at %s is %s bytes, over %d", path, sha, size, maxShow)
+	}
+	// The blob's exact bytes: git's output is not trimmed here, as it is for
+	// the one-line answers above, so its hash is the file's.
+	bin := m.Git
+	if bin == "" {
+		bin = "git"
+	}
+	cmd := exec.CommandContext(ctx, bin, "-C", m.Path(name), "cat-file", "blob", obj)
+	cmd.Env = append(append(os.Environ(), "GIT_TERMINAL_PROMPT=0"), m.Env...)
+	return cmd.Output()
 }

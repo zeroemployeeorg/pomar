@@ -20,6 +20,7 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/goproxy"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
+	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
 	"github.com/zeroemployeeorg/pomar/internal/result"
 	"github.com/zeroemployeeorg/pomar/internal/sign"
@@ -63,6 +64,10 @@ type JobClass struct {
 	// boot. The manager calls it once when it starts, before it serves; an
 	// attempt never waits on it. Nil means the class has no base to verify.
 	VerifyBase func() error
+	// NPM serves each attempt with a source an npm registry of its own, holding
+	// exactly what the repository's package-lock.json locks at the attempt's
+	// commit (DESIGN-03 §2). A commit with no lock, or one refused, is refused.
+	NPM bool
 }
 
 // Config is what a manager needs.
@@ -124,6 +129,8 @@ type Config struct {
 	// start names a mirror and a ref, never a URL. Nil keeps the development
 	// behaviour: mirrors are synced by hand with `pomar mirror sync`.
 	MirrorURLs map[string]string
+	// NPM is the default class's JobClass.NPM, when Classes is empty.
+	NPM bool
 	// JobUser is the default class's JobClass.JobUser, when Classes is empty.
 	JobUser bool
 	// VerifyBase is the default class's JobClass.VerifyBase, when Classes is
@@ -132,6 +139,8 @@ type Config struct {
 	// Classes are the job classes a start may name, the first being the
 	// default. Empty means one class made of Class, Guest and Base.
 	Classes []JobClass
+	// NPMUpstream replaces the npm registry in tests; empty is the registry.
+	NPMUpstream string
 }
 
 // Manager supervises helpers.
@@ -148,6 +157,8 @@ type Manager struct {
 	seen map[string]time.Time
 	// proxies are the live attempts' module proxy listeners.
 	proxies map[string]*proxyListener
+	// npmProxies are the live attempts' npm registries (an npm class's).
+	npmProxies map[string]*proxyListener
 	// vmOrphans are the VM services no live attempt accounts for.
 	vmOrphans map[int]*VMOrphan
 	lastSweep time.Time
@@ -185,7 +196,7 @@ func Open(cfg Config) (*Manager, error) {
 		cfg.Class = capacity.CI
 	}
 	if len(cfg.Classes) == 0 {
-		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser, VerifyBase: cfg.VerifyBase}}
+		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser, VerifyBase: cfg.VerifyBase, NPM: cfg.NPM}}
 	}
 	seen := map[string]bool{}
 	for _, jc := range cfg.Classes {
@@ -236,7 +247,7 @@ func Open(cfg Config) (*Manager, error) {
 		lock.Close()
 		return nil, fmt.Errorf("manager: %w", err)
 	}
-	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}, proxies: map[string]*proxyListener{}, vmOrphans: map[int]*VMOrphan{}}
+	m := &Manager{cfg: cfg, dir: dir, lock: lock, t: t, events: ev, done: make(chan struct{}), seen: map[string]time.Time{}, proxies: map[string]*proxyListener{}, npmProxies: map[string]*proxyListener{}, vmOrphans: map[int]*VMOrphan{}}
 	m.event("manager-start", "", 0, "")
 	if err := m.reconcile(); err != nil {
 		m.Close()
@@ -470,6 +481,22 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 			return Entry{}, err
 		}
 	}
+	// An npm class's lock, read from the mirror at that commit and checked,
+	// also before capacity is claimed.
+	var npmLock npmproxy.Lock
+	var npmRec *NPMLock
+	if jc.NPM {
+		if src == nil {
+			return Entry{}, errors.New("manager: the class serves npm, and npm needs a source")
+		}
+		if m.cfg.ShimBin == "" {
+			return Entry{}, errors.New("manager: the class serves npm, and the manager has no shim to serve it into the guest")
+		}
+		if npmLock, npmRec, err = m.readNPMLock(src, sha); err != nil {
+			m.event("start-refused", id, 0, err.Error())
+			return Entry{}, err
+		}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.t.entries[id]; ok {
@@ -528,6 +555,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 			v.Teardown(venue.KindVM, id)
 		}
 		m.closeProxy(id)
+		m.closeNPM(id)
 		v.Failed(venue.KindVolume, recID, err.Error())
 		v.Teardown(venue.KindVolume, recID)
 		m.event("start-refused", id, 0, err.Error())
@@ -591,6 +619,17 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		}
 		args = append(args, "--goproxy-socket", m.proxySocket(id), "--shim", m.cfg.ShimBin)
 	}
+	if npmLock != nil {
+		// Its own npm registry, on its own socket, relayed into its guest
+		// only; a second shim serves it on the guest's loopback.
+		if err := m.listenNPM(id, npmLock); err != nil {
+			return abandon(err, true)
+		}
+		args = append(args, "--npm-socket", m.npmSocket(id))
+		if !withProxy {
+			args = append(args, "--shim", m.cfg.ShimBin)
+		}
+	}
 	args = append(append(args, "--"), command...)
 	logf, err := os.OpenFile(filepath.Join(rec, "helper.log"), os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
@@ -617,10 +656,11 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		// the helper we just made.
 		syscall.Kill(pid, syscall.SIGTERM)
 		m.closeProxy(id)
+		m.closeNPM(id)
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, NPM: npmRec, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
 	if src != nil {
 		e.Source = pinnedSource(src, sha)
 		e.Source.Reach = reach
@@ -1017,6 +1057,7 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 		e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames)
 	}
 	m.closeProxy(id)
+	m.closeNPM(id)
 	m.t.save()
 	final := *e
 	m.mu.Unlock()

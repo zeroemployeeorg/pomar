@@ -90,6 +90,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		env["uid"], env["gid"], env["HOME"] = jobUID, jobUID, jobHomeWithoutSource
 	}
 	doc["env"] = env
+	if e.NPM != nil {
+		doc["npm_lock"] = e.NPM
+	}
 	if e.Log != nil {
 		doc["output_log"] = e.Log
 	}

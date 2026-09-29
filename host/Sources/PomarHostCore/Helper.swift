@@ -45,6 +45,9 @@ public enum Helper {
         public var pins: String?
         /// A base root filesystem to clone; nil unpacks the image as before.
         public var base: String?
+        /// The host socket of this attempt's npm registry (an npm class's),
+        /// served in the guest by a second shim; needs shim and a source.
+        public var npmSocket: String?
 
         public init(
             attempt: String, stateDir: String, store: String, kernel: String,
@@ -52,7 +55,7 @@ public enum Helper {
             command: [String], base: String? = nil, source: String? = nil,
             proxySocket: String? = nil, shim: String? = nil, sourceBundleSHA: String? = nil, inputs: String? = nil,
             outputs: [String] = [], outputsDir: String? = nil, outputsMax: Int64 = 0,
-            readonlySource: Bool = false, jobUser: Bool = false, pins: String? = nil,
+            readonlySource: Bool = false, jobUser: Bool = false, pins: String? = nil, npmSocket: String? = nil,
             cpus: Int = Helper.defaultCaps.cpus, memoryBytes: UInt64 = Helper.defaultCaps.memoryBytes
         ) {
             self.base = base
@@ -67,6 +70,7 @@ public enum Helper {
             self.readonlySource = readonlySource
             self.jobUser = jobUser
             self.pins = pins
+            self.npmSocket = npmSocket
             self.cpus = cpus
             self.memoryBytes = memoryBytes
             self.attempt = attempt
@@ -220,11 +224,16 @@ public enum Helper {
     /// shim. With the module proxy, it first waits (up to 10 s) for the
     /// proxy shim to be listening, so the command never starts without it.
     public static func extractCommand(
-        waitForProxy: Bool = false, bundleSHA: String? = nil, outputs: Bool = false, readonlySource: Bool = false
+        waitForProxy: Bool = false, bundleSHA: String? = nil, outputs: Bool = false, readonlySource: Bool = false,
+        waitForNPM: Bool = false
     ) -> [String] {
         let wait =
             waitForProxy
             ? "n=0; until [ -e \(proxyReady) ]; do n=$((n+1)); [ $n -gt 200 ] && { echo 'pomar: proxy shim not ready' >&2; exit 97; }; sleep 0.05; done; "
+            : ""
+        let waitNPM =
+            waitForNPM
+            ? "n=0; until [ -e \(npmReady) ]; do n=$((n+1)); [ $n -gt 200 ] && { echo 'pomar: npm shim not ready' >&2; exit 97; }; sleep 0.05; done; "
             : ""
         // A bundle becomes a repository with no remote: its branches arrive
         // as origin/* tracking refs, and the pinned commit is checked out
@@ -237,7 +246,7 @@ public enum Helper {
             } ?? "mkdir -p \(workDir) && tar -xf \(archiveInGuest) -C \(workDir)"
         return [
             "/bin/sh", "-c",
-            wait + unpack + " && rm -f \(archiveInGuest) && \(registerJobUser) && mkdir -p \(jobHome) "
+            wait + waitNPM + unpack + " && rm -f \(archiveInGuest) && \(registerJobUser) && mkdir -p \(jobHome) "
                 + (readonlySource
                     ? "&& chown -R 0:0 \(workDir) && chmod -R a-w \(workDir) && chown -R \(jobUID):\(jobUID) \(jobHome) "
                         // Git refuses a repository its user does not own; the
@@ -283,13 +292,26 @@ public enum Helper {
     /// proxy; nothing that weakens checking is set.
     public static let proxyEnvironment = ["GOPROXY=http://\(proxyListen)"]
 
-    /// Copies the shim into the guest and starts it. The returned process
-    /// runs until the guest stops.
-    static func startProxyShim(_ container: LinuxContainer, shim: String, output: Writer) async throws -> LinuxProcess {
-        try await container.copyIn(
-            from: URL(fileURLWithPath: shim), to: URL(fileURLWithPath: shimInGuest), mode: 0o755)
-        let p = try await container.exec("pomar-proxy-shim") { config in
-            config.arguments = [shimInGuest, "-listen", proxyListen, "-socket", proxySocket, "-ready", proxyReady]
+    /// The guest end of an npm class's registry: a second shim serves the
+    /// relayed npmSocket on npmListen, and npm is pointed at it. Nothing else
+    /// about npm is set: the lock's integrity is what npm checks.
+    public static let npmSocket = "/run/pomar/npmproxy.sock"
+    public static let npmListen = "127.0.0.1:7071"
+    static let npmReady = "/pomar/shim-npm.ready"
+    public static let npmEnvironment = ["npm_config_registry=http://\(npmListen)/"]
+
+    /// Copies the shim into the guest (once) and starts it serving socket on
+    /// listen. The returned process runs until the guest stops.
+    static func startProxyShim(
+        _ container: LinuxContainer, shim: String, output: Writer, name: String = "pomar-proxy-shim",
+        listen: String = proxyListen, socket: String = proxySocket, ready: String = proxyReady, copy: Bool = true
+    ) async throws -> LinuxProcess {
+        if copy {
+            try await container.copyIn(
+                from: URL(fileURLWithPath: shim), to: URL(fileURLWithPath: shimInGuest), mode: 0o755)
+        }
+        let p = try await container.exec(name) { config in
+            config.arguments = [shimInGuest, "-listen", listen, "-socket", socket, "-ready", ready]
             config.stdout = output
             config.stderr = output
         }
@@ -301,7 +323,8 @@ public enum Helper {
     /// it there, and releases the command. Returns the copy and unpack times
     /// in milliseconds.
     static func copyIn(
-        _ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false, bundleSHA: String? = nil,
+        _ container: LinuxContainer, source: String, output: Writer, waitForProxy: Bool = false, waitForNPM: Bool = false,
+        bundleSHA: String? = nil,
         outputs: Bool = false, readonlySource: Bool = false
     ) async throws -> (copy: Int, extract: Int) {
         let clock = ContinuousClock()
@@ -311,7 +334,8 @@ public enum Helper {
         let t1 = clock.now
         let p = try await container.exec("pomar-extract") { config in
             config.arguments = extractCommand(
-                waitForProxy: waitForProxy, bundleSHA: bundleSHA, outputs: outputs, readonlySource: readonlySource)
+                waitForProxy: waitForProxy, bundleSHA: bundleSHA, outputs: outputs, readonlySource: readonlySource,
+                waitForNPM: waitForNPM)
             config.stdout = output
             config.stderr = output
         }
@@ -439,6 +463,13 @@ public enum Helper {
                     ]
                     config.process.environmentVariables += Helper.proxyEnvironment
                 }
+                if let sock = o.npmSocket {
+                    config.sockets.append(
+                        UnixSocketConfiguration(
+                            source: URL(fileURLWithPath: sock), destination: URL(fileURLWithPath: Helper.npmSocket),
+                            direction: .into))
+                    config.process.environmentVariables += Helper.npmEnvironment
+                }
             }
             if let base = o.base {
                 // The clone sits in the container's own directory, so
@@ -471,7 +502,8 @@ public enum Helper {
         // until the source is in place.
         // The proxy shim, when there is one, lives until the guest stops.
         var proxyShim: LinuxProcess?
-        defer { _ = proxyShim }
+        var npmShim: LinuxProcess?
+        defer { _ = proxyShim; _ = npmShim }
         if let src = o.source {
             do {
                 let log = try FileWriter(path: o.stateDir + "/output.log")
@@ -479,6 +511,13 @@ public enum Helper {
                 if withProxy, let shim = o.shim {
                     proxyShim = try await startProxyShim(container, shim: shim, output: log)
                     metrics["goproxy"] = "http://" + proxyListen
+                }
+                let withNPM = o.npmSocket != nil && o.shim != nil
+                if withNPM, let shim = o.shim {
+                    npmShim = try await startProxyShim(
+                        container, shim: shim, output: log, name: "pomar-npm-shim", listen: npmListen, socket: npmSocket,
+                        ready: npmReady, copy: !withProxy)
+                    metrics["npm_registry"] = "http://" + npmListen
                 }
                 if let pins = o.pins {
                     // Root-owned and read-only in the guest: the job reads
@@ -497,7 +536,7 @@ public enum Helper {
                 let attrs = try FileManager.default.attributesOfItem(atPath: src)
                 metrics["source_bytes"] = String((attrs[.size] as? NSNumber)?.int64Value ?? -1)
                 let t = try await copyIn(
-                    container, source: src, output: log, waitForProxy: withProxy, bundleSHA: o.sourceBundleSHA,
+                    container, source: src, output: log, waitForProxy: withProxy, waitForNPM: withNPM, bundleSHA: o.sourceBundleSHA,
                     outputs: !o.outputs.isEmpty, readonlySource: o.readonlySource)
                 if o.sourceBundleSHA != nil { metrics["source_kind"] = "bundle" }
                 metrics["copy_in_ms"] = String(t.copy)

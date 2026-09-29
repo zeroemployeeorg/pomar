@@ -52,6 +52,22 @@ import Testing
     #expect(script.hasSuffix("touch /pomar/job/.pomar-ready"))
 }
 
+@Test func extractWaitsForTheNPMShimWhenAsked() {
+    #expect(!Helper.extractCommand(waitForProxy: true)[2].contains("shim-npm.ready"))
+    let script = Helper.extractCommand(waitForProxy: true, waitForNPM: true)[2]
+    // Both shims are up before the source is unpacked and the command released.
+    let proxy = script.range(of: "until [ -e /pomar/shim.ready ]")
+    let npm = script.range(of: "until [ -e /pomar/shim-npm.ready ]")
+    #expect(proxy != nil && npm != nil && proxy!.lowerBound < npm!.lowerBound)
+    #expect(script.contains("pomar: npm shim not ready"))
+    #expect(script.hasSuffix("touch /pomar/job/.pomar-ready"))
+}
+
+@Test func npmEnvironmentSetsOnlyTheRegistry() {
+    #expect(Helper.npmEnvironment == ["npm_config_registry=http://127.0.0.1:7071/"])
+    #expect(Helper.npmSocket != Helper.proxySocket && Helper.npmListen != Helper.proxyListen)
+}
+
 @Test func proxyEnvironmentSetsOnlyGOPROXY() {
     #expect(Helper.proxyEnvironment == ["GOPROXY=http://127.0.0.1:7070"])
     for weakening in ["GOSUMDB", "GONOSUMDB", "GONOSUMCHECK", "GOINSECURE", "GOFLAGS", "GOPRIVATE", "GONOPROXY"] {

@@ -91,6 +91,13 @@ func (m *Manager) reopenProxies() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for id, e := range m.t.entries {
+		if e.NPM != nil && !e.Terminal() {
+			if err := m.reopenNPM(id); err != nil {
+				m.event("npmproxy-error", id, e.PID, err.Error())
+			} else {
+				m.event("npmproxy-reopened", id, e.PID, "")
+			}
+		}
 		if e.GoProxy && !e.Terminal() {
 			if err := m.listenProxy(id); err != nil {
 				m.event("goproxy-error", id, e.PID, err.Error())

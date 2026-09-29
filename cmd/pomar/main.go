@@ -46,7 +46,7 @@ const usage = `usage:
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                 [-class-time-limit D] [-budget-vcpu N -budget-memory-gib G]
-                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user]
+                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm]
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-sha SHA] | -mirror NAME -sha SHA -base-sha SHA] [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
@@ -333,6 +333,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		return nil
 	})
 	jobUser := fs.Bool("class-job-user", false, "run starts with no source as the job user too, so the class never runs a job as root")
+	npm := fs.Bool("class-npm", false, "serve each attempt with a source an npm registry holding exactly what package-lock.json locks at its commit (needs -shim-bin)")
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -423,6 +424,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		Signer:     signer,
 		MirrorURLs: mirrorURLs,
 		JobUser:    *jobUser,
+		NPM:        *npm,
 		Venue:      v,
 		HostBin:    bin,
 		Guest: manager.Guest{
