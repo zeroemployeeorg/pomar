@@ -58,6 +58,8 @@ type Entry struct {
 	Source *PinnedSource `json:"source,omitempty"`
 	// GoProxy records that the attempt was given the module proxy.
 	GoProxy bool `json:"goproxy,omitempty"`
+	// NPM is the npm lock the attempt was served, for an npm class.
+	NPM *NPMLock `json:"npm_lock,omitempty"`
 	// Pins are what the attempt ran with, copied at admission, so the record
 	// states what it ran, not what the manager runs now (DESIGN-01).
 	Pins *Pins `json:"pins,omitempty"`

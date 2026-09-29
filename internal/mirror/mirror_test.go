@@ -379,3 +379,38 @@ func TestReachableCapsTheRefsItRecords(t *testing.T) {
 		t.Fatalf("reach = %d refs of %d, %v", len(r.HeadRefs), r.HeadRefCount, err)
 	}
 }
+
+// Show reads a file's exact bytes at a commit, from the mirror, and names a
+// path the commit lacks as os.ErrNotExist.
+func TestShow(t *testing.T) {
+	m, env, up, _ := setup(t)
+	ctx := context.Background()
+	lock := "{\n  \"lockfileVersion\": 3\n}\n\n" // trailing newlines kept, byte for byte
+	os.WriteFile(filepath.Join(up, "package-lock.json"), []byte(lock), 0o644)
+	os.MkdirAll(filepath.Join(up, "sub"), 0o755)
+	os.WriteFile(filepath.Join(up, "sub", "x.txt"), []byte("x"), 0o644)
+	run(t, env, up, "add", "package-lock.json", "sub/x.txt")
+	run(t, env, up, "commit", "--quiet", "-m", "lock")
+	sha := run(t, env, up, "rev-parse", "HEAD")
+	if err := m.Sync(ctx, "demo", up); err != nil {
+		t.Fatal(err)
+	}
+	b, err := m.Show(ctx, "demo", sha, "package-lock.json")
+	if err != nil || string(b) != lock {
+		t.Fatalf("Show = %q, %v", b, err)
+	}
+	if _, err := m.Show(ctx, "demo", sha, "no-such-file"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a missing path: %v, want os.ErrNotExist", err)
+	}
+	if _, err := m.Show(ctx, "demo", sha, "sub"); err == nil || !strings.Contains(err.Error(), "not a file") {
+		t.Fatalf("a directory: %v", err)
+	}
+	for _, p := range []string{"", "/etc/passwd", "../x", "-x", "a:b"} {
+		if _, err := m.Show(ctx, "demo", sha, p); err == nil || errors.Is(err, os.ErrNotExist) {
+			t.Errorf("path %q: %v, want an invalid-path refusal", p, err)
+		}
+	}
+	if _, err := m.Show(ctx, "demo", strings.Repeat("0", 40), "package-lock.json"); !errors.Is(err, ErrUnknownCommit) {
+		t.Fatalf("an unknown commit: %v", err)
+	}
+}
