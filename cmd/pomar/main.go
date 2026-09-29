@@ -72,6 +72,9 @@ const usage = `usage:
   pomar attempt log [-root DIR | -socket PATH] -id ID [-o PATH]
                                     an ended attempt's output log, checked against its recorded sha256
                                     (capped; says so on stderr when truncated)
+  pomar attempt drain [-root DIR] [-off]
+                                    the owner sets (or with -off lifts) the drain: new starts are refused
+                                    (draining) while live attempts finish; capacity shows it
   pomar attempt pins [-root DIR | -socket PATH] -id ID
                                     the pins document, the same bytes the guest reads at /pomar/pins.json
   pomar attempt output [-root DIR | -socket PATH] -id ID -name NAME -o PATH
@@ -498,6 +501,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	exactSHA := fs.String("sha", "", "the exact commit to run, a full SHA in the history of -ref (start; needs -mirror)")
 	readonlySrc := fs.Bool("readonly-source", false, "leave /work root-owned and not writable by the job; it writes to its home, /tmp and /pomar/outputs (start; needs -mirror)")
 	className := fs.String("class", "", "the job class to run in (start); empty is the manager's default")
+	drainOff := fs.Bool("off", false, "lift the drain instead of setting it (drain)")
 	var outputs []string
 	fs.Func("output", "NAME: a file the command leaves at /pomar/outputs/NAME, copied out when it exits (start; repeatable)", func(v string) error {
 		outputs = append(outputs, v)
@@ -640,6 +644,11 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	case "capacity":
 		var cp manager.Capacity
 		err = c.Do("GET", "/v1/capacity", nil, &cp)
+		out = cp
+	case "drain":
+		// The owner's socket only: the control socket has no drain route.
+		var cp manager.Capacity
+		err = c.Do("POST", "/v1/drain", map[string]bool{"drain": !*drainOff}, &cp)
 		out = cp
 	case "caches", "evict":
 		var rep manager.CacheReport

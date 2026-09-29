@@ -201,6 +201,23 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 	mux.HandleFunc("GET /v1/caches", caches(false))
 	if full {
 		mux.HandleFunc("POST /v1/caches/evict", caches(true))
+		// The drain: the owner's alone, like every route that changes what
+		// the manager will do. The control socket can read it in capacity.
+		mux.HandleFunc("POST /v1/drain", func(w http.ResponseWriter, r *http.Request) {
+			var req struct {
+				Drain *bool `json:"drain"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Drain == nil {
+				reply(w, http.StatusBadRequest, map[string]string{"error": `want {"drain": true} or {"drain": false}`})
+				return
+			}
+			c, err := m.Drain(*req.Drain)
+			if err != nil {
+				reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+			reply(w, http.StatusOK, c)
+		})
 	}
 	mux.HandleFunc("GET /v1/capacity", func(w http.ResponseWriter, r *http.Request) {
 		c, err := m.Capacity()
