@@ -372,3 +372,121 @@ func TestOnlyAnEmptyRegularFileIsAWhiteout(t *testing.T) {
 		t.Fatalf("credential paths %v, err %v", r.CredentialPaths, err)
 	}
 }
+
+// entry is a tar entry of any type, for the files tests.
+type entry struct {
+	name, body, link string
+	typ              byte
+}
+
+func tarEntries(t *testing.T, es ...entry) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	for _, e := range es {
+		typ := e.typ
+		if typ == 0 {
+			typ = tar.TypeReg
+		}
+		h := &tar.Header{Name: e.name, Mode: 0o644, Typeflag: typ, Linkname: e.link}
+		if typ == tar.TypeReg {
+			h.Size = int64(len(e.body))
+		}
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		if typ == tar.TypeReg {
+			tw.Write([]byte(e.body))
+		}
+	}
+	tw.Close()
+	return buf.Bytes()
+}
+
+func sum(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}
+
+// Listed files are judged in the image's final filesystem: the last layer's
+// bytes, whiteouts and opaque directories applied, and a later symlink over a
+// parent directory hiding the file.
+func TestFilesAreCheckedInTheFinalFilesystem(t *testing.T) {
+	const fonts = "opt/app/fonts/"
+	l := newLayout(t)
+	m := l.image(imageOpts{},
+		tarEntries(t, entry{name: "etc/os-release", body: osRelease.body},
+			entry{name: fonts + "keep.ttf", body: "keep"}, entry{name: fonts + "changed.ttf", body: "v1"},
+			entry{name: fonts + "gone.ttf", body: "gone"}, entry{name: fonts + "back.ttf", body: "back"},
+			entry{name: "opt/opq/in.ttf", body: "in"}, entry{name: "opt/moved/x.ttf", body: "x"},
+			entry{name: fonts + "link.ttf", typ: tar.TypeSymlink, link: "keep.ttf"}),
+		tarEntries(t, entry{name: fonts + "changed.ttf", body: "v2"}, entry{name: fonts + ".wh.gone.ttf"},
+			entry{name: fonts + ".wh.back.ttf"}, entry{name: "opt/opq/.wh..wh..opq"},
+			entry{name: "opt/moved", typ: tar.TypeSymlink, link: "/elsewhere"}),
+		tarEntries(t, entry{name: fonts + "back.ttf", body: "back"}))
+	l.root(m)
+	want := map[string]string{
+		fonts + "keep.ttf": sum("keep"), fonts + "changed.ttf": sum("v1"), fonts + "gone.ttf": sum("gone"),
+		fonts + "back.ttf": sum("back"), "opt/opq/in.ttf": sum("in"), "opt/moved/x.ttf": sum("x"),
+		fonts + "link.ttf": sum("keep"), fonts + "never.ttf": sum("never"), "etc/os-release": sum(osRelease.body),
+	}
+	r, err := CheckFiles(l.dir, m.Digest, want)
+	if !errors.Is(err, ErrRefused) || !strings.Contains(err.Error(), "6 of 9 listed files are not as listed") {
+		t.Fatalf("err = %v", err)
+	}
+	got := map[string]string{}
+	for _, f := range r.Files {
+		got[f.Path] = f.Result
+	}
+	for p, res := range map[string]string{
+		fonts + "keep.ttf":    "ok",
+		fonts + "changed.ttf": "different bytes",
+		fonts + "gone.ttf":    "missing",
+		fonts + "back.ttf":    "ok", // removed, then added again
+		"opt/opq/in.ttf":      "missing",
+		"opt/moved/x.ttf":     "not a regular file: under a symbolic link at opt/moved",
+		fonts + "link.ttf":    "not a regular file: symbolic link",
+		fonts + "never.ttf":   "missing",
+		"etc/os-release":      "ok", // read for os-release and checked too
+	} {
+		if got[p] != res {
+			t.Errorf("%s: %q, want %q", p, got[p], res)
+		}
+	}
+	if r.OSRelease["ID"] != "debian" {
+		t.Fatalf("os-release not read alongside the check: %v", r.OSRelease)
+	}
+	// All as listed: accepted, and StageFiles checks the staged copy the same way.
+	ok := map[string]string{fonts + "keep.ttf": sum("keep"), fonts + "changed.ttf": sum("v2"), fonts + "back.ttf": sum("back")}
+	if _, err := CheckFiles(l.dir, m.Digest, ok); err != nil {
+		t.Fatalf("all as listed: %v", err)
+	}
+	if _, err := StageFiles(l.dir, filepath.Join(t.TempDir(), "staged"), m.Digest, want); !errors.Is(err, ErrRefused) {
+		t.Fatalf("StageFiles: %v", err)
+	}
+}
+
+func TestParseFilesManifest(t *testing.T) {
+	a, b := sum("a"), sum("b")
+	m, err := ParseFilesManifest(strings.NewReader(a+"  DejaVuSans.ttf\n"+b+" *sub/Noto.ttf\n\n"+a+"  /etc/abs.ttf\r\n"), "/opt/app/fonts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 3 || m["opt/app/fonts/DejaVuSans.ttf"] != a || m["opt/app/fonts/sub/Noto.ttf"] != b || m["etc/abs.ttf"] != a {
+		t.Fatalf("parsed %v", m)
+	}
+	for name, tc := range map[string]struct{ in, root string }{
+		"a short hash":             {"abc  x.ttf\n", "/r"},
+		"one space":                {a + " x.ttf\n", "/r"},
+		"uppercase hex":            {strings.ToUpper(a) + "  x.ttf\n", "/r"},
+		"a dotdot path":            {a + "  ../x.ttf\n", "/r"},
+		"relative with no root":    {a + "  x.ttf\n", ""},
+		"a relative root":          {a + "  x.ttf\n", "r"},
+		"one path with two hashes": {a + "  x.ttf\n" + b + "  x.ttf\n", "/r"},
+		"nothing listed":           {"\n\n", "/r"},
+	} {
+		if _, err := ParseFilesManifest(strings.NewReader(tc.in), tc.root); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
