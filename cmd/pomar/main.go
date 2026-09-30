@@ -58,11 +58,13 @@ const usage = `usage:
                                     -readonly-source: /work stays root-owned and not writable by the job
   pomar base build [-root DIR] -host-bin PATH
                                     unpack the pinned image once into a read-only base rootfs
-  pomar image check -layout DIR -digest D
-  pomar image load [-root DIR] -host-bin PATH -layout DIR -digest D -name REPO:TAG
+  pomar image check -layout DIR -digest D [-files MANIFEST [-files-root DIR]]
+  pomar image load [-root DIR] -host-bin PATH -layout DIR -digest D -name REPO:TAG [-files MANIFEST [-files-root DIR]]
                                     an OCI image layout, pinned by its linux/arm64 manifest digest D: every blob
                                     by hash, the platform, the diff IDs, no credential files or Env; load stages
                                     a checked copy and loads that into the image store
+                                    -files: a sha256sum manifest; each file must be a regular file with exactly
+                                    those bytes in the image's final filesystem (relative paths under -files-root)
   pomar mirror sync [-root DIR] -name NAME -url URL
   pomar mirror resolve [-root DIR] -name NAME -ref REF
   pomar attempt list|reconcile|vm-orphans [-root DIR]

@@ -28,6 +28,8 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 	layout := fs.String("layout", "", "an OCI image layout directory")
 	pin := fs.String("digest", "", "the pinned digest of the image's linux/arm64 manifest")
 	name := fs.String("name", "", "the image's reference, as the layout's index.json names it (load)")
+	filesManifest := fs.String("files", "", "a sha256sum-format manifest of files the image must hold, byte for byte, in its final filesystem")
+	filesRoot := fs.String("files-root", "", "the absolute directory in the image that the manifest's relative paths are under")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -39,8 +41,22 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "image %s: -digest %q is not a sha256 digest\n", step, *pin)
 		return 2
 	}
+	var files map[string]string
+	if *filesManifest != "" {
+		mf, err := os.Open(*filesManifest)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+		files, err = ocilayout.ParseFilesManifest(mf, *filesRoot)
+		mf.Close()
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
 	if step == "check" {
-		r, err := ocilayout.Check(*layout, *pin)
+		r, err := ocilayout.CheckFiles(*layout, *pin, files)
 		return imageReport(r, err, stdout, stderr)
 	}
 	if err := checkImageName(*name); err != nil {
@@ -70,7 +86,7 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 	}
 	defer v.Teardown(venue.KindDownload, id)
 	staged := filepath.Join(v.Root(), rel)
-	r, err := ocilayout.Stage(*layout, staged, *pin)
+	r, err := ocilayout.StageFiles(*layout, staged, *pin, files)
 	if err != nil {
 		v.Failed(venue.KindDownload, id, "staging refused")
 		return imageReport(r, err, stdout, stderr)

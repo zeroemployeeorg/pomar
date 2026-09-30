@@ -21,6 +21,9 @@
 //     regular file, as a real whiteout is;
 //   - nothing but zero padding follows a layer's tar end-of-archive marker
 //     (a second gzip member, say), so what is checked is the whole blob;
+//   - with a files manifest (CheckFiles, StageFiles), each listed file is a
+//     regular file with exactly its listed sha256 in the image's final
+//     filesystem, as the layers leave it;
 //   - no variable in the config's Env looks like a credential, by its name or
 //     by a known token prefix in its value.
 //
@@ -121,7 +124,16 @@ type Report struct {
 	Env             []string          `json:"env"`
 	OSRelease       map[string]string `json:"os_release,omitempty"`
 	CredentialPaths []string          `json:"credential_paths,omitempty"`
+	Files           []FileCheck       `json:"files,omitempty"`
 	Refusals        []string          `json:"refusals,omitempty"`
+}
+
+// FileCheck is one listed file, checked in the image's final filesystem.
+type FileCheck struct {
+	Path   string `json:"path"`
+	Want   string `json:"want"`
+	Got    string `json:"got,omitempty"`
+	Result string `json:"result"` // ok, missing, different bytes, or not a regular file: …
 }
 
 // ErrRefused marks a layout that was read in full and refused; the report
@@ -135,7 +147,10 @@ var sha256Digest = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // checked against its digest as it is copied, and then checks the copy
 // against want. A layout that cannot be read is an error; one that is read
 // and refused returns its report and an error wrapping ErrRefused.
-func Stage(src, dst, want string) (*Report, error) {
+func Stage(src, dst, want string) (*Report, error) { return StageFiles(src, dst, want, nil) }
+
+// StageFiles is Stage, and checks the copy's files as CheckFiles does.
+func StageFiles(src, dst, want string, files map[string]string) (*Report, error) {
 	if !sha256Digest.MatchString(want) {
 		return nil, fmt.Errorf("ocilayout: the pin %q is not a sha256 digest", want)
 	}
@@ -158,15 +173,23 @@ func Stage(src, dst, want string) (*Report, error) {
 	if _, err := w.walk(); err != nil {
 		return nil, err
 	}
-	return Check(dst, want)
+	return CheckFiles(dst, want, files)
 }
 
 // Check reads the layout at dir in full and checks it against want.
-func Check(dir, want string) (*Report, error) {
+func Check(dir, want string) (*Report, error) { return CheckFiles(dir, want, nil) }
+
+// CheckFiles is Check, and also checks that each file files names (a path in
+// the image, without its leading slash, and its sha256, hex) is a regular
+// file in the image's final filesystem with exactly those bytes: layers
+// applied in order, a later file replacing an earlier one, a whiteout
+// removing a path and what is under it, an opaque whiteout clearing a
+// directory (DESIGN-03 §3: the fonts, checked by bytes).
+func CheckFiles(dir, want string, files map[string]string) (*Report, error) {
 	if !sha256Digest.MatchString(want) {
 		return nil, fmt.Errorf("ocilayout: the pin %q is not a sha256 digest", want)
 	}
-	w := &walker{dir: dir, seen: map[string]bool{}}
+	w := &walker{dir: dir, seen: map[string]bool{}, want: files, final: map[string]fileState{}}
 	r, err := w.walk()
 	if err != nil {
 		return nil, err
@@ -174,6 +197,7 @@ func Check(dir, want string) (*Report, error) {
 	if r.Manifest != want {
 		r.Refusals = append(r.Refusals, fmt.Sprintf("the linux/arm64 manifest is %s, not the pinned %s", r.Manifest, want))
 	}
+	w.judgeFiles()
 	if len(r.Refusals) > 0 {
 		return r, fmt.Errorf("%w: %s", ErrRefused, strings.Join(r.Refusals, "; "))
 	}
@@ -186,6 +210,18 @@ type walker struct {
 	dir, copyFrom string
 	seen          map[string]bool
 	r             Report
+	// want is the files to check (path -> sha256), and final their state in
+	// the filesystem as the layers read so far make it.
+	want  map[string]string
+	final map[string]fileState
+}
+
+// fileState is a checked path as the layers leave it: a regular file and its
+// sha256, or another kind of entry (a link, a directory, a device).
+type fileState struct {
+	regular bool
+	sha256  string
+	kind    string
 }
 
 func (w *walker) walk() (*Report, error) {
@@ -336,7 +372,14 @@ func (w *walker) layer(mediaType string, r io.Reader) (string, error) {
 		if !whiteout && credentialPath(name) {
 			w.r.CredentialPaths = append(w.r.CredentialPaths, name)
 		}
-		if (name == "etc/os-release" || name == "usr/lib/os-release") && hdr.Typeflag == tar.TypeReg && hdr.Size <= 64<<10 {
+		if whiteout {
+			w.whiteout(name)
+			continue
+		}
+		osRelease := (name == "etc/os-release" || name == "usr/lib/os-release") && hdr.Typeflag == tar.TypeReg && hdr.Size <= 64<<10
+		_, listed := w.want[name]
+		switch {
+		case osRelease:
 			b, err := io.ReadAll(tr)
 			if err != nil {
 				return "", fmt.Errorf("ocilayout: layer tar: %w", err)
@@ -344,6 +387,23 @@ func (w *walker) layer(mediaType string, r io.Reader) (string, error) {
 			if name == "etc/os-release" || w.r.OSRelease == nil {
 				w.r.OSRelease = parseOSRelease(b)
 			}
+			if listed {
+				s := sha256.Sum256(b)
+				w.final[name] = fileState{regular: true, sha256: hex.EncodeToString(s[:])}
+			}
+		case listed && hdr.Typeflag == tar.TypeReg:
+			fh := sha256.New()
+			if _, err := io.Copy(fh, tr); err != nil {
+				return "", fmt.Errorf("ocilayout: layer tar: %w", err)
+			}
+			w.final[name] = fileState{regular: true, sha256: hex.EncodeToString(fh.Sum(nil))}
+		case listed:
+			w.final[name] = fileState{kind: tarKind(hdr.Typeflag)}
+		}
+		// Anything but a directory at a path hides what the lower layers had
+		// under it: a listed file beneath a later symlink is not the file.
+		if hdr.Typeflag != tar.TypeDir {
+			w.hide(name, tarKind(hdr.Typeflag)+" at "+name)
 		}
 	}
 	// Whatever follows the tar's end-of-archive marker is part of the layer
@@ -569,3 +629,141 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+// whiteout applies a whiteout entry to the checked files: .wh..wh..opq hides
+// everything the lower layers had in its directory, and .wh.NAME removes NAME
+// and what is under it.
+func (w *walker) whiteout(name string) {
+	dir, base := path.Dir(name), path.Base(name)
+	if base == ".wh..wh..opq" {
+		for p := range w.want {
+			if dir == "." || strings.HasPrefix(p, dir+"/") {
+				delete(w.final, p)
+			}
+		}
+		return
+	}
+	target := path.Join(dir, strings.TrimPrefix(base, ".wh."))
+	delete(w.final, target)
+	w.hide(target, "")
+}
+
+// hide removes, or marks with why, every checked file strictly under name.
+func (w *walker) hide(name, why string) {
+	for p := range w.want {
+		if strings.HasPrefix(p, name+"/") {
+			if why == "" {
+				delete(w.final, p)
+			} else {
+				w.final[p] = fileState{kind: "under a " + why}
+			}
+		}
+	}
+}
+
+// judgeFiles compares the checked files' final state with what was wanted,
+// in path order, and refuses the image if any differs.
+func (w *walker) judgeFiles() {
+	if len(w.want) == 0 {
+		return
+	}
+	paths := make([]string, 0, len(w.want))
+	for p := range w.want {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	bad := 0
+	for _, p := range paths {
+		fc := FileCheck{Path: p, Want: w.want[p]}
+		st, ok := w.final[p]
+		switch {
+		case !ok:
+			fc.Result = "missing"
+		case !st.regular:
+			fc.Result = "not a regular file: " + st.kind
+		case st.sha256 != fc.Want:
+			fc.Got, fc.Result = st.sha256, "different bytes"
+		default:
+			fc.Got, fc.Result = st.sha256, "ok"
+		}
+		if fc.Result != "ok" {
+			bad++
+		}
+		w.r.Files = append(w.r.Files, fc)
+	}
+	if bad > 0 {
+		w.r.Refusals = append(w.r.Refusals, fmt.Sprintf("%d of %d listed files are not as listed (see files)", bad, len(paths)))
+	}
+}
+
+func tarKind(t byte) string {
+	switch t {
+	case tar.TypeReg:
+		return "regular file"
+	case tar.TypeDir:
+		return "directory"
+	case tar.TypeSymlink:
+		return "symbolic link"
+	case tar.TypeLink:
+		return "hard link"
+	default:
+		return fmt.Sprintf("tar entry of type %q", t)
+	}
+}
+
+// maxManifestFiles bounds a files manifest.
+const maxManifestFiles = 100000
+
+// ParseFilesManifest reads a sha256sum-format manifest ("HASH  PATH" or
+// "HASH *PATH" per line) into the map CheckFiles takes. A relative path is
+// taken under root, which must then be absolute; every path is cleaned and
+// kept without its leading slash. A malformed line, a path with "..", and a
+// path named twice with two hashes are refused.
+func ParseFilesManifest(r io.Reader, root string) (map[string]string, error) {
+	if root != "" && !strings.HasPrefix(root, "/") {
+		return nil, fmt.Errorf("ocilayout: files root %q is not absolute", root)
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxJSON))
+	if err != nil {
+		return nil, err
+	}
+	files := map[string]string{}
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) < 67 || !hexSHA256.MatchString(line[:64]) || line[64] != ' ' || (line[65] != ' ' && line[65] != '*') {
+			return nil, fmt.Errorf("ocilayout: files manifest line %d is not \"SHA256  PATH\"", i+1)
+		}
+		p := line[66:]
+		if !strings.HasPrefix(p, "/") {
+			if root == "" {
+				return nil, fmt.Errorf("ocilayout: files manifest line %d: a relative path (%q) needs a files root", i+1, p)
+			}
+			p = root + "/" + p
+		}
+		for _, seg := range strings.Split(p, "/") {
+			if seg == ".." {
+				return nil, fmt.Errorf("ocilayout: files manifest line %d: %q has a .. segment", i+1, p)
+			}
+		}
+		p = strings.TrimPrefix(path.Clean(p), "/")
+		if p == "" || p == "." {
+			return nil, fmt.Errorf("ocilayout: files manifest line %d names no file", i+1)
+		}
+		if prev, ok := files[p]; ok && prev != line[:64] {
+			return nil, fmt.Errorf("ocilayout: files manifest names %s twice, with two hashes", p)
+		}
+		files[p] = line[:64]
+		if len(files) > maxManifestFiles {
+			return nil, fmt.Errorf("ocilayout: files manifest names more than %d files", maxManifestFiles)
+		}
+	}
+	if len(files) == 0 {
+		return nil, errors.New("ocilayout: files manifest names no file")
+	}
+	return files, nil
+}
+
+var hexSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
