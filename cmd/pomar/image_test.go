@@ -39,3 +39,16 @@ func TestImageCheckOfAMissingLayoutFails(t *testing.T) {
 		t.Fatalf("run = %d, stderr %q", got, errb.String())
 	}
 }
+
+// Allow lists resolve accounts by name or uid, and refuse one that does not exist.
+func TestLookupUID(t *testing.T) {
+	if uid, err := lookupUID("root"); err != nil || uid != 0 {
+		t.Fatalf("root: %d, %v", uid, err)
+	}
+	if uid, err := lookupUID("0"); err != nil || uid != 0 {
+		t.Fatalf("0: %d, %v", uid, err)
+	}
+	if _, err := lookupUID("no-such-account-pomar"); err == nil {
+		t.Fatal("an unknown account resolved")
+	}
+}

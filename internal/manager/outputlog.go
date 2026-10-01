@@ -89,7 +89,7 @@ const (
 
 // logRoutes serves an ended attempt's log, as recorded: a read, on both sockets.
 func (m *Manager) logRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/attempts/{id}/log", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/attempts/{id}/log", m.attemptGuard(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !validID.MatchString(id) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id"})
@@ -112,7 +112,7 @@ func (m *Manager) logRoutes(mux *http.ServeMux) {
 		w.Header().Set(LogTruncatedHeader, strconv.FormatBool(rec.Truncated))
 		w.WriteHeader(http.StatusOK)
 		io.Copy(w, io.LimitReader(f, rec.ServedBytes))
-	})
+	}))
 }
 
 // Log fetches an ended attempt's log and checks it against the output_log of

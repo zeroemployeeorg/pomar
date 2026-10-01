@@ -55,7 +55,7 @@ func writePins(rec string, doc []byte) (string, error) {
 }
 
 func (m *Manager) pinsRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/attempts/{id}/pins", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/attempts/{id}/pins", m.attemptGuard(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !validID.MatchString(id) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id"})
@@ -73,7 +73,7 @@ func (m *Manager) pinsRoutes(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(b)
-	})
+	}))
 }
 
 // Pins fetches an attempt's pins document, as the exact bytes written.

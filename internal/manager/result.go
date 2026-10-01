@@ -90,6 +90,9 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 		env["uid"], env["gid"], env["HOME"] = jobUID, jobUID, jobHomeWithoutSource
 	}
 	doc["env"] = env
+	if e.StartedByUID != nil {
+		doc["started_by_uid"] = *e.StartedByUID
+	}
 	if e.NPM != nil {
 		doc["npm_lock"] = e.NPM
 	}
@@ -138,7 +141,7 @@ type KeyReply struct {
 }
 
 func (m *Manager) resultRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/attempts/{id}/result", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/attempts/{id}/result", m.attemptGuard(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !validID.MatchString(id) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id"})
@@ -163,7 +166,7 @@ func (m *Manager) resultRoutes(mux *http.ServeMux) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write(out.exact())
-	})
+	}))
 	mux.HandleFunc("GET /v1/signing-key", func(w http.ResponseWriter, r *http.Request) {
 		if m.cfg.Signer == nil {
 			reply(w, http.StatusNotFound, map[string]string{"error": "this manager does not sign results"})

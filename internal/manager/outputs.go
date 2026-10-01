@@ -139,7 +139,7 @@ func (m *Manager) OutputPath(id, name string) (OutputRecord, string, error) {
 // outputRoutes serves a recorded output's bytes, as copied out and checked,
 // with its sha256 in a header for the client to check.
 func (m *Manager) outputRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /v1/attempts/{id}/outputs/{name}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/attempts/{id}/outputs/{name}", m.attemptGuard(func(w http.ResponseWriter, r *http.Request) {
 		id, name := r.PathValue("id"), r.PathValue("name")
 		if !validID.MatchString(id) || !inputName.MatchString(name) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id or output name"})
@@ -161,7 +161,7 @@ func (m *Manager) outputRoutes(mux *http.ServeMux) {
 		w.Header().Set(OutputSHA256Header, o.SHA256)
 		w.WriteHeader(http.StatusOK)
 		io.Copy(w, io.LimitReader(f, o.Bytes))
-	})
+	}))
 }
 
 // OutputSHA256Header carries a served output's recorded sha256.
