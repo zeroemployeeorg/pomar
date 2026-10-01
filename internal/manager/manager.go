@@ -139,6 +139,11 @@ type Config struct {
 	// Classes are the job classes a start may name, the first being the
 	// default. Empty means one class made of Class, Guest and Base.
 	Classes []JobClass
+	// ClassAllow, when a class is in it, names the uids that may start, read
+	// and stop that class's attempts through the control socket (the peer's
+	// uid, from the kernel). With a control socket and more than one class,
+	// every class needs a list; see checkClassAllow.
+	ClassAllow map[string][]uint32
 	// NPMUpstream replaces the npm registry in tests; empty is the registry.
 	NPMUpstream string
 }
@@ -206,6 +211,9 @@ func Open(cfg Config) (*Manager, error) {
 		seen[jc.Class.Name] = true
 	}
 	cfg.Class, cfg.Guest, cfg.Base = cfg.Classes[0].Class, cfg.Classes[0].Guest, cfg.Classes[0].Base
+	if err := checkClassAllow(cfg); err != nil {
+		return nil, err
+	}
 	if cfg.Host == (capacity.Host{}) {
 		h, err := capacity.ReadHost()
 		if err != nil {
@@ -430,6 +438,12 @@ func (m *Manager) StartIn(className, id string, command []string, src *Source, i
 // /pomar/outputs/NAME, copied into the record when it exits. Outputs need a
 // source: the job user and its directories exist only with one.
 func (m *Manager) StartOut(className, id string, command []string, src *Source, outputs []string, inputs ...Input) (Entry, error) {
+	return m.startBy(nil, className, id, command, src, outputs, inputs...)
+}
+
+// startBy is StartOut, recording by (the starter's uid, when the kernel gave
+// it) on the attempt and its signed result.
+func (m *Manager) startBy(by *uint32, className, id string, command []string, src *Source, outputs []string, inputs ...Input) (Entry, error) {
 	v := m.cfg.Venue
 	jc, err := m.jobClass(className)
 	if err != nil {
@@ -660,7 +674,7 @@ func (m *Manager) StartOut(className, id string, command []string, src *Source, 
 		m.event("start-error", id, pid, err.Error())
 		return Entry{}, err
 	}
-	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, NPM: npmRec, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
+	e := &Entry{Attempt: id, Command: command, PID: pid, Start: start, State: StateStarting, Created: time.Now().UTC(), Class: class, GoProxy: withProxy, NPM: npmRec, StartedByUID: by, Pins: pins, Inputs: inputRecs, OutputNames: outputs, JobUser: src == nil && jc.JobUser}
 	if src != nil {
 		e.Source = pinnedSource(src, sha)
 		e.Source.Reach = reach

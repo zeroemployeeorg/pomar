@@ -60,6 +60,9 @@ type Entry struct {
 	GoProxy bool `json:"goproxy,omitempty"`
 	// NPM is the npm lock the attempt was served, for an npm class.
 	NPM *NPMLock `json:"npm_lock,omitempty"`
+	// StartedByUID is the uid the kernel gave for the process that started the
+	// attempt: a local OS account, not necessarily one seat.
+	StartedByUID *uint32 `json:"started_by_uid,omitempty"`
 	// Pins are what the attempt ran with, copied at admission, so the record
 	// states what it ran, not what the manager runs now (DESIGN-01).
 	Pins *Pins `json:"pins,omitempty"`

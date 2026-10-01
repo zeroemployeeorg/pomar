@@ -14,8 +14,10 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -47,6 +49,7 @@ const usage = `usage:
                 [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                 [-class-time-limit D] [-budget-vcpu N -budget-memory-gib G]
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm]
+                [-class-allow NAME=USER[,USER...]]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
   pomar attempt start [-root DIR | -socket PATH] -id ID [-class NAME] [-mirror NAME -ref REF [-sha SHA] | -mirror NAME -sha SHA -base-sha SHA] [-git] [-readonly-source] [-input NAME=PATH]... [-output NAME]...] -- CMD...
@@ -335,6 +338,24 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		return nil
 	})
 	jobUser := fs.Bool("class-job-user", false, "run starts with no source as the job user too, so the class never runs a job as root")
+	classAllow := map[string][]uint32{}
+	fs.Func("class-allow", "NAME=USER[,USER...]: the local accounts (names or uids) that may start, read and stop class NAME's attempts through the control socket; resolved at start, and an unknown one stops the manager (repeatable)", func(s string) error {
+		name, users, ok := strings.Cut(s, "=")
+		if !ok || name == "" || users == "" {
+			return fmt.Errorf("want NAME=USER[,USER...]")
+		}
+		if _, dup := classAllow[name]; dup {
+			return fmt.Errorf("class %q is named twice", name)
+		}
+		for _, u := range strings.Split(users, ",") {
+			uid, err := lookupUID(u)
+			if err != nil {
+				return err
+			}
+			classAllow[name] = append(classAllow[name], uid)
+		}
+		return nil
+	})
 	npm := fs.Bool("class-npm", false, "serve each attempt with a source an npm registry holding exactly what package-lock.json locks at its commit (needs -shim-bin)")
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
@@ -427,6 +448,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		MirrorURLs: mirrorURLs,
 		JobUser:    *jobUser,
 		NPM:        *npm,
+		ClassAllow: classAllow,
 		Venue:      v,
 		HostBin:    bin,
 		Guest: manager.Guest{
@@ -925,4 +947,20 @@ func boundariesCmd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// lookupUID resolves a local account, by name or by uid, to its uid. An
+// account that does not exist is an error: an allow list never names nobody.
+func lookupUID(s string) (uint32, error) {
+	u, err := user.Lookup(s)
+	if err != nil {
+		if u, err = user.LookupId(s); err != nil {
+			return 0, fmt.Errorf("no local account %q", s)
+		}
+	}
+	n, err := strconv.ParseUint(u.Uid, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("account %q has uid %q", s, u.Uid)
+	}
+	return uint32(n), nil
 }

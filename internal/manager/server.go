@@ -41,7 +41,7 @@ func (m *Manager) Serve(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	servers := []*http.Server{{Handler: m.mux(true)}}
+	servers := []*http.Server{{Handler: m.mux(true), ConnContext: connContext(true)}}
 	listeners := []net.Listener{ln}
 	if m.cfg.CtlSocket != "" {
 		if err := checkCtlDir(filepath.Dir(m.cfg.CtlSocket)); err != nil {
@@ -53,7 +53,7 @@ func (m *Manager) Serve(ctx context.Context) error {
 			ln.Close()
 			return err
 		}
-		servers = append(servers, &http.Server{Handler: m.mux(false)})
+		servers = append(servers, &http.Server{Handler: m.mux(false), ConnContext: connContext(false)})
 		listeners = append(listeners, cl)
 	}
 	go func() {
@@ -123,10 +123,18 @@ func checkCtlDir(dir string) error {
 func (m *Manager) mux(full bool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
-		reply(w, http.StatusOK, m.List())
+		// Only the attempts of classes the caller may use.
+		c := callerOf(r)
+		list := []Entry{}
+		for _, e := range m.List() {
+			if m.mayUse(c, e.claimClass().Name) {
+				list = append(list, e)
+			}
+		}
+		reply(w, http.StatusOK, list)
 	})
 	// One attempt: a read, on both sockets, so a client need not page the list.
-	mux.HandleFunc("GET /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/attempts/{id}", m.attemptGuard(func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !validID.MatchString(id) {
 			reply(w, http.StatusBadRequest, map[string]string{"error": "invalid attempt id"})
@@ -138,14 +146,31 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			return
 		}
 		reply(w, http.StatusOK, e)
-	})
+	}))
 	mux.HandleFunc("POST /v1/attempts", func(w http.ResponseWriter, r *http.Request) {
 		var req StartRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			reply(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 			return
 		}
-		e, err := m.StartOut(req.Class, req.ID, req.Command, req.Source, req.Outputs, req.Inputs...)
+		// The class is authorised before anything else: before the source is
+		// fetched or capacity claimed.
+		c := callerOf(r)
+		name := req.Class
+		if name == "" {
+			name = m.cfg.Classes[0].Class.Name
+		}
+		if !m.mayUse(c, name) {
+			m.event("start-refused", req.ID, 0, ReasonClassNotAllowed+": "+name)
+			refuseClass(w, c, name)
+			return
+		}
+		var by *uint32
+		if c.known {
+			uid := c.uid
+			by = &uid
+		}
+		e, err := m.startBy(by, req.Class, req.ID, req.Command, req.Source, req.Outputs, req.Inputs...)
 		if errors.Is(err, ErrExists) {
 			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
@@ -161,14 +186,14 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 		}
 		reply(w, http.StatusCreated, e)
 	})
-	mux.HandleFunc("POST /v1/attempts/{id}/stop", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/attempts/{id}/stop", m.attemptGuard(func(w http.ResponseWriter, r *http.Request) {
 		e, err := m.Stop(r.PathValue("id"))
 		if err != nil {
 			reply(w, http.StatusConflict, map[string]string{"error": err.Error()})
 			return
 		}
 		reply(w, http.StatusOK, e)
-	})
+	}))
 	if full {
 		mux.HandleFunc("DELETE /v1/attempts/{id}", func(w http.ResponseWriter, r *http.Request) {
 			if err := m.Remove(r.PathValue("id")); err != nil {
@@ -182,12 +207,12 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 	m.outputRoutes(mux) // reads: on both sockets
 	m.pinsRoutes(mux)   // reads: on both sockets
 	m.logRoutes(mux)    // reads: on both sockets
-	mux.HandleFunc("GET /v1/vm-orphans", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/vm-orphans", m.hostWide(func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.VMOrphans())
-	})
-	mux.HandleFunc("GET /v1/reconcile", func(w http.ResponseWriter, r *http.Request) {
+	}))
+	mux.HandleFunc("GET /v1/reconcile", m.hostWide(func(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusOK, m.Report())
-	})
+	}))
 	caches := func(apply bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			rep, err := m.Caches(apply)
@@ -198,7 +223,7 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			reply(w, http.StatusOK, rep)
 		}
 	}
-	mux.HandleFunc("GET /v1/caches", caches(false))
+	mux.HandleFunc("GET /v1/caches", m.hostWide(caches(false)))
 	if full {
 		mux.HandleFunc("POST /v1/caches/evict", caches(true))
 		// The drain: the owner's alone, like every route that changes what
@@ -225,6 +250,15 @@ func (m *Manager) mux(full bool) *http.ServeMux {
 			reply(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+		// Only the classes the caller may use.
+		cl := callerOf(r)
+		var classes []capacity.Class
+		for _, k := range c.Classes {
+			if m.mayUse(cl, k.Name) {
+				classes = append(classes, k)
+			}
+		}
+		c.Classes = classes
 		reply(w, http.StatusOK, c)
 	})
 	return mux
