@@ -143,7 +143,11 @@ func checkImageName(name string) error {
 		return fmt.Errorf("image load: -name %q must be a tagged reference, repository:tag", name)
 	}
 	repo := name[:i]
-	for _, own := range []string{smoke.ImageRepo, smoke.InitRepo} {
+	repos := []string{smoke.InitRepo}
+	for _, g := range smoke.GuestImages {
+		repos = append(repos, g.Repo)
+	}
+	for _, own := range repos {
 		if repo == own {
 			return fmt.Errorf("image load: -name %q is Pomar's own pinned image %s; a load never retags it", name, own)
 		}

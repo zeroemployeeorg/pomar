@@ -13,7 +13,7 @@ func TestImageNameMustBeTaggedAndNotPomarsOwn(t *testing.T) {
 		}
 	}
 	for _, bad := range []string{"example.org/ci", "localhost:5000/team/ci", "example.org/ci:", "example.org/ci@sha256:ab",
-		"docker.io/library/golang:any", "ghcr.io/apple/containerization/vminit:0.45.0"} {
+		"docker.io/library/golang:any", "ghcr.io/apple/containerization/vminit:0.45.0", "docker.io/library/node:24-bookworm-slim"} {
 		if err := checkImageName(bad); err == nil {
 			t.Errorf("checkImageName(%q) was accepted", bad)
 		}
@@ -50,5 +50,19 @@ func TestLookupUID(t *testing.T) {
 	}
 	if _, err := lookupUID("no-such-account-pomar"); err == nil {
 		t.Fatal("an unknown account resolved")
+	}
+}
+
+// A class's image and a base build name an image in the catalogue, never a
+// reference; anything else is refused before anything is opened.
+func TestGuestImageIsChosenFromTheCatalogue(t *testing.T) {
+	for _, args := range [][]string{
+		{"manager", "-host-bin", "/nonexistent", "-kernel-sha256", "00", "-class-image", "docker.io/library/node:24"},
+		{"base", "build", "-host-bin", "/nonexistent", "-image", "nope"},
+	} {
+		var out, errb bytes.Buffer
+		if code := run(args, &out, &errb); code != 2 || !strings.Contains(errb.String(), "no pinned guest image") || !strings.Contains(errb.String(), "node24-slim") {
+			t.Errorf("%v: exit %d, %q", args, code, errb.String())
+		}
 	}
 }
