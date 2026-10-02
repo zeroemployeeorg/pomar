@@ -117,8 +117,8 @@ func TestNPMRegistryServesTheLockOnItsSocket(t *testing.T) {
 	if err := mirrors.Sync(context.Background(), "up", "file://"+up); err != nil {
 		t.Fatal(err)
 	}
-	lock, rec, err := m.readNPMLock(&Source{Mirror: "up"}, sha)
-	if err != nil || rec.Packages != 1 || len(rec.SHA256) != 64 {
+	lock, rec, err := m.readNPMLock(&Source{Mirror: "up"}, sha, npmLockFile)
+	if err != nil || rec.Packages != 1 || len(rec.SHA256) != 64 || rec.Path != "package-lock.json" {
 		t.Fatalf("readNPMLock: %+v, %v", rec, err)
 	}
 	id := "npm-1"
@@ -166,4 +166,70 @@ func TestNPMRegistryServesTheLockOnItsSocket(t *testing.T) {
 	m.mu.Lock()
 	m.closeNPM(id)
 	m.mu.Unlock()
+}
+
+// A class's lock path is checked when the manager opens: only on an npm
+// class, and only a clean relative path naming a package-lock.json.
+func TestNPMLockPathIsCheckedAtOpen(t *testing.T) {
+	v, err := venue.Open(shortDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.Init(); err != nil {
+		t.Fatal(err)
+	}
+	self, _ := os.Executable()
+	open := func(npm bool, lock string) error {
+		m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
+			Host: capacity.Host{CPUSlots: 4, MemoryBytes: 8 * capacity.GiB}, NPM: npm, NPMLock: lock})
+		if err == nil {
+			m.Close()
+		}
+		return err
+	}
+	for _, bad := range []string{"/package-lock.json", "../package-lock.json", "a/../package-lock.json", "./package-lock.json",
+		"a//package-lock.json", "a/package.json", "a/package-lock.json/", `a\package-lock.json`, ".."} {
+		if err := open(true, bad); err == nil || !strings.Contains(err.Error(), "clean relative path") {
+			t.Errorf("lock %q: %v", bad, err)
+		}
+	}
+	if err := open(false, "a/package-lock.json"); err == nil || !strings.Contains(err.Error(), "does not serve npm") {
+		t.Errorf("a lock on a class without npm: %v", err)
+	}
+	for _, good := range []string{"", "package-lock.json", "testdata/fixture/package-lock.json"} {
+		if err := open(true, good); err != nil {
+			t.Errorf("lock %q: %v", good, err)
+		}
+	}
+}
+
+// A class with a lock path reads that file, and only that file, and records
+// which one it served.
+func TestNPMClassReadsItsLockPath(t *testing.T) {
+	self, _ := os.Executable()
+	m, mirrors, env, up, tarball, reg := npmFixture(t, self)
+	const sub = "testdata/fixture/package-lock.json"
+	m.cfg.Classes[0].NPMLock = sub
+	// A lock at the root only: refused, naming the class's path.
+	os.WriteFile(filepath.Join(up, "package-lock.json"), []byte(npmLockJSON(reg.URL, sriSHA512(tarball))), 0o644)
+	git(t, env, up, "add", "package-lock.json")
+	git(t, env, up, "commit", "--quiet", "-m", "a root lock")
+	if _, err := m.Start("p1", []string{"true"}, &Source{Mirror: "up", Ref: "main"}); err == nil || !strings.Contains(err.Error(), "has no "+sub) {
+		t.Fatalf("a root lock with the class's path elsewhere: %v", err)
+	}
+	// The lock at the class's path: read, and recorded with its path.
+	os.MkdirAll(filepath.Join(up, "testdata", "fixture"), 0o755)
+	os.WriteFile(filepath.Join(up, sub), []byte(npmLockJSON(reg.URL, sriSHA512(tarball))), 0o644)
+	git(t, env, up, "add", sub)
+	git(t, env, up, "commit", "--quiet", "-m", "the fixture's lock")
+	sha := git(t, env, up, "rev-parse", "HEAD")
+	if err := mirrors.Sync(context.Background(), "up", "file://"+up); err != nil {
+		t.Fatal(err)
+	}
+	if _, rec, err := m.readNPMLock(&Source{Mirror: "up"}, sha, m.cfg.Classes[0].npmLockPath()); err != nil || rec.Path != sub || rec.Packages != 1 {
+		t.Fatalf("readNPMLock at the class's path: %+v, %v", rec, err)
+	}
+	if _, err := m.Start("p2", []string{"true"}, &Source{Mirror: "up", Ref: "main"}); err == nil || strings.Contains(err.Error(), "lock") {
+		t.Fatalf("a start with the lock at the class's path: %v, want past the lock", err)
+	}
 }

@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/npmproxy"
@@ -32,34 +34,62 @@ const (
 
 // NPMLock is what the entry and the result keep of an attempt's npm lock.
 type NPMLock struct {
-	SHA256   string `json:"sha256"`   // of package-lock.json at the commit, as read from the mirror
+	Path     string `json:"path"`     // the lock's path in the repository, the class's
+	SHA256   string `json:"sha256"`   // of that file at the commit, as read from the mirror
 	Packages int    `json:"packages"` // registry tarballs it locks
+}
+
+// npmLockPath is the class's lock path in the repository.
+func (jc JobClass) npmLockPath() string {
+	if jc.NPMLock == "" {
+		return npmLockFile
+	}
+	return jc.NPMLock
+}
+
+// checkNPMLockPath refuses, when the manager opens, a lock path on a class
+// that does not serve npm, and one that is not a clean relative path in the
+// repository naming a package-lock.json.
+func checkNPMLockPath(jc JobClass) error {
+	p := jc.NPMLock
+	if p == "" {
+		return nil
+	}
+	if !jc.NPM {
+		return fmt.Errorf("manager: class %q names an npm lock and does not serve npm", jc.Class.Name)
+	}
+	if path.IsAbs(p) || path.Clean(p) != p || p == ".." || strings.HasPrefix(p, "../") ||
+		path.Base(p) != npmLockFile || strings.ContainsAny(p, "\\\x00") {
+		return fmt.Errorf("manager: class %q: the npm lock %q must be a clean relative path in the repository ending in %s", jc.Class.Name, p, npmLockFile)
+	}
+	return nil
 }
 
 func (m *Manager) npmSocket(id string) string {
 	return filepath.Join(m.cfg.Venue.Root(), attemptsDir, id, npmSocketName)
 }
 
-// readNPMLock reads package-lock.json from the mirror at the attempt's
-// commit, on the host, and parses it. The job cannot widen a lock it never
-// writes. A class that needs npm and a commit with no lock, or one the proxy
-// refuses, is refused before capacity is claimed.
-func (m *Manager) readNPMLock(src *Source, sha string) (npmproxy.Lock, *NPMLock, error) {
+// readNPMLock reads the class's lock (file, a path in the repository) from
+// the mirror at the attempt's commit, on the host, and parses it. The job
+// cannot widen a lock it never writes. A class that needs npm and a commit
+// with no lock, or one the proxy refuses, is refused before capacity is
+// claimed.
+func (m *Manager) readNPMLock(src *Source, sha, file string) (npmproxy.Lock, *NPMLock, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
-	b, err := m.cfg.Mirrors.Show(ctx, src.Mirror, sha, npmLockFile)
+	b, err := m.cfg.Mirrors.Show(ctx, src.Mirror, sha, file)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, fmt.Errorf("manager: the class serves npm, and %s has no %s at %s", src.Mirror, npmLockFile, sha)
+		return nil, nil, fmt.Errorf("manager: the class serves npm, and %s has no %s at %s", src.Mirror, file, sha)
 	}
 	if err != nil {
-		return nil, nil, fmt.Errorf("manager: reading %s: %w", npmLockFile, err)
+		return nil, nil, fmt.Errorf("manager: reading %s: %w", file, err)
 	}
 	lock, err := npmproxy.ParseLock(bytes.NewReader(b), m.cfg.NPMUpstream)
 	if err != nil {
 		return nil, nil, fmt.Errorf("manager: %w", err)
 	}
 	h := sha256.Sum256(b)
-	return lock, &NPMLock{SHA256: hex.EncodeToString(h[:]), Packages: len(lock)}, nil
+	return lock, &NPMLock{Path: file, SHA256: hex.EncodeToString(h[:]), Packages: len(lock)}, nil
 }
 
 // listenNPM serves lock on attempt id's npm socket and keeps the lock in its
