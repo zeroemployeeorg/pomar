@@ -48,7 +48,7 @@ const usage = `usage:
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                 [-class-time-limit D] [-budget-vcpu N -budget-memory-gib G]
-                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm [-class-npm-lock PATH]]
+                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm [-class-npm-lock PATH]] [-class-image NAME]
                 [-class-allow NAME=USER[,USER...]]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
@@ -59,7 +59,7 @@ const usage = `usage:
                                     both must be commits the mirror has (a pull request's head is one)
                                     -output: a file the command leaves at /pomar/outputs/NAME, copied out when it exits
                                     -readonly-source: /work stays root-owned and not writable by the job
-  pomar base build [-root DIR] -host-bin PATH
+  pomar base build [-root DIR] -host-bin PATH [-image NAME]
                                     unpack the pinned image once into a read-only base rootfs
   pomar image check -layout DIR -digest D [-files MANIFEST [-files-root DIR]]
   pomar image load [-root DIR] -host-bin PATH -layout DIR -digest D -name REPO:TAG [-files MANIFEST [-files-root DIR]]
@@ -358,12 +358,18 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	})
 	npm := fs.Bool("class-npm", false, "serve each attempt with a source an npm registry holding exactly what package-lock.json locks at its commit (needs -shim-bin)")
 	npmLock := fs.String("class-npm-lock", "", "with -class-npm, the lock's path in the repository (default package-lock.json at its root)")
+	imageName := fs.String("class-image", smoke.DefaultGuestImage, "the pinned guest image the class boots, and so its base, by its name in Pomar's catalogue")
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *hostBin == "" || *kernelSum == "" {
 		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	gi, err := smoke.GuestImageByName(*imageName)
+	if err != nil {
+		fmt.Fprintln(stderr, "manager: -class-image:", err)
 		return 2
 	}
 	// The stream's own manager never holds a key (r14 condition 4): refused
@@ -456,8 +462,8 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		Guest: manager.Guest{
 			Kernel: e.KernelPath(), KernelSHA256: *kernelSum,
 			InitRef: smoke.InitRepo + "@" + smoke.InitDigest, InitDigest: smoke.InitDigest,
-			ImageRef: smoke.ImageRepo + "@" + smoke.ImageDigest, ImageDigest: smoke.ImageDigest,
-			ImageArm64: smoke.ImageArm64, PackageSet: debs.SetHash(smoke.CIPackages),
+			ImageRef: gi.Ref(), ImageDigest: gi.Digest,
+			ImageArm64: gi.Arm64, PackageSet: gi.PackageSet(),
 		},
 		Procs:   proc.PS{},
 		Mirrors: &mirror.Mirrors{Venue: v},
@@ -468,25 +474,25 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		Host:    host,
 		ShimBin: *shimBin,
 		Base: func() (string, error) {
-			// Clone the pinned image's base when one has been built.
-			bs := &base.Bases{Venue: v, HostBin: bin, PackageSet: debs.SetHash(smoke.CIPackages)}
-			if !bs.Exists(smoke.ImageArm64) {
+			// Clone the class image's base when one has been built.
+			bs := &base.Bases{Venue: v, HostBin: bin, PackageSet: gi.PackageSet()}
+			if !bs.Exists(gi.Arm64) {
 				return "", nil
 			}
 			// Never hashes: VerifyBase did that when the manager started.
-			return bs.Verified(smoke.ImageArm64)
+			return bs.Verified(gi.Arm64)
 		},
 		VerifyBase: func() error {
-			bs := &base.Bases{Venue: v, HostBin: bin, PackageSet: debs.SetHash(smoke.CIPackages)}
-			if !bs.Exists(smoke.ImageArm64) {
+			bs := &base.Bases{Venue: v, HostBin: bin, PackageSet: gi.PackageSet()}
+			if !bs.Exists(gi.Arm64) {
 				return nil
 			}
-			_, err := bs.Verify(smoke.ImageArm64)
+			_, err := bs.Verify(gi.Arm64)
 			return err
 		},
-		// The kernel and the pinned image's base are never evicted.
+		// The kernel and the class image's base are never evicted.
 		Pinned: func() []string {
-			p, _ := (&base.Bases{Venue: v, PackageSet: debs.SetHash(smoke.CIPackages)}).Path(smoke.ImageArm64)
+			p, _ := (&base.Bases{Venue: v, PackageSet: gi.PackageSet()}).Path(gi.Arm64)
 			return []string{e.KernelPath(), p}
 		},
 		UID:       os.Getuid(),
@@ -754,11 +760,17 @@ func baseBuild(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
 	hostBin := fs.String("host-bin", "", "signed pomar-host binary")
+	imageName := fs.String("image", smoke.DefaultGuestImage, "the pinned guest image to build the base of, by its name in Pomar's catalogue")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *hostBin == "" {
 		fmt.Fprint(stderr, usage)
+		return 2
+	}
+	gi, err := smoke.GuestImageByName(*imageName)
+	if err != nil {
+		fmt.Fprintln(stderr, "base build: -image:", err)
 		return 2
 	}
 	if err := sign.Check(*hostBin); err != nil {
@@ -774,22 +786,24 @@ func baseBuild(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	// The CI class's pinned packages, fetched once, checked, and unpacked into
-	// the base after the image; guests gain no network path for them.
-	layers, err := (&debs.Cache{Venue: v}).DataArchives(context.Background(), smoke.CIPackages)
+	// The image's pinned packages, if any, fetched once, checked, and unpacked
+	// into the base after the image; guests gain no network path for them.
+	var layers []string
+	if len(gi.Packages) > 0 {
+		layers, err = (&debs.Cache{Venue: v}).DataArchives(context.Background(), gi.Packages)
+		if err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
+	bs := &base.Bases{Venue: v, HostBin: *hostBin, PackageSet: gi.PackageSet(), Layers: layers}
+	err = bs.Build(context.Background(), filepath.Join(v.Root(), "store"), gi.Ref(), gi.Digest, gi.Arm64, smoke.BaseSizeBytes)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	bs := &base.Bases{Venue: v, HostBin: *hostBin, PackageSet: debs.SetHash(smoke.CIPackages), Layers: layers}
-	err = bs.Build(context.Background(), filepath.Join(v.Root(), "store"),
-		smoke.ImageRepo+"@"+smoke.ImageDigest, smoke.ImageDigest, smoke.ImageArm64, smoke.BaseSizeBytes)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return 1
-	}
-	p, _ := bs.Path(smoke.ImageArm64)
-	fmt.Fprintf(stdout, "base %s: built at %s\n", smoke.ImageArm64, p)
+	p, _ := bs.Path(gi.Arm64)
+	fmt.Fprintf(stdout, "base %s (%s): built at %s\n", gi.Arm64, gi.Name, p)
 	return 0
 }
 
