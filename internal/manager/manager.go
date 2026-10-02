@@ -68,6 +68,10 @@ type JobClass struct {
 	// exactly what the repository's package-lock.json locks at the attempt's
 	// commit (DESIGN-03 §2). A commit with no lock, or one refused, is refused.
 	NPM bool
+	// NPMLock is the lock's path in the repository, for an npm class; empty
+	// is package-lock.json at its root. It is the class's, never a start's:
+	// a starter cannot choose which lock widens the registry.
+	NPMLock string
 }
 
 // Config is what a manager needs.
@@ -129,8 +133,10 @@ type Config struct {
 	// start names a mirror and a ref, never a URL. Nil keeps the development
 	// behaviour: mirrors are synced by hand with `pomar mirror sync`.
 	MirrorURLs map[string]string
-	// NPM is the default class's JobClass.NPM, when Classes is empty.
-	NPM bool
+	// NPM and NPMLock are the default class's JobClass.NPM and NPMLock, when
+	// Classes is empty.
+	NPM     bool
+	NPMLock string
 	// JobUser is the default class's JobClass.JobUser, when Classes is empty.
 	JobUser bool
 	// VerifyBase is the default class's JobClass.VerifyBase, when Classes is
@@ -201,12 +207,15 @@ func Open(cfg Config) (*Manager, error) {
 		cfg.Class = capacity.CI
 	}
 	if len(cfg.Classes) == 0 {
-		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser, VerifyBase: cfg.VerifyBase, NPM: cfg.NPM}}
+		cfg.Classes = []JobClass{{Class: cfg.Class, Guest: cfg.Guest, Base: cfg.Base, JobUser: cfg.JobUser, VerifyBase: cfg.VerifyBase, NPM: cfg.NPM, NPMLock: cfg.NPMLock}}
 	}
 	seen := map[string]bool{}
 	for _, jc := range cfg.Classes {
 		if !validID.MatchString(jc.Class.Name) || seen[jc.Class.Name] {
 			return nil, fmt.Errorf("manager: job classes need distinct names of lower-case letters, digits and dashes, like attempt ids (%q)", jc.Class.Name)
+		}
+		if err := checkNPMLockPath(jc); err != nil {
+			return nil, err
 		}
 		seen[jc.Class.Name] = true
 	}
@@ -506,7 +515,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		if m.cfg.ShimBin == "" {
 			return Entry{}, errors.New("manager: the class serves npm, and the manager has no shim to serve it into the guest")
 		}
-		if npmLock, npmRec, err = m.readNPMLock(src, sha); err != nil {
+		if npmLock, npmRec, err = m.readNPMLock(src, sha, jc.npmLockPath()); err != nil {
 			m.event("start-refused", id, 0, err.Error())
 			return Entry{}, err
 		}

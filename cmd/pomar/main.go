@@ -48,7 +48,7 @@ const usage = `usage:
   pomar manager [-root DIR] -host-bin PATH -kernel-sha256 HEX [-shim-bin PATH]
                 [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                 [-class-time-limit D] [-budget-vcpu N -budget-memory-gib G]
-                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm]
+                [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm [-class-npm-lock PATH]]
                 [-class-allow NAME=USER[,USER...]]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
@@ -357,6 +357,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		return nil
 	})
 	npm := fs.Bool("class-npm", false, "serve each attempt with a source an npm registry holding exactly what package-lock.json locks at its commit (needs -shim-bin)")
+	npmLock := fs.String("class-npm-lock", "", "with -class-npm, the lock's path in the repository (default package-lock.json at its root)")
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -448,6 +449,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		MirrorURLs: mirrorURLs,
 		JobUser:    *jobUser,
 		NPM:        *npm,
+		NPMLock:    *npmLock,
 		ClassAllow: classAllow,
 		Venue:      v,
 		HostBin:    bin,
