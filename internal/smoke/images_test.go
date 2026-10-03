@@ -22,7 +22,11 @@ func TestGuestImagesCatalogue(t *testing.T) {
 	if err != nil || node.PackageSet() != "" || !strings.HasPrefix(node.Ref(), "docker.io/library/node@sha256:") {
 		t.Fatalf("node24-slim: %+v, %v", node, err)
 	}
-	if _, err := GuestImageByName("docker.io/library/node:24"); err == nil || !strings.Contains(err.Error(), "golang-ci, node24-slim") {
+	full, err := GuestImageByName("node24-full")
+	if err != nil || full.PackageSet() != "" || full.Repo != node.Repo || full.Arm64 == node.Arm64 {
+		t.Fatalf("node24-full: %+v, %v", full, err)
+	}
+	if _, err := GuestImageByName("docker.io/library/node:24"); err == nil || !strings.Contains(err.Error(), "golang-ci, node24-slim, node24-full") {
 		t.Fatalf("a reference instead of a name: %v", err)
 	}
 }

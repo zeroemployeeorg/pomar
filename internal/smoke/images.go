@@ -48,6 +48,14 @@ var GuestImages = []GuestImage{
 	{Name: "node24-slim", Repo: "docker.io/library/node", Tag: "24-bookworm-slim",
 		Digest: "sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6",
 		Arm64:  "sha256:24b8bc17702002d2ed0c1da9ad66c3ee507cc279d0856726662ff2b6fc35c149"},
+	// The same Node 24.21.0 on full bookworm, which carries a compiler, make,
+	// python3 and Node's headers, for classes that build native addons. The
+	// toolchain in the image is not readiness: that is a guest check that
+	// builds and loads a locked addon offline. The index, the arm64 manifest
+	// and its config were each hashed and matched their digests on 2026-10-03.
+	{Name: "node24-full", Repo: "docker.io/library/node", Tag: "24-bookworm",
+		Digest: "sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4",
+		Arm64:  "sha256:91882e0e5959240d4413fc42c180022bbdd09c5491e00e75faa6c100d8d7751b"},
 }
 
 var (
