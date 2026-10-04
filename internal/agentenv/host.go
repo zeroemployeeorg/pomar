@@ -62,10 +62,12 @@ type VMSpec struct {
 }
 
 type Action struct {
-	Kind     string `json:"kind"`
-	Expected string `json:"expected_incarnation"`
-	State    string `json:"state"`
-	Fence    *Fence `json:"fence,omitempty"`
+	Kind                 string          `json:"kind"`
+	Expected             string          `json:"expected_incarnation"`
+	State                string          `json:"state"`
+	Fence                *Fence          `json:"fence,omitempty"`
+	Reconciliation       *Reconciliation `json:"reconciliation,omitempty"`
+	ResultingIncarnation string          `json:"resulting_incarnation,omitempty"`
 }
 type Fence struct {
 	Incarnation           string `json:"incarnation"`
@@ -77,12 +79,13 @@ type Fence struct {
 	State                 string `json:"state"`
 }
 type Environment struct {
-	operationMu sync.Mutex
-	Spec        VMSpec            `json:"spec"`
-	Phase       string            `json:"phase"`
-	Process     proc.Process      `json:"process"`
-	Actions     map[string]Action `json:"actions"`
-	LastFence   *Fence            `json:"last_fence,omitempty"`
+	operationMu   sync.Mutex
+	Spec          VMSpec            `json:"spec"`
+	Phase         string            `json:"phase"`
+	Process       proc.Process      `json:"process"`
+	Actions       map[string]Action `json:"actions"`
+	LastFence     *Fence            `json:"last_fence,omitempty"`
+	LaunchRevoked []string          `json:"launch_revoked,omitempty"`
 }
 
 type Host struct {
@@ -94,6 +97,8 @@ type Host struct {
 	servers   map[string]*http.Server
 	processes proc.Lister
 	stopWait  time.Duration
+	probe     func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error)
+	fatal     error
 }
 
 var environmentID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
@@ -171,7 +176,12 @@ func (h *Host) Close() error {
 	}
 	return h.lock.Close()
 }
-func (h *Host) save(e *Environment) error {
+func (h *Host) save(e *Environment) (err error) {
+	defer func() {
+		if err != nil {
+			h.fatal = err
+		}
+	}()
 	b, err := json.Marshal(e)
 	if err != nil {
 		return err
@@ -209,7 +219,7 @@ func (h *Host) alive(e *Environment) bool {
 		return false
 	}
 	p, ok := proc.Find(ps, e.Process.PID)
-	return ok && p.Start == e.Process.Start && p.UID == os.Getuid() && strings.Contains(p.Args, h.config.Helper) && strings.Contains(p.Args, filepath.Join(e.Spec.Directory, "vm-config-"+e.Spec.Incarnation+".json"))
+	return ok && p.Start == e.Process.Start && p.UID == os.Getuid() && strings.Contains(p.Args, e.Spec.Helper) && strings.Contains(p.Args, filepath.Join(e.Spec.Directory, "vm-config-"+e.Spec.Incarnation+".json"))
 }
 
 func (h *Host) departed(e *Environment) bool {
@@ -304,12 +314,15 @@ func (h *Host) gate(e *Environment) error {
 }
 
 func (h *Host) start(e *Environment) error {
-	if e.Phase != "created" && e.Phase != "stopped" {
+	if h.fatal != nil {
+		return errors.New("owner journal durability uncertain; launch refused")
+	}
+	if e.Phase != "created" && e.Phase != "stopped" && e.Phase != "fenced" {
 		return errors.New("environment is not confirmed stopped")
 	}
 	live := 0
 	for _, other := range h.envs {
-		if other.Phase != "stopped" && other.Phase != "created" {
+		if other.Phase != "stopped" && other.Phase != "created" && other.Phase != "fenced" {
 			live++
 		}
 	}
@@ -317,6 +330,9 @@ func (h *Host) start(e *Environment) error {
 		return errors.New("development environment limit reached")
 	}
 	e.Spec.Incarnation = randomID()
+	// Adopt the current owner's immutable artifacts only after the previous
+	// execution scope has been fenced. Historical vm-config files stay intact.
+	e.Spec.HostConfig = h.config
 	e.Phase = "launching"
 	if err := h.save(e); err != nil {
 		return err
@@ -365,7 +381,7 @@ func (h *Host) start(e *Environment) error {
 // The caller holds h.mu and this environment's operationMu. Release the shared
 // lock while waiting so inspection and unrelated environments remain available.
 func (h *Host) stop(e *Environment) error {
-	if e.Phase == "stopped" {
+	if e.Phase == "stopped" || e.Phase == "fenced" {
 		return nil
 	}
 	if g := h.gates[e.Spec.Environment]; g != nil {
@@ -387,7 +403,7 @@ func (h *Host) stop(e *Environment) error {
 	h.mu.Unlock()
 	defer h.mu.Lock()
 	for time.Now().Before(deadline) {
-		data, err := os.ReadFile(filepath.Join(e.Spec.Directory, "vm-status.json"))
+		data, err := readVMStatus(e)
 		var status map[string]string
 		if err == nil && json.Unmarshal(data, &status) == nil && status["incarnation"] == e.Spec.Incarnation && status["vm_stopped"] == "true" && h.departed(e) {
 			h.mu.Lock()
@@ -416,6 +432,7 @@ func (h *Host) stop(e *Environment) error {
 
 func (h *Host) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/environments/{id}/reconcile", h.reconcileHandler)
 	mux.HandleFunc("POST /v1/environments", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ID          string `json:"id"`
@@ -554,6 +571,9 @@ func (h *Host) Handler() http.Handler {
 		}
 		if kind == "stop" || kind == "replace" {
 			a.Fence = e.LastFence
+		}
+		if err == nil && (kind == "start" || kind == "replace") {
+			a.ResultingIncarnation = e.Spec.Incarnation
 		}
 		e.Actions[req.OperationID] = a
 		if saveErr := h.save(e); saveErr != nil {

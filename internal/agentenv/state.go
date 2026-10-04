@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"sync"
 	"syscall"
+	"time"
 )
 
 var (
@@ -56,17 +57,33 @@ type Control struct {
 }
 
 type State struct {
-	EnvironmentID   string               `json:"environment_id"`
-	SessionID       string               `json:"session_id"`
-	Incarnation     string               `json:"incarnation"`
-	ThreadID        string               `json:"thread_id,omitempty"`
-	Operations      map[string]Operation `json:"operations"`
-	Events          []Event              `json:"events"`
-	Controls        map[string]Control   `json:"controls"`
-	ContractVersion string               `json:"contract_version"`
-	WorkspaceID     string               `json:"workspace_id"`
-	SourceSHA       string               `json:"source_sha,omitempty"`
-	ScopeID         string               `json:"scope_id"`
+	EnvironmentID     string               `json:"environment_id"`
+	SessionID         string               `json:"session_id"`
+	Incarnation       string               `json:"incarnation"`
+	ThreadID          string               `json:"thread_id,omitempty"`
+	Operations        map[string]Operation `json:"operations"`
+	Events            []Event              `json:"events"`
+	Controls          map[string]Control   `json:"controls"`
+	ContractVersion   string               `json:"contract_version"`
+	WorkspaceID       string               `json:"workspace_id"`
+	SourceSHA         string               `json:"source_sha,omitempty"`
+	ScopeID           string               `json:"scope_id"`
+	RequestedModel    string               `json:"requested_model"`
+	RequestedProvider string               `json:"requested_provider"`
+	ModelObservation  ModelObservation     `json:"model_observation"`
+	ModelObservations []ModelObservation   `json:"model_observations,omitempty"`
+}
+
+// ModelObservation is adapter-reported selection, not backend routing attestation.
+type ModelObservation struct {
+	Status        string `json:"status"`
+	Model         string `json:"model,omitempty"`
+	Provider      string `json:"provider,omitempty"`
+	ThreadID      string `json:"thread_id,omitempty"`
+	IncarnationID string `json:"incarnation_id,omitempty"`
+	OperationID   string `json:"operation_id,omitempty"`
+	ObservedAt    string `json:"observed_at,omitempty"`
+	SourceMethod  string `json:"source_method,omitempty"`
 }
 
 type Store struct {
@@ -147,6 +164,7 @@ func Open(dir, environment, session, incarnation string) (*Store, error) {
 		m.s.Controls = map[string]Control{}
 	}
 	m.s.ContractVersion = "pomar.agent/v1"
+	m.s.ModelObservation = ModelObservation{Status: "unknown"}
 	m.s.WorkspaceID = "workspace-" + environment
 	m.s.ScopeID = "scope-" + incarnation
 	if err = m.persist(); err != nil {
@@ -274,6 +292,53 @@ func (m *Store) Thread(incarnation, id string) error {
 		return errors.New("empty thread id")
 	}
 	m.s.ThreadID = id
+	return m.save()
+}
+
+func (m *Store) ObserveModel(incarnation, operation, method string, raw json.RawMessage) error {
+	var out struct {
+		Thread struct {
+			ID string `json:"id"`
+		} `json:"thread"`
+		Model    string `json:"model"`
+		Provider string `json:"modelProvider"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return err
+	}
+	if out.Thread.ID == "" {
+		return errors.New("thread response lacks identity")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check(incarnation); err != nil {
+		return err
+	}
+	if method != "thread/start" && method != "thread/resume" {
+		return errors.New("unsupported observation source")
+	}
+	if !validID.MatchString(operation) {
+		return errors.New("invalid observation operation")
+	}
+	if op, ok := m.s.Operations[operation]; ok {
+		if op.Incarnation != incarnation {
+			return ErrStale
+		}
+	} else {
+		c, found := m.s.Controls[operation]
+		if !found || c.Incarnation != incarnation {
+			return errors.New("model observation requires retained operation")
+		}
+	}
+	if method == "thread/resume" && out.Thread.ID != m.s.ThreadID {
+		return errors.New("resumed thread identity mismatch")
+	}
+	m.s.ThreadID = out.Thread.ID
+	m.s.ModelObservation = ModelObservation{Status: "unknown"}
+	if out.Model != "" && out.Provider != "" {
+		m.s.ModelObservation = ModelObservation{Status: "observed", Model: out.Model, Provider: out.Provider, ThreadID: out.Thread.ID, IncarnationID: incarnation, OperationID: operation, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceMethod: method}
+		m.s.ModelObservations = append(m.s.ModelObservations, m.s.ModelObservation)
+	}
 	return m.save()
 }
 
@@ -439,6 +504,21 @@ func (m *Store) FinishControl(id string, known bool) error {
 	if !known {
 		c.State = "acceptance_unknown"
 	}
+	m.s.Controls[id] = c
+	return m.save()
+}
+
+func (m *Store) UnsupportedControl(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.s.Controls[id]
+	if !ok {
+		return errors.New("unknown control operation")
+	}
+	if err := m.check(c.Incarnation); err != nil {
+		return err
+	}
+	c.State = "unsupported"
 	m.s.Controls[id] = c
 	return m.save()
 }

@@ -48,7 +48,8 @@ public enum AgentEnvironment {
         let values: [String: String] = ["environment": o.environment, "session": o.session, "incarnation": o.incarnation,
             "phase": phase, "vm_stopped": stopped ? "true" : "false", "error": error, "pid": String(getpid())]
         guard let data = try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys]) else { return }
-        try? data.write(to: URL(fileURLWithPath: o.directory + "/vm-status.json"), options: [.atomic])
+        // Never replace a predecessor's legacy uncertain receipt.
+        try? data.write(to: URL(fileURLWithPath: o.directory + "/vm-status-" + o.incarnation + ".json"), options: [.atomic])
     }
 
     /// Source is installed once. Restarts retain Git changes, Codex home and

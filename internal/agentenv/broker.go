@@ -132,15 +132,7 @@ func (b *Broker) Submit(task Task) (Operation, error) {
 		if err != nil {
 			return unknown(err)
 		}
-		var out struct {
-			Thread struct {
-				ID string `json:"id"`
-			} `json:"thread"`
-		}
-		if err = json.Unmarshal(raw, &out); err != nil {
-			return unknown(err)
-		}
-		if err = b.Store.Thread(task.Incarnation, out.Thread.ID); err != nil {
+		if err = b.Store.ObserveModel(task.Incarnation, task.OperationID, "thread/start", raw); err != nil {
 			return unknown(err)
 		}
 		s = b.Store.Snapshot()
@@ -168,7 +160,21 @@ func (b *Broker) Resume(ctx context.Context) error {
 	if s.ThreadID == "" {
 		return nil
 	}
-	_, err := b.Actor.Call(ctx, "thread/resume", map[string]any{"threadId": s.ThreadID, "cwd": b.Workspace, "approvalPolicy": "on-request", "sandbox": "danger-full-access"})
+	id := "resume-" + s.Incarnation
+	_, dispatch, err := b.Store.BeginControl("resume", id, s.Incarnation, map[string]string{"thread_id": s.ThreadID})
+	if err != nil {
+		return err
+	}
+	if !dispatch {
+		return errors.New("resume already dispatched; inspect retained acceptance")
+	}
+	raw, err := b.Actor.Call(ctx, "thread/resume", map[string]any{"threadId": s.ThreadID, "cwd": b.Workspace, "approvalPolicy": "on-request", "sandbox": "danger-full-access"})
+	if err == nil {
+		err = b.Store.ObserveModel(s.Incarnation, id, "thread/resume", raw)
+	}
+	if finishErr := b.Store.FinishControl(id, err == nil); finishErr != nil {
+		return finishErr
+	}
 	return err
 }
 
@@ -204,7 +210,7 @@ func (b *Broker) Handler() http.Handler {
 		if err != nil {
 			status = "unresponsive"
 		}
-		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "adapter": map[string]string{"provider": "openai", "name": "codex-app-server", "version": "0.160.0"}})
+		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "adapter": map[string]any{"provider": "openai", "name": "codex-app-server", "version": "0.160.0", "capabilities": map[string]any{"version": "pomar.codex-capabilities/v1", "supported_operations": []string{"session.inspect", "login.device_code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"}, "permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, "permission_decisions": []string{"accept", "decline", "cancel"}}}})
 	})
 	mux.HandleFunc("POST /v1/login", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -332,6 +338,10 @@ func (b *Broker) Handler() http.Handler {
 			return
 		}
 		if !dispatch {
+			if control.State == "unsupported" {
+				respond(w, http.StatusNotImplemented, map[string]string{"status": "unsupported", "operation_id": control.ID})
+				return
+			}
 			respond(w, 200, control)
 			return
 		}
@@ -343,8 +353,11 @@ func (b *Broker) Handler() http.Handler {
 		}
 		// Only per-request decisions. No blanket session/execpolicy approval.
 		if (m.Method != "item/commandExecution/requestApproval" && m.Method != "item/fileChange/requestApproval") || (req.Decision != "accept" && req.Decision != "decline" && req.Decision != "cancel") {
-			b.Store.FinishControl(req.OperationID, false)
-			failure(w, errors.New("unsupported permission decision; explicit adapter support required"))
+			if err := b.Store.UnsupportedControl(req.OperationID); err != nil {
+				failure(w, err)
+				return
+			}
+			respond(w, http.StatusNotImplemented, map[string]string{"status": "unsupported", "kind": m.Method, "error": "unsupported permission response kind or decision"})
 			return
 		}
 		params, _ := json.Marshal(map[string]string{"request": r.PathValue("id"), "decision": req.Decision})

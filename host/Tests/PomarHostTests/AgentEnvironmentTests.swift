@@ -40,3 +40,36 @@ func agentOptions() -> AgentEnvironment.Options {
         #expect(!AgentEnvironment.valid(o))
     }
 }
+
+import Darwin
+import Foundation
+
+@Test func fenceProbeFindsWorkspaceHandleWithoutSignalling() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pomar-fence-test-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let disk = dir.appendingPathComponent("workspace.ext4")
+    try Data("test fixture".utf8).write(to: disk)
+    chmod(disk.path, 0o600)
+    let handle = try FileHandle(forReadingFrom: disk)
+    defer { try? handle.close() }
+    let request = AgentFenceProbe.Request(environment: "fixture", session: "fixture-session",
+        incarnation: "fixture-actor", operation: "fixture-probe", rootfs: disk.path,
+        helper: dir.appendingPathComponent("nonexistent-helper").path, pid: Int32.max, uid: getuid(), birth: 1)
+    let evidence = try AgentFenceProbe.run(request)
+    #expect(!evidence.confirmed)
+    #expect(evidence.issues.contains { $0.contains("workspace inode remains open") && $0.contains("pid \(getpid()) ") })
+    #expect(try Data(contentsOf: disk) == Data("test fixture".utf8))
+}
+
+@Test func agentStatusPreservesLegacyUncertainReceipt() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("pomar-status-test-" + UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let original = Data("original vm_stopped=false".utf8)
+    try original.write(to: dir.appendingPathComponent("vm-status.json"))
+    var options = agentOptions(); options.directory = dir.path
+    AgentEnvironment.status(options, "stopped", stopped: true)
+    #expect(try Data(contentsOf: dir.appendingPathComponent("vm-status.json")) == original)
+    #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("vm-status-actor-one.json").path))
+}

@@ -168,3 +168,65 @@ Go-neutral wire shapes. Its IDs and statuses are illustrative fixtures, not
 evidence that a VM or authenticated task completed. Test/command results remain
 structured actor events bound to the retained operation and source baseline;
 the controller must assess them before claiming acceptance.
+
+## Current-scope reconciliation and model observations
+
+An authenticated owner can `POST /v1/environments/{id}/reconcile` over the
+owner-only Unix socket with `operation_id`, `session_id`,
+`expected_incarnation`, `launch_operation` and `fence_operation`. This is for
+a retained uncertain scope. The request binds the immutable original launch
+config, helper PID/UID/birth/command, and original revocation operation. Its
+operation ID binds the full request; retries inspect the retained operation
+and never repeat the probe. A new operation is needed for a later observation.
+
+The development supervisor holds its exclusive data-root lock and the
+environment operation lock during launch revocation, native machine probing,
+and durable evidence/receipt commits. Forwarded adapter access and both
+network proxies are closed. Any unresolved scope remains held. A completed
+receipt separates `historical_execution: unknown`,
+`current_scope: fenced_now`, workspace revocation and replacement eligibility.
+The original stop action and legacy `vm-status.json` remain unchanged. New
+incarnations write `vm-status-{incarnation}.json`; the immutable original
+launch config is retained. Replacement adopts the current owner's artifacts
+only after fencing, retaining the filesystem and stable session.
+
+Coverage is specific to the supported direct Apple Virtualization backend:
+the Swift helper constructs a `VZVirtualMachine` in its own process; guest
+processes exist only inside that VM. It never launches guest work as host
+children or mounts a host home/workspace. The kernel PID inventory and actual
+executable paths cover every live process, including reparented Virtualization
+XPC services. Any live Virtualization framework service with unexcluded
+ownership holds reconciliation, even if it may belong to another workload.
+The original helper is checked by UID and birth, and another instance of its
+executable also holds. No process is signalled. Positive kernel zombie records
+are terminal evidence; failed lookups are unknown.
+
+The private workspace is a regular owner-only file. Every owned live process
+is inspected for matching device/inode in vnode descriptors, fileports and
+mapped regions, including processes whose parent has departed. Any remaining
+holder or incomplete access lookup holds reconciliation. Two inventory passes
+run while launch authority is revoked; the final file identity is checked
+again. Other non-owner accounts have no access to this private data root.
+The administrator and the authenticated service owner remain trusted host
+principals; this does not claim to fence an adversarial administrator or
+another owner acting outside the service. The service does not infer a VM stop
+from an unchanged disk or process-name search. The probe receipt names its
+coverage version, process/descriptor/region counts, observed inode, time,
+identity, and specific unresolved paths. Bytes are synced before eligibility
+is committed; journal failures hold further launches.
+
+A session reports `requested_model` and `requested_provider` (empty means no
+explicit override), and `model_observation.status` starts as `unknown`.
+Responses from `thread/start` or `thread/resume` can record adapter-reported
+`model`, `provider`, `thread_id`, `incarnation_id`, `operation_id`,
+`observed_at`, and `source_method`. This is not independently verified backend
+routing. Controller reconnects retain provenance; replacement clears the
+current observation and requires its own resume observation. Resume has a
+retained control operation and cannot silently retry an ambiguous dispatch.
+
+`adapter.capabilities.version` is `pomar.codex-capabilities/v1`, with
+`supported_operations`, `permission_response_kinds`, and
+`permission_decisions`. Only per-request command/file approval responses
+accept `accept`, `decline` or `cancel`. Other response kinds return HTTP 501
+and `status: unsupported`, without answering the actor. No blanket approval is
+implied. Host lifecycle control remains separate from the guest adapter API.
