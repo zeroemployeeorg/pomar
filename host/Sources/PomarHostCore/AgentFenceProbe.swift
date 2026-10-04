@@ -120,7 +120,9 @@ public enum AgentFenceProbe {
                 }
                 // The original helper could have forked before departure; any
                 // owned instance of that executable is conservatively held.
-                if executable == r.helper {
+                // This entry point is the owner's read-only probe, not a VM
+                // launch. Its own kernel PID/UID identity is positively known.
+                if executable == r.helper && pid != getpid() {
                     out.issues.append("pid \(pid): retained helper executable live, launch ownership unresolved")
                 }
                 errno = 0

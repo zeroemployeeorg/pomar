@@ -86,6 +86,16 @@ type Environment struct {
 	Actions       map[string]Action `json:"actions"`
 	LastFence     *Fence            `json:"last_fence,omitempty"`
 	LaunchRevoked []string          `json:"launch_revoked,omitempty"`
+	HelperExit    *HelperExit       `json:"helper_exit,omitempty"`
+}
+
+// HelperExit is supervisor-observed process departure, never a VM stop receipt.
+type HelperExit struct {
+	Incarnation string `json:"incarnation"`
+	PID         int    `json:"pid"`
+	ObservedAt  string `json:"observed_at"`
+	ExitCode    int    `json:"exit_code"`
+	Signal      int    `json:"signal"`
 }
 
 type Host struct {
@@ -330,6 +340,7 @@ func (h *Host) start(e *Environment) error {
 		return errors.New("development environment limit reached")
 	}
 	e.Spec.Incarnation = randomID()
+	e.HelperExit = nil
 	// Adopt the current owner's immutable artifacts only after the previous
 	// execution scope has been fenced. Historical vm-config files stay intact.
 	e.Spec.HostConfig = h.config
@@ -362,7 +373,32 @@ func (h *Host) start(e *Environment) error {
 	if err = cmd.Start(); err != nil {
 		return err
 	}
-	go cmd.Wait()
+	incarnation := e.Spec.Incarnation
+	go func() {
+		cmd.Wait()
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if e.Spec.Incarnation != incarnation {
+			return
+		}
+		if cmd.ProcessState == nil {
+			e.Phase = "execution_unknown"
+			h.save(e)
+			return
+		}
+		status, _ := cmd.ProcessState.Sys().(syscall.WaitStatus)
+		e.HelperExit = &HelperExit{Incarnation: incarnation, PID: cmd.Process.Pid, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), ExitCode: cmd.ProcessState.ExitCode(), Signal: int(status.Signal())}
+		if !status.Signaled() {
+			e.HelperExit.Signal = 0
+		}
+		if e.Phase == "running" {
+			e.Phase = "execution_unknown"
+			if g := h.gates[e.Spec.Environment]; g != nil {
+				g.Revoke()
+			}
+		}
+		h.save(e)
+	}()
 	ps, err := (proc.PS{}).List()
 	if err != nil {
 		return err

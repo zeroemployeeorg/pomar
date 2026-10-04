@@ -53,12 +53,15 @@ import Foundation
     chmod(disk.path, 0o600)
     let handle = try FileHandle(forReadingFrom: disk)
     defer { try? handle.close() }
+    var executable = [CChar](repeating: 0, count: 4096)
+    #expect(proc_pidpath(getpid(), &executable, UInt32(executable.count)) > 0)
     let request = AgentFenceProbe.Request(environment: "fixture", session: "fixture-session",
         incarnation: "fixture-actor", operation: "fixture-probe", rootfs: disk.path,
-        helper: dir.appendingPathComponent("nonexistent-helper").path, pid: Int32.max, uid: getuid(), birth: 1)
+        helper: String(cString: executable), pid: Int32.max, uid: getuid(), birth: 1)
     let evidence = try AgentFenceProbe.run(request)
     #expect(!evidence.confirmed)
     #expect(evidence.issues.contains { $0.contains("workspace inode remains open") && $0.contains("pid \(getpid()) ") })
+    #expect(!evidence.issues.contains { $0.contains("pid \(getpid()): retained helper executable live") })
     #expect(try Data(contentsOf: disk) == Data("test fixture".utf8))
 }
 
@@ -69,6 +72,8 @@ import Foundation
     let original = Data("original vm_stopped=false".utf8)
     try original.write(to: dir.appendingPathComponent("vm-status.json"))
     var options = agentOptions(); options.directory = dir.path
+    AgentEnvironment.status(options, "stopped", stopped: true)
+    AgentEnvironment.status(options, "running")
     AgentEnvironment.status(options, "stopped", stopped: true)
     #expect(try Data(contentsOf: dir.appendingPathComponent("vm-status.json")) == original)
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("vm-status-actor-one.json").path))
