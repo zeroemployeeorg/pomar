@@ -106,6 +106,13 @@ case "helper":
             readonlySource: readonlySource, jobUser: jobUser, pins: f["pins"], npmSocket: f["npm-socket"],
             cpus: caps.cpus, memoryBytes: caps.memoryBytes))
     exit(code)
+case "agent-environment":
+    guard let f = flags(args.dropFirst()), let path = f["config"] else { fail("agent-environment requires --config FILE", code: 2) }
+    do {
+        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+        let options = try JSONDecoder().decode(AgentEnvironment.Options.self, from: data)
+        exit(await AgentEnvironment.run(options))
+    } catch { fail("agent-environment: \(error)") }
 case "build-base":
     guard let f = flags(args.dropFirst()), let s = f["store"], let mr = f["image"], let md = f["image-digest"],
         let o = f["out"], let sz = f["size-bytes"].flatMap({ UInt64($0) }),

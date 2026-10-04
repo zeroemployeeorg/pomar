@@ -1,0 +1,62 @@
+{
+  "contract_version": "pomar.agent/v1",
+  "transport": {"type": "owner-only-unix-http", "remote_transport": "unassigned"},
+  "create": {
+    "method": "POST", "path": "/v1/environments",
+    "body": {"id": "demo", "operation_id": "create-demo"}
+  },
+  "start": {
+    "method": "POST", "path": "/v1/environments/demo/start",
+    "body": {"operation_id": "start-demo", "expected_incarnation": "created-identity"}
+  },
+  "session_identity": {
+    "environment_id": "demo", "workspace_id": "workspace-demo",
+    "session_id": "session-stable", "incarnation": "actor-one",
+    "scope_id": "scope-actor-one", "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "task": {
+    "method": "POST", "path": "/v1/environments/demo/agent/tasks",
+    "body": {"operation_id": "task-one", "expected_incarnation": "actor-one", "text": "Edit the selected file and run its focused tests."}
+  },
+  "inspection": {
+    "method": "GET",
+    "path": "/v1/environments/demo/agent/operations/task-one?session_id=session-stable&expected_incarnation=actor-one",
+    "response_example": {
+      "operation_id": "task-one", "incarnation": "actor-one",
+      "input_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "state": "accepted", "turn_id": "turn-one", "actor_acknowledged": false
+    },
+    "timeout_rule": "Inspect this same operation; do not issue another task.",
+    "missing_current_journal_example": {"evidence": "durable_non_acceptance", "session_id": "session-stable", "incarnation": "actor-one"},
+    "missing_old_or_unavailable_journal_example": {"evidence": "unknown"}
+  },
+  "events": {
+    "method": "GET", "path": "/v1/environments/demo/agent/events?after=0",
+    "response_example": {
+      "contract_version": "pomar.agent/v1", "session_id": "session-stable", "incarnation": "actor-one",
+      "first_sequence": 1, "last_sequence": 1, "next_cursor": 1, "gap": false,
+      "events": [{"sequence": 1, "incarnation": "actor-one", "method": "turn/started", "params": {"threadId": "thread-one", "turn": {"id": "turn-one"}}}]
+    },
+    "retention": {"max_events": 8192, "max_event_bytes": 262144, "max_journal_bytes": 16777216, "silent_eviction": false}
+  },
+  "permission": {
+    "method": "POST", "path": "/v1/environments/demo/agent/permissions/request-digest",
+    "body": {"operation_id": "permission-one", "expected_incarnation": "actor-one", "decision": "accept"}
+  },
+  "interrupt": {
+    "method": "POST", "path": "/v1/environments/demo/agent/interrupt",
+    "body": {"operation_id": "interrupt-one", "expected_incarnation": "actor-one"}
+  },
+  "stop": {
+    "method": "POST", "path": "/v1/environments/demo/stop",
+    "body": {"operation_id": "stop-one", "expected_incarnation": "actor-one"},
+    "confirmed_fence_example": {
+      "incarnation": "actor-one", "scope_id": "scope-actor-one",
+      "network_revoked": true, "adapter_access_revoked": true,
+      "workspace_write_revoked": true, "termination_confirmed": true, "state": "confirmed"
+    },
+    "unknown_stop_rule": "Retain uncertainty and refuse replacement."
+  },
+  "result": {"method": "GET", "path": "/v1/environments/demo/agent/result"},
+  "external_binding_boundary": "Caller owns organisational binding and recipient acknowledgement; neither input acceptance nor turn completion grants that authority."
+}
