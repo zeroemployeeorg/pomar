@@ -18,6 +18,14 @@ type Message struct {
 	Error  json.RawMessage `json:"error,omitempty"`
 }
 
+// RPCError exports only the numeric protocol code, never server message/data
+// bytes which may contain account or provider details.
+type RPCError struct{ Code int }
+
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("codex RPC error code %d; inspect retained operation state", e.Code)
+}
+
 // RPC keeps the actor connection alive independently of any controller HTTP
 // request. Only the guest broker can write to the actor's stdin.
 type RPC struct {
@@ -106,7 +114,13 @@ func (r *RPC) Call(ctx context.Context, method string, params any) (json.RawMess
 	select {
 	case m := <-ch:
 		if len(m.Error) > 0 {
-			return nil, errors.New("codex RPC returned an error; inspect retained operation state")
+			var failure struct {
+				Code int `json:"code"`
+			}
+			if json.Unmarshal(m.Error, &failure) != nil {
+				return nil, errors.New("codex RPC returned a malformed error; inspect retained operation state")
+			}
+			return nil, &RPCError{Code: failure.Code}
 		}
 		return m.Result, nil
 	case <-ctx.Done():

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,4 +60,28 @@ func TestRPCInterleavesActorEventsAndIgnoresLateReplies(t *testing.T) {
 		t.Fatal("lost actor event")
 	}
 	<-actorDone
+}
+
+func TestRPCErrorOnlyExportsNumericCode(t *testing.T) {
+	input, actorOutput := io.Pipe()
+	actorInput, output := io.Pipe()
+	defer input.Close()
+	defer output.Close()
+	defer actorInput.Close()
+	rpc := NewRPC(input, output, nil)
+	go func() {
+		defer actorOutput.Close()
+		var request Message
+		if json.NewDecoder(actorInput).Decode(&request) != nil {
+			return
+		}
+		json.NewEncoder(actorOutput).Encode(Message{ID: request.ID, Error: json.RawMessage(`{"code":-32602,"message":"private provider detail","data":{"private":"opaque"}}`)})
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, err := rpc.Call(ctx, "thread/resume", map[string]string{"threadId": "retained"})
+	var failure *RPCError
+	if !errors.As(err, &failure) || failure.Code != -32602 || strings.Contains(err.Error(), "private") || strings.Contains(err.Error(), "opaque") {
+		t.Fatalf("protocol error was not sanitized: %v", err)
+	}
 }

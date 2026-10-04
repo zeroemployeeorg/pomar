@@ -70,7 +70,9 @@ func run() error {
 		return err
 	}
 	if err = broker.Resume(ctx); err != nil {
-		return err
+		// Keep durable inspection available while all execution routes are held.
+		// Never hide the original acceptance evidence behind a failed resume.
+		fmt.Fprintln(os.Stderr, "pomar-agent-guest: retained thread resume held; inspect original operation")
 	}
 	if err = os.MkdirAll(filepath.Dir(*socket), 0o700); err != nil {
 		return err
@@ -87,7 +89,7 @@ func run() error {
 		return err
 	}
 	server := &http.Server{Handler: broker.Handler(), ReadHeaderTimeout: 5 * time.Second, MaxHeaderBytes: 8192}
-	go func() { <-actor.Done(); server.Close() }()
+	// Actor loss must not remove the retained-operation inspection endpoint.
 	err = server.Serve(ln)
 	// The VM owner must confirm stop before replacing this actor. The broker
 	// never signals an arbitrary process or resumes a previous uncertain task.

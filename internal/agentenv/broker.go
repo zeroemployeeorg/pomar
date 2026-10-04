@@ -35,6 +35,7 @@ type Broker struct {
 	pending       map[string]Message
 	authenticated bool
 	loginPending  bool
+	resumeFailure error
 }
 
 func NewBroker(store *Store, workspace string) *Broker {
@@ -109,6 +110,9 @@ func (b *Broker) Submit(task Task) (Operation, error) {
 		op, _, err := b.Store.Begin(task)
 		return op, err
 	}
+	if !b.executionReady() {
+		return Operation{}, ErrBusy
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	ok, err := b.authenticatedAccount(ctx)
@@ -155,7 +159,14 @@ func (b *Broker) Submit(task Task) (Operation, error) {
 	return b.Store.Snapshot().Operations[task.OperationID], nil
 }
 
-func (b *Broker) Resume(ctx context.Context) error {
+func (b *Broker) executionReady() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.resumeFailure == nil
+}
+
+func (b *Broker) Resume(ctx context.Context) (err error) {
+	defer func() { b.mu.Lock(); b.resumeFailure = err; b.mu.Unlock() }()
 	s := b.Store.Snapshot()
 	if s.ThreadID == "" {
 		return nil
@@ -213,7 +224,18 @@ func (b *Broker) Handler() http.Handler {
 		if err != nil {
 			status = "unresponsive"
 		}
-		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "adapter": map[string]any{"provider": "openai", "name": "codex-app-server", "version": "0.160.0", "capabilities": map[string]any{"version": "pomar.codex-capabilities/v1", "supported_operations": []string{"session.inspect", "login.device_code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"}, "permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, "permission_decisions": []string{"accept", "decline", "cancel"}}}})
+		recovery := map[string]any{"status": "ready"}
+		b.mu.Lock()
+		if b.resumeFailure != nil {
+			recovery["status"] = "held"
+			recovery["reason"] = "retained thread resume unconfirmed; original operation evidence remains inspectable"
+			var rpcError *RPCError
+			if errors.As(b.resumeFailure, &rpcError) {
+				recovery["rpc_error_code"] = rpcError.Code
+			}
+		}
+		b.mu.Unlock()
+		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "recovery": recovery, "adapter": map[string]any{"provider": "openai", "name": "codex-app-server", "version": "0.160.0", "capabilities": map[string]any{"version": "pomar.codex-capabilities/v1", "supported_operations": []string{"session.inspect", "login.device_code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"}, "permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, "permission_decisions": []string{"accept", "decline", "cancel"}}}})
 	})
 	mux.HandleFunc("POST /v1/login", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
@@ -335,6 +357,10 @@ func (b *Broker) Handler() http.Handler {
 			failure(w, ErrStale)
 			return
 		}
+		if b.resumeFailure != nil {
+			failure(w, ErrBusy)
+			return
+		}
 		control, dispatch, err := b.Store.BeginControl("permission", req.OperationID, req.Incarnation, map[string]string{"permission_id": r.PathValue("id"), "decision": req.Decision})
 		if err != nil {
 			failure(w, err)
@@ -391,6 +417,10 @@ func (b *Broker) Handler() http.Handler {
 		s := b.Store.Snapshot()
 		if req.Incarnation != s.Incarnation {
 			failure(w, ErrStale)
+			return
+		}
+		if !b.executionReady() {
+			failure(w, ErrBusy)
 			return
 		}
 		control, dispatch, err := b.Store.BeginControl("interrupt", req.OperationID, req.Incarnation, map[string]string{"thread_id": s.ThreadID})

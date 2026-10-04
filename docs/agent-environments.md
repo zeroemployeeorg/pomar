@@ -230,3 +230,12 @@ retained control operation and cannot silently retry an ambiguous dispatch.
 accept `accept`, `decline` or `cancel`. Other response kinds return HTTP 501
 and `status: unsupported`, without answering the actor. No blanket approval is
 implied. Host lifecycle control remains separate from the guest adapter API.
+
+An adapter resume failure keeps the broker's inspection API available. Session
+inspection then reports `recovery.status: held` and, for a protocol rejection,
+the numeric `rpc_error_code`. Provider message/data bytes are never exported.
+Original operation IDs, input hashes and uncertainty remain intact. New task
+dispatch, permission responses and turn interruption are refused while resume
+is unconfirmed. Actor departure also leaves durable inspection available;
+neither a failed resume nor a missing rollout authorizes replay or a fresh
+thread. Host execution fencing remains a separate lifecycle fact.

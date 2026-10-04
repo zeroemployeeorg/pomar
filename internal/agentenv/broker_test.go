@@ -24,6 +24,7 @@ type fixtureActor struct {
 	answers       int
 	started       chan struct{}
 	release       chan struct{}
+	resumeError   error
 }
 
 func actorFixture() *fixtureActor {
@@ -44,6 +45,8 @@ func (a *fixtureActor) Call(ctx context.Context, method string, _ any) (json.Raw
 		return json.RawMessage(`{"account":null}`), nil
 	case "thread/start":
 		return json.RawMessage(`{"thread":{"id":"thread-one"}}`), nil
+	case "thread/resume":
+		return nil, a.resumeError
 	case "turn/start":
 		if started != nil {
 			close(started)
