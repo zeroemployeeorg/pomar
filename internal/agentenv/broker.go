@@ -172,6 +172,9 @@ func (b *Broker) Resume(ctx context.Context) error {
 	if err == nil {
 		err = b.Store.ObserveModel(s.Incarnation, id, "thread/resume", raw)
 	}
+	if err == nil {
+		err = b.Store.ObserveRecoveredTurns(s.Incarnation, id, raw)
+	}
 	if finishErr := b.Store.FinishControl(id, err == nil); finishErr != nil {
 		return finishErr
 	}

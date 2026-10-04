@@ -72,6 +72,10 @@ public enum AgentEnvironment {
 
     public static func run(_ o: Options) async -> Int32 {
         guard valid(o), Entitlement.hasVirtualization() else { return 2 }
+        // Unix/vsock relay peers disappear on ordinary controller disconnect.
+        // Let writers report EPIPE; the default SIGPIPE action would kill this
+        // VM owner and every guest task before a stop receipt could be filed.
+        signal(SIGPIPE, SIG_IGN)
         let stop = Helper.StopFlag()
         signal(SIGTERM, SIG_IGN)
         let sigterm = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global())

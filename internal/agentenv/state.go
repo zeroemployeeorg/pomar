@@ -30,13 +30,75 @@ type Task struct {
 }
 
 type Operation struct {
-	ID                string `json:"operation_id"`
-	Incarnation       string `json:"incarnation"`
-	InputHash         string `json:"input_sha256"`
-	State             string `json:"state"`
-	TurnID            string `json:"turn_id,omitempty"`
-	ActorAcknowledged bool   `json:"actor_acknowledged"`
-	Completion        string `json:"completion,omitempty"`
+	ID                    string                 `json:"operation_id"`
+	Incarnation           string                 `json:"incarnation"`
+	InputHash             string                 `json:"input_sha256"`
+	State                 string                 `json:"state"`
+	TurnID                string                 `json:"turn_id,omitempty"`
+	ActorAcknowledged     bool                   `json:"actor_acknowledged"`
+	Completion            string                 `json:"completion,omitempty"`
+	CompletionObservation *CompletionObservation `json:"completion_observation,omitempty"`
+}
+
+type CompletionObservation struct {
+	Incarnation  string `json:"observer_incarnation"`
+	OperationID  string `json:"operation_id"`
+	SourceMethod string `json:"source_method"`
+	ObservedAt   string `json:"observed_at"`
+}
+
+// ObserveRecoveredTurns accepts only a new authorized adapter's retained
+// terminal turn observation. Absence/inProgress is UNKNOWN, never evidence
+// of non-acceptance. No input or turn/start is replayed by this recovery.
+func (m *Store) ObserveRecoveredTurns(incarnation, operation string, raw json.RawMessage) error {
+	var response struct {
+		Thread struct {
+			ID    string `json:"id"`
+			Turns []struct {
+				ID     string `json:"id"`
+				Status string `json:"status"`
+			} `json:"turns"`
+		} `json:"thread"`
+	}
+	if err := json.Unmarshal(raw, &response); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check(incarnation); err != nil {
+		return err
+	}
+	c, ok := m.s.Controls[operation]
+	if !ok || c.Kind != "resume" || c.Incarnation != incarnation || response.Thread.ID != m.s.ThreadID || response.Thread.ID == "" {
+		return errors.New("recovery observation is not bound to the resumed thread/control")
+	}
+	turns := map[string]string{}
+	for _, turn := range response.Thread.Turns {
+		if turn.ID == "" {
+			return errors.New("retained turn lacks identity")
+		}
+		if _, exists := turns[turn.ID]; exists {
+			return errors.New("duplicate retained turn identity")
+		}
+		turns[turn.ID] = turn.Status
+	}
+	for id, op := range m.s.Operations {
+		if op.Incarnation == incarnation || op.Completion != "" || op.TurnID == "" {
+			continue
+		}
+		status, found := turns[op.TurnID]
+		if !found {
+			continue
+		}
+		if status != "completed" && status != "failed" && status != "interrupted" {
+			continue
+		}
+		op.State = "finished"
+		op.Completion = status
+		op.CompletionObservation = &CompletionObservation{Incarnation: incarnation, OperationID: operation, SourceMethod: "thread/resume", ObservedAt: time.Now().UTC().Format(time.RFC3339Nano)}
+		m.s.Operations[id] = op
+	}
+	return m.save()
 }
 
 type Event struct {

@@ -76,3 +76,47 @@ func TestUnsupportedPermissionResponseIsExplicit(t *testing.T) {
 		t.Fatal(w.Code, w.Body.String())
 	}
 }
+
+func TestRetainedTerminalTurnRecoveryNeedsExactOriginalIdentity(t *testing.T) {
+	for _, status := range []string{"interrupted", "completed", "failed", "inProgress", "missing"} {
+		t.Run(status, func(t *testing.T) {
+			s := newStore(t)
+			s.Begin(Task{OperationID: "original", Incarnation: "actor-one", Text: "task"})
+			s.Thread("actor-one", "thread-original")
+			s.Accepted("actor-one", "original", "turn-original")
+			s.Close()
+			next, err := Open(s.dir, "environment", "session", "actor-two")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer next.Close()
+			next.BeginControl("resume", "resume-actor-two", "actor-two", map[string]string{"thread_id": "thread-original"})
+			turns := `[{"id":"turn-original","status":"` + status + `"}]`
+			if status == "missing" {
+				turns = `[{"id":"different-turn","status":"completed"}]`
+			}
+			raw := json.RawMessage(`{"thread":{"id":"thread-original","turns":` + turns + `}}`)
+			if err = next.ObserveRecoveredTurns("actor-two", "resume-actor-two", raw); err != nil {
+				t.Fatal(err)
+			}
+			op := next.Snapshot().Operations["original"]
+			terminal := status == "completed" || status == "failed" || status == "interrupted"
+			if (op.Completion != "") != terminal {
+				t.Fatalf("unknown acceptance guessed %+v", op)
+			}
+			if terminal && (op.CompletionObservation == nil || op.CompletionObservation.SourceMethod != "thread/resume" || op.CompletionObservation.Incarnation != "actor-two" || op.TurnID != "turn-original") {
+				t.Fatal("recovery provenance missing")
+			}
+			_, dispatch, err := next.Begin(Task{OperationID: "continuation", Incarnation: "actor-two", Text: "continue"})
+			if terminal && (err != nil || !dispatch) {
+				t.Fatal("observed terminal turn did not release hold", err)
+			}
+			if !terminal && err != ErrBusy {
+				t.Fatal("unobserved turn released hold")
+			}
+			if err = next.ObserveRecoveredTurns("actor-one", "resume-actor-two", raw); err != ErrStale {
+				t.Fatal("stale reporting accepted")
+			}
+		})
+	}
+}
