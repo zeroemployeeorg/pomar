@@ -147,9 +147,9 @@ Pinned protocol source: Codex CLI 0.160.0 generated JSON schemas. See official
 
 ## First assignment and acceptance
 
-The initial assignment uses an isolated Pomar checkout: reject missing,
-non-numeric, zero and out-of-range listen ports in `cmd/pomar-shim`, with Go
-regression tests. The existing helper validates loopback hosts but does not
+The initial assignment uses an isolated Pomar checkout: accept only ASCII
+decimal listen ports in range 0 through 65535 in `cmd/pomar-shim`, retaining
+zero for ephemeral listeners, with Go regression tests. The existing helper validates loopback hosts but does not
 validate the supplied port. The guest may edit these files and run the focused
 Go tests; it may not publish, deploy or alter a service.
 
