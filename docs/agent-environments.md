@@ -96,6 +96,14 @@ binding. Use a distinct environment for different project inputs; never silently
 replace the retained workspace. No host home or another project's credential
 store is copied into a new environment.
 
+Network policy is owner-controlled across restarts, not immutable. A new
+incarnation adopts the current profile's `allowedHosts`; source/base/image
+checks do not reject a changed permitted-host list. Inspect the effective
+`environment.spec.allowedHosts` through `GET /v1/environments/{id}` and retain
+it with that spec's environment/session/incarnation/source identity before
+task submission. A controller must assess that effective policy against its
+task scope rather than assuming a prior incarnation's policy still applies.
+
 Owner source bundles may include release tags. Initial setup imports those tags
 along with the selected HEAD so release preparation can compare the published
 tag and retained project source without network Git access.
@@ -152,6 +160,10 @@ Export runs Git as the coding user, disables external diff/text conversion,
 limits the binary diff to 4 MiB and limits untracked regular files to 32 files
 and 4 MiB total. Symlinks and paths escaping the workspace are refused. This
 is a bounded development export, not an immutable publication artifact.
+
+For actual wheel and source-distribution bytes, use the
+[bounded candidate carrier and receiver](agent-candidate-export.md). Raw binary
+files in the untracked JSON strings are not a lossless artifact transport.
 
 ### Explicit continuation of a closed-unresolved intent
 
