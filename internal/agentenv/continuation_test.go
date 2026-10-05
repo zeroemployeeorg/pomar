@@ -53,6 +53,11 @@ func TestContinuationHTTPPersistsBeforeDispatchAndRetriesOnlyInspect(t *testing.
 	if json.Unmarshal(data, &stored) != nil || stored.Continuations[binding.Request.DispositionID].SuccessorInputSHA256 == "" {
 		t.Fatal("successor not durable")
 	}
+	waiting := httptest.NewRecorder()
+	broker.Handler().ServeHTTP(waiting, httptest.NewRequest("GET", "/v1/result", nil))
+	if waiting.Code != 409 {
+		t.Fatal("bound but unsubmitted successor exported a result", waiting.Code, waiting.Body.String())
+	}
 	if _, err = broker.Submit(binding.Request.Successor); err != nil {
 		t.Fatal(err)
 	}
@@ -77,6 +82,83 @@ func TestContinuationHTTPPersistsBeforeDispatchAndRetriesOnlyInspect(t *testing.
 	broker.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/result", nil))
 	if w.Code != 200 || !strings.Contains(w.Body.String(), "new work") {
 		t.Fatal("finished successor result blocked by closed original", w.Body.String())
+	}
+}
+
+func TestContinuationHTTPDuplicateRefusesUncertainJournalAndReopensDisk(t *testing.T) {
+	s, binding, original := continuationFixture(t)
+	defer s.Close()
+	workspace := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--allow-empty", "-qm", "fixture"}} {
+		if output, err := exec.Command("git", append([]string{"-C", workspace}, args...)...).CombinedOutput(); err != nil {
+			t.Fatal(string(output), err)
+		}
+	}
+	b := NewBroker(s, workspace)
+	actor := actorFixture()
+	b.Actor = actor
+	inv, err := b.inventory(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.s.SourceSHA = inv.Head
+	if err = s.save(); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(inv)
+	binding.Request.WorkspaceInventorySHA256 = digest(raw)
+	raw, _ = json.Marshal(binding.Request)
+	binding.RequestSHA256 = digest(raw)
+	body, _ := json.Marshal(binding)
+	call := func() *httptest.ResponseRecorder {
+		w := httptest.NewRecorder()
+		b.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/continuations", strings.NewReader(string(body))))
+		return w
+	}
+	dir := s.dir
+	before, err := os.ReadFile(filepath.Join(dir, "session.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Preserve the original durable journal while forcing CreateTemp to fail.
+	s.dir = filepath.Join(dir, "missing-parent")
+	if w := call(); w.Code != 409 {
+		t.Fatal("initial failed save accepted", w.Code)
+	}
+	if w := call(); w.Code != 409 || !strings.Contains(w.Body.String(), "journal write uncertain") {
+		t.Fatal("duplicate falsely claimed durability", w.Code, w.Body.String())
+	}
+	if _, err = s.bindContinuation(binding); err == nil || !strings.Contains(err.Error(), "journal write uncertain") {
+		t.Fatal("store duplicate falsely claimed durability", err)
+	}
+	if _, dispatch, err := s.Begin(binding.Request.Successor); err == nil || dispatch {
+		t.Fatal("uncertain journal dispatched", err, dispatch)
+	}
+	if actor.count("thread/start") != 0 || actor.count("turn/start") != 0 {
+		t.Fatal("actor invoked")
+	}
+	result := httptest.NewRecorder()
+	b.Handler().ServeHTTP(result, httptest.NewRequest("GET", "/v1/result", nil))
+	if result.Code != 409 {
+		t.Fatal("uncertain journal exported result", result.Code)
+	}
+	after, err := os.ReadFile(filepath.Join(dir, "session.json"))
+	if err != nil || string(before) != string(after) {
+		t.Fatal("failed save changed durable bytes", err)
+	}
+	s.dir = dir
+	s.Close()
+	reopened, err := Open(dir, "environment", "session", "actor-three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	state := reopened.Snapshot()
+	if len(state.Continuations) != 0 || state.Operations["original"] != original || state.ThreadID != "original-thread" {
+		t.Fatal("reopen invented failed binding", state)
+	}
+	if _, dispatch, err := reopened.Begin(Task{OperationID: "successor", Incarnation: "actor-three", Text: "same work"}); err != ErrBusy || dispatch {
+		t.Fatal("reopened unresolved original lost its hold", err, dispatch)
 	}
 }
 

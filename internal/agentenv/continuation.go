@@ -40,7 +40,7 @@ func postUnix(ctx context.Context, socket, path string, v any) ([]byte, int, err
 	return b, r.StatusCode, err
 }
 
-// This is a projection of an existing RT intent disposition, not an approval
+// This is a projection of an external controller's intent disposition, not an approval
 // authority. The owner authenticates through the private development socket.
 type ContinuationRequest struct {
 	DispositionID             string `json:"disposition_id"`
@@ -125,11 +125,8 @@ func (m *Store) bindContinuation(binding ContinuationBinding) (ContinuationBindi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r := binding.Request
-	if old, ok := m.s.Continuations[r.DispositionID]; ok {
-		if old.RequestSHA256 != binding.RequestSHA256 {
-			return old, ErrConflict
-		}
-		return old, nil
+	if old, ok, err := m.continuationLocked(r.DispositionID, binding.RequestSHA256); err != nil || ok {
+		return old, err
 	}
 	if err := m.check(r.Successor.Incarnation); err != nil {
 		return binding, err
@@ -185,6 +182,50 @@ func (m *Store) bindContinuation(binding ContinuationBinding) (ContinuationBindi
 	return binding, m.save()
 }
 
+// Lookup and journal health share the store lock. A failed write may leave an
+// in-memory binding, which must never become a successful durability receipt.
+func (m *Store) continuation(disposition, hash string) (ContinuationBinding, bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.continuationLocked(disposition, hash)
+}
+
+func (m *Store) continuationLocked(disposition, hash string) (ContinuationBinding, bool, error) {
+	if err := m.check(m.s.Incarnation); err != nil {
+		return ContinuationBinding{}, false, err
+	}
+	old, ok := m.s.Continuations[disposition]
+	if ok && old.RequestSHA256 != hash {
+		return old, true, ErrConflict
+	}
+	return old, ok, nil
+}
+
+// ResultSnapshot also checks reserved successors that do not yet have an
+// Operations entry. Inspection remains available independently of results.
+func (m *Store) ResultSnapshot() (State, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.check(m.s.Incarnation); err != nil {
+		return State{}, err
+	}
+	for _, binding := range m.s.Continuations {
+		op, ok := m.s.Operations[binding.Successor.OperationID]
+		if !ok || op.Completion == "" {
+			return State{}, ErrBusy
+		}
+		if op.ID != binding.Successor.OperationID || op.Incarnation != binding.Successor.Incarnation || op.InputHash != binding.SuccessorInputSHA256 {
+			return State{}, ErrConflict
+		}
+	}
+	for _, op := range m.s.Operations {
+		if op.Completion == "" && !m.closedUnresolved(op.ID) {
+			return State{}, ErrBusy
+		}
+	}
+	return m.snapshotLocked(), nil
+}
+
 func (b *Broker) continuationHandler(w http.ResponseWriter, r *http.Request) {
 	var binding ContinuationBinding
 	if !decode(w, r, &binding) {
@@ -197,11 +238,10 @@ func (b *Broker) continuationHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if old, ok := b.Store.Snapshot().Continuations[binding.Request.DispositionID]; ok {
-		if old.RequestSHA256 != binding.RequestSHA256 {
-			failure(w, ErrConflict)
-			return
-		}
+	if old, ok, err := b.Store.continuation(binding.Request.DispositionID, binding.RequestSHA256); err != nil {
+		failure(w, err)
+		return
+	} else if ok {
 		respond(w, 200, old)
 		return
 	}
