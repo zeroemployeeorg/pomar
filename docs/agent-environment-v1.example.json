@@ -1,0 +1,198 @@
+{
+  "adapter_capabilities_example": {
+    "permission_decisions": [
+      "accept",
+      "decline",
+      "cancel"
+    ],
+    "permission_response_kinds": [
+      "item/commandExecution/requestApproval",
+      "item/fileChange/requestApproval"
+    ],
+    "supported_operations": [
+      "session.inspect",
+      "login.device_code",
+      "task.submit",
+      "operation.inspect",
+      "events.read",
+      "permission.respond",
+      "turn.interrupt",
+      "result.export",
+      "thread.resume_after_fence"
+    ],
+    "unsupported_response": {
+      "http_status": 501,
+      "status": "unsupported"
+    },
+    "version": "pomar.codex-capabilities/v1"
+  },
+  "contract_version": "pomar.agent/v1",
+  "create": {
+    "body": {
+      "id": "demo",
+      "operation_id": "create-demo"
+    },
+    "method": "POST",
+    "path": "/v1/environments"
+  },
+  "events": {
+    "method": "GET",
+    "path": "/v1/environments/demo/agent/events?after=0",
+    "response_example": {
+      "contract_version": "pomar.agent/v1",
+      "events": [
+        {
+          "incarnation": "actor-one",
+          "method": "turn/started",
+          "params": {
+            "threadId": "thread-one",
+            "turn": {
+              "id": "turn-one"
+            }
+          },
+          "sequence": 1
+        }
+      ],
+      "first_sequence": 1,
+      "gap": false,
+      "incarnation": "actor-one",
+      "last_sequence": 1,
+      "next_cursor": 1,
+      "session_id": "session-stable"
+    },
+    "retention": {
+      "max_event_bytes": 262144,
+      "max_events": 8192,
+      "max_journal_bytes": 16777216,
+      "silent_eviction": false
+    }
+  },
+  "external_binding_boundary": "Caller owns organisational binding and recipient acknowledgement; neither input acceptance nor turn completion grants that authority.",
+  "inspection": {
+    "method": "GET",
+    "missing_current_journal_example": {
+      "evidence": "durable_non_acceptance",
+      "incarnation": "actor-one",
+      "session_id": "session-stable"
+    },
+    "missing_old_or_unavailable_journal_example": {
+      "evidence": "unknown"
+    },
+    "path": "/v1/environments/demo/agent/operations/task-one?session_id=session-stable\u0026expected_incarnation=actor-one",
+    "response_example": {
+      "actor_acknowledged": false,
+      "incarnation": "actor-one",
+      "input_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "operation_id": "task-one",
+      "state": "accepted",
+      "turn_id": "turn-one"
+    },
+    "timeout_rule": "Inspect this same operation; do not issue another task."
+  },
+  "interrupt": {
+    "body": {
+      "expected_incarnation": "actor-one",
+      "operation_id": "interrupt-one"
+    },
+    "method": "POST",
+    "path": "/v1/environments/demo/agent/interrupt"
+  },
+  "model_observation_example": {
+    "after_observation": {
+      "incarnation_id": "actor-one",
+      "model": "synthetic-example-model",
+      "observed_at": "2026-10-04T00:00:00Z",
+      "operation_id": "task-one",
+      "provider": "synthetic-example-provider",
+      "source_method": "thread/start",
+      "status": "observed",
+      "thread_id": "thread-one"
+    },
+    "before_observation": {
+      "status": "unknown"
+    },
+    "evidence_kind": "adapter-reported selection; not backend-routing attestation",
+    "requested_model": "",
+    "requested_provider": ""
+  },
+  "permission": {
+    "body": {
+      "decision": "accept",
+      "expected_incarnation": "actor-one",
+      "operation_id": "permission-one"
+    },
+    "method": "POST",
+    "path": "/v1/environments/demo/agent/permissions/request-digest"
+  },
+  "reconcile": {
+    "body": {
+      "expected_incarnation": "actor-one",
+      "fence_operation": "stop-one",
+      "launch_operation": "start-demo",
+      "operation_id": "reconcile-current-one",
+      "session_id": "session-stable"
+    },
+    "method": "POST",
+    "path": "/v1/environments/demo/reconcile",
+    "receipt_example": {
+      "current_scope": "fenced_now",
+      "evidence_file": "reconcile-evidence-reconcile-current-one.json",
+      "evidence_sha256": "fixture-sha256",
+      "historical_execution": "unknown",
+      "replacement_eligible": true
+    },
+    "scope": "current fencing; original failed-launch and stop receipts remain unchanged"
+  },
+  "result": {
+    "method": "GET",
+    "path": "/v1/environments/demo/agent/result"
+  },
+  "session_identity": {
+    "environment_id": "demo",
+    "incarnation": "actor-one",
+    "scope_id": "scope-actor-one",
+    "session_id": "session-stable",
+    "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "workspace_id": "workspace-demo"
+  },
+  "start": {
+    "body": {
+      "expected_incarnation": "created-identity",
+      "operation_id": "start-demo"
+    },
+    "method": "POST",
+    "path": "/v1/environments/demo/start"
+  },
+  "stop": {
+    "body": {
+      "expected_incarnation": "actor-one",
+      "operation_id": "stop-one"
+    },
+    "confirmed_fence_example": {
+      "adapter_access_revoked": true,
+      "incarnation": "actor-one",
+      "network_revoked": true,
+      "scope_id": "scope-actor-one",
+      "state": "confirmed",
+      "termination_confirmed": true,
+      "workspace_write_revoked": true
+    },
+    "method": "POST",
+    "path": "/v1/environments/demo/stop",
+    "unknown_stop_rule": "Retain uncertainty and refuse replacement."
+  },
+  "task": {
+    "body": {
+      "expected_incarnation": "actor-one",
+      "operation_id": "task-one",
+      "text": "Edit the selected file and run its focused tests."
+    },
+    "method": "POST",
+    "path": "/v1/environments/demo/agent/tasks"
+  },
+  "transport": {
+    "controller_placement": "colocated-with-existing-service-owner",
+    "remote_transport": "not-configured",
+    "type": "owner-only-unix-http"
+  }
+}
