@@ -216,6 +216,18 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func (b *Broker) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/continuations", b.continuationHandler)
+	mux.HandleFunc("GET /v1/workspace", func(w http.ResponseWriter, r *http.Request) {
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		v, err := b.inventory(r.Context())
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		encoded, _ := json.Marshal(v)
+		respond(w, 200, map[string]any{"inventory": v, "inventory_sha256": digest(encoded)})
+	})
 	mux.HandleFunc("GET /v1/session", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 		defer cancel()
@@ -456,6 +468,15 @@ func (b *Broker) Handler() http.Handler {
 		s := b.Store.Snapshot()
 		for _, op := range s.Operations {
 			if op.Completion == "" {
+				closed := false
+				for _, binding := range s.Continuations {
+					if binding.Original.ID == op.ID && binding.Decision == "closed_unresolved" {
+						closed = true
+					}
+				}
+				if closed {
+					continue
+				}
 				failure(w, ErrBusy)
 				return
 			}
@@ -526,7 +547,7 @@ func (b *Broker) Handler() http.Handler {
 func (b *Broker) gitOutput(ctx context.Context, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", b.Workspace}, args...)...)
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-C", b.Workspace}, args...)...)
 	cmd.Env = []string{"PATH=/usr/local/go/bin:/usr/bin:/bin", "HOME=/pomar/job", "GIT_CONFIG_NOSYSTEM=1"}
 	if os.Geteuid() == 0 {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000}}

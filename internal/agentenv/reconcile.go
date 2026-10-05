@@ -171,8 +171,8 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 		failure(w, errors.New("owner journal durability uncertain"))
 		return
 	}
-	if e.Phase != "execution_unknown" && e.Phase != "revoking" && e.Phase != "reconciling" {
-		failure(w, errors.New("reconciliation requires a held uncertain execution scope"))
+	if e.Phase != "execution_unknown" && e.Phase != "revoking" && e.Phase != "reconciling" && e.Phase != "stopped" && e.Phase != "fenced" {
+		failure(w, errors.New("reconciliation requires a held or stopped execution scope"))
 		return
 	}
 	launch, launchOK := e.Actions[req.LaunchOperation]

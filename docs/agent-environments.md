@@ -118,11 +118,50 @@ changes the last two booleans to true and the state to `confirmed`. Pending
 fencing never admits a replacement. A fresh process's absence alone is not a
 VM stop receipt. Previously completed external effects remain historical.
 
-Results are available only when all recorded tasks have a completion disposition.
+Results are available only when every task has a completion disposition or an
+explicit RT `closed_unresolved` continuation binding. An unresolved predecessor
+never becomes a successful actor result; its successor must finish separately.
 Export runs Git as the coding user, disables external diff/text conversion,
 limits the binary diff to 4 MiB and limits untracked regular files to 32 files
 and 4 MiB total. Symlinks and paths escaping the workspace are refused. This
 is a bounded development export, not an immutable publication artifact.
+
+### Explicit continuation of a closed-unresolved intent
+
+An existing RT intent disposition may authorise one distinct successor after
+the original and the most recent inspection incarnation are fenced. The host
+can revalidate a stopped scope through `reconcile`; it serializes the current
+machine probe and durable evidence commit against launch/replacement.
+
+`GET /agent/workspace` returns the current Git head, bounded porcelain status,
+binary-diff digest and inventory digest without reading authentication stores.
+For the initial bounded recovery, continuation requires the unchanged source
+baseline and clean status/diff. Unexpected retained work holds the transition
+for assessment; it is never reset or discarded.
+
+`POST /v1/environments/{id}/continuations` projects an existing RT intent/lifecycle
+disposition into the retained broker journal. It does not establish a separate
+approval authority. The owner supplies the disposition ID, intent and authority
+references, responsible owner, original operation/input/thread/turn identities,
+original and latest inspection fence operation IDs, the explicit new launch,
+inventory digest, disk-recovery description, scoped external-action inventory,
+and the new successor task. The host supplies its machine-owned fence receipts;
+the generic agent proxy refuses caller-supplied continuation receipts.
+
+The broker verifies both scopes and the new incarnation, rechecks the workspace,
+and durably binds the successor ID/input digest before any inference. It retains
+the original operation unchanged and saves its old thread association in the
+binding. A new thread ID is appended before the successor's `turn/start`.
+Repeated consumption returns the existing binding or conflicts; changed input,
+another disposition for the same original, unrelated uncertain tasks and journal
+write uncertainty cannot create another task. Reconnect inspects the recorded
+successor. There is no automatic replay of either attempt.
+
+The display disposition is “original attempt unresolved; continued by …”, with
+the successor outcome and actual recipient acknowledgements represented separately.
+The repaired workspace remains recovery evidence from a damaged disk. This
+supported development workflow does not establish abrupt-termination or power-loss
+durability.
 
 Pomar distinguishes its accepted input from agent acknowledgement and completed
 work. An `accepted` operation is not a recipient acknowledgement in an external
