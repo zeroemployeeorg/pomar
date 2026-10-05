@@ -27,32 +27,61 @@ import (
 // HostConfig is supplied by the service owner, never by a guest. A dedicated
 // development data root is required; CI manager state is not opened here.
 type HostConfig struct {
-	Root               string   `json:"root"`
-	Helper             string   `json:"helper"`
-	Store              string   `json:"store"`
-	Base               string   `json:"base"`
-	Kernel             string   `json:"kernel"`
-	InitRef            string   `json:"initRef"`
-	InitDigest         string   `json:"initDigest"`
-	ImageRef           string   `json:"imageRef"`
-	ImageDigest        string   `json:"imageDigest"`
-	GuestBinary        string   `json:"guestBinary"`
-	ShimBinary         string   `json:"shimBinary"`
-	CodexArchive       string   `json:"codexArchive"`
-	CodexArchiveSHA256 string   `json:"codexArchiveSHA256"`
-	SourceBundle       string   `json:"sourceBundle"`
-	SourceSHA          string   `json:"sourceSHA"`
-	GoProxySocket      string   `json:"goProxySocket"`
-	AllowedHosts       []string `json:"allowedHosts"`
-	MaxLive            int      `json:"maxLive"`
-	CPUs               int      `json:"cpus"`
-	MemoryBytes        uint64   `json:"memoryBytes"`
+	Root               string                        `json:"root"`
+	Helper             string                        `json:"helper"`
+	Store              string                        `json:"store"`
+	Base               string                        `json:"base"`
+	Kernel             string                        `json:"kernel"`
+	InitRef            string                        `json:"initRef"`
+	InitDigest         string                        `json:"initDigest"`
+	ImageRef           string                        `json:"imageRef"`
+	ImageDigest        string                        `json:"imageDigest"`
+	GuestBinary        string                        `json:"guestBinary"`
+	ShimBinary         string                        `json:"shimBinary"`
+	CodexArchive       string                        `json:"codexArchive"`
+	CodexArchiveSHA256 string                        `json:"codexArchiveSHA256"`
+	SourceBundle       string                        `json:"sourceBundle"`
+	SourceSHA          string                        `json:"sourceSHA"`
+	GoProxySocket      string                        `json:"goProxySocket"`
+	AllowedHosts       []string                      `json:"allowedHosts"`
+	MaxLive            int                           `json:"maxLive"`
+	CPUs               int                           `json:"cpus"`
+	MemoryBytes        uint64                        `json:"memoryBytes"`
+	Profiles           map[string]EnvironmentProfile `json:"profiles,omitempty"`
+}
+
+// EnvironmentProfile selects project inputs supplied by the service owner.
+// Creation accepts only a name; a controller cannot supply filesystem paths.
+type EnvironmentProfile struct {
+	Base         string   `json:"base"`
+	ImageRef     string   `json:"imageRef"`
+	ImageDigest  string   `json:"imageDigest"`
+	SourceBundle string   `json:"sourceBundle"`
+	SourceSHA    string   `json:"sourceSHA"`
+	AllowedHosts []string `json:"allowedHosts"`
+}
+
+func (h *Host) profileConfig(name string) (HostConfig, error) {
+	c := h.config
+	c.Profiles = nil // Other projects' configuration does not enter a VM spec.
+	if name == "" {
+		return c, nil
+	}
+	p, ok := h.config.Profiles[name]
+	if !ok {
+		return HostConfig{}, errors.New("unknown owner environment profile")
+	}
+	c.Base, c.ImageRef, c.ImageDigest = p.Base, p.ImageRef, p.ImageDigest
+	c.SourceBundle, c.SourceSHA = p.SourceBundle, p.SourceSHA
+	c.AllowedHosts = append([]string(nil), p.AllowedHosts...)
+	return c, nil
 }
 
 // VMSpec's JSON keys also name the Swift VM owner's Codable options.
 type VMSpec struct {
 	HostConfig
 	Environment   string `json:"environment"`
+	Profile       string `json:"profile,omitempty"`
 	Session       string `json:"session"`
 	Incarnation   string `json:"incarnation"`
 	Directory     string `json:"directory"`
@@ -124,6 +153,14 @@ func randomID() string {
 func OpenHost(config HostConfig) (*Host, error) {
 	if !filepath.IsAbs(config.Root) || config.MaxLive < 1 || config.MaxLive > 3 || config.CPUs < 1 || config.CPUs > 4 || config.MemoryBytes < 512<<20 || config.MemoryBytes > 8<<30 {
 		return nil, errors.New("invalid development resource configuration")
+	}
+	for name, p := range config.Profiles {
+		if !environmentID.MatchString(name) || !filepath.IsAbs(p.Base) || !filepath.IsAbs(p.SourceBundle) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(p.SourceSHA) || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(p.ImageDigest) || !strings.HasSuffix(p.ImageRef, "@"+p.ImageDigest) {
+			return nil, errors.New("invalid owner environment profile")
+		}
+		if _, err := NewEgress(p.AllowedHosts); err != nil {
+			return nil, err
+		}
 	}
 	if err := os.MkdirAll(config.Root, 0o700); err != nil {
 		return nil, err
@@ -248,7 +285,7 @@ func (h *Host) processList() ([]proc.Process, error) {
 }
 
 func (h *Host) gate(e *Environment) error {
-	g, err := NewEgress(h.config.AllowedHosts)
+	g, err := NewEgress(e.Spec.AllowedHosts)
 	if err != nil {
 		return err
 	}
@@ -339,11 +376,18 @@ func (h *Host) start(e *Environment) error {
 	if live >= h.config.MaxLive {
 		return errors.New("development environment limit reached")
 	}
+	cfg, err := h.profileConfig(e.Spec.Profile)
+	if err != nil {
+		return err
+	}
+	if e.Spec.Profile != "" && (cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef) {
+		return errors.New("retained project inputs changed; use a distinct environment")
+	}
 	e.Spec.Incarnation = randomID()
 	e.HelperExit = nil
 	// Adopt the current owner's immutable artifacts only after the previous
 	// execution scope has been fenced. Historical vm-config files stay intact.
-	e.Spec.HostConfig = h.config
+	e.Spec.HostConfig = cfg
 	e.Phase = "launching"
 	if err := h.save(e); err != nil {
 		return err
@@ -474,6 +518,7 @@ func (h *Host) Handler() http.Handler {
 		var req struct {
 			ID          string `json:"id"`
 			OperationID string `json:"operation_id"`
+			Profile     string `json:"profile,omitempty"`
 		}
 		if !decode(w, r, &req) {
 			return
@@ -486,11 +531,16 @@ func (h *Host) Handler() http.Handler {
 		defer h.mu.Unlock()
 		if existing := h.envs[req.ID]; existing != nil {
 			action, ok := existing.Actions[req.OperationID]
-			if !ok || action.Kind != "create" {
+			if !ok || action.Kind != "create" || existing.Spec.Profile != req.Profile {
 				failure(w, ErrConflict)
 				return
 			}
 			respond(w, 200, existing)
+			return
+		}
+		cfg, err := h.profileConfig(req.Profile)
+		if err != nil {
+			respond(w, 400, map[string]string{"error": err.Error()})
 			return
 		}
 		dir := filepath.Join(h.config.Root, req.ID)
@@ -498,7 +548,7 @@ func (h *Host) Handler() http.Handler {
 			failure(w, err)
 			return
 		}
-		e := &Environment{Spec: VMSpec{HostConfig: h.config, Environment: req.ID, Session: "session-" + randomID(), Incarnation: "created-" + randomID(), Directory: dir, Rootfs: filepath.Join(dir, "workspace.ext4"), ControlSocket: filepath.Join(dir, "agent.sock"), EgressSocket: filepath.Join(dir, "egress.sock")}, Phase: "created", Actions: map[string]Action{req.OperationID: {Kind: "create", State: "completed"}}}
+		e := &Environment{Spec: VMSpec{HostConfig: cfg, Profile: req.Profile, Environment: req.ID, Session: "session-" + randomID(), Incarnation: "created-" + randomID(), Directory: dir, Rootfs: filepath.Join(dir, "workspace.ext4"), ControlSocket: filepath.Join(dir, "agent.sock"), EgressSocket: filepath.Join(dir, "egress.sock")}, Phase: "created", Actions: map[string]Action{req.OperationID: {Kind: "create", State: "completed"}}}
 		if err := h.save(e); err != nil {
 			failure(w, err)
 			return

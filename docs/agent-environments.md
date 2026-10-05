@@ -81,6 +81,25 @@ allocates the actor incarnation; allocation is not guest readiness. Inspect the
 guest session for a responding adapter. A retained host phase or PID alone
 does not prove that the VM or agent is alive.
 
+For different projects in one development service, the owner may configure
+named `profiles`. Each profile pins its base/image, source bundle/commit and
+exact permitted HTTPS hosts. Creation additionally accepts `profile`; callers
+select a configured name, never filesystem paths or arbitrary image references.
+Omitting it retains the original default behaviour. Each environment keeps its
+own identity, disk, session and network lease; stopped environments count against
+neither the active-environment limit nor running VM resources. Resource caps and
+the host's maximum live count remain owner-controlled.
+
+A duplicate creation cannot switch profiles. Restart adopts current supervisor
+artifacts but refuses a changed or missing named project's source/base/image
+binding. Use a distinct environment for different project inputs; never silently
+replace the retained workspace. No host home or another project's credential
+store is copied into a new environment.
+
+Owner source bundles may include release tags. Initial setup imports those tags
+along with the selected HEAD so release preparation can compare the published
+tag and retained project source without network Git access.
+
 ### Inspection, retention and scope fencing
 
 Task/control lookup requires the original session and incarnation. It may
