@@ -31,6 +31,7 @@ type Broker struct {
 	Store         *Store
 	Actor         Actor
 	Workspace     string
+	incarnation   string
 	mu            sync.Mutex
 	pending       map[string]Message
 	authenticated bool
@@ -39,7 +40,7 @@ type Broker struct {
 }
 
 func NewBroker(store *Store, workspace string) *Broker {
-	return &Broker{Store: store, Workspace: workspace, pending: map[string]Message{}}
+	return &Broker{Store: store, Workspace: workspace, incarnation: store.Snapshot().Incarnation, pending: map[string]Message{}}
 }
 
 func (b *Broker) Initialize(ctx context.Context, actor Actor) error {
@@ -73,13 +74,20 @@ func (b *Broker) Observe(m Message) error {
 	if len(m.ID) > 0 {
 		switch m.Method {
 		case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "item/tool/requestUserInput":
-			b.pending[permissionKey(m.ID)] = m
 		default:
 			// Unknown server requests receive no automatic approval.
 			return fmt.Errorf("unsupported actor request %q", m.Method)
 		}
 	}
-	return b.Store.Observe(b.Store.Snapshot().Incarnation, m.Method, m.ID, m.Params)
+	// The adapter connection's scope is fixed when the broker is created, not
+	// inferred from whichever incarnation the retained journal currently names.
+	if err := b.Store.Observe(b.incarnation, m.Method, m.ID, m.Params); err != nil {
+		return err
+	}
+	if len(m.ID) > 0 {
+		b.pending[permissionKey(m.ID)] = m
+	}
+	return nil
 }
 
 func (b *Broker) authenticatedAccount(ctx context.Context) (bool, error) {
@@ -465,21 +473,10 @@ func (b *Broker) Handler() http.Handler {
 		failure(w, errors.New("no known active turn; uncertain acceptance is not resubmitted"))
 	})
 	mux.HandleFunc("GET /v1/result", func(w http.ResponseWriter, r *http.Request) {
-		s := b.Store.Snapshot()
-		for _, op := range s.Operations {
-			if op.Completion == "" {
-				closed := false
-				for _, binding := range s.Continuations {
-					if binding.Original.ID == op.ID && binding.Decision == "closed_unresolved" {
-						closed = true
-					}
-				}
-				if closed {
-					continue
-				}
-				failure(w, ErrBusy)
-				return
-			}
+		s, err := b.Store.ResultSnapshot()
+		if err != nil {
+			failure(w, err)
+			return
 		}
 		root, err := os.OpenRoot(b.Workspace)
 		if err != nil {

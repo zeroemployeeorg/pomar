@@ -111,6 +111,19 @@ type Event struct {
 	PermissionID string          `json:"permission_id,omitempty"`
 }
 
+// RejectedEvent retains routing provenance only, never arbitrary provider
+// content. It is diagnostic evidence, not an accepted event or actor outcome.
+type RejectedEvent struct {
+	Incarnation        string `json:"source_incarnation"`
+	CurrentIncarnation string `json:"current_incarnation"`
+	Method             string `json:"method"`
+	ThreadID           string `json:"thread_id,omitempty"`
+	TurnID             string `json:"turn_id,omitempty"`
+	OperationID        string `json:"operation_id,omitempty"`
+	ParamsSHA256       string `json:"params_sha256"`
+	Reason             string `json:"reason"`
+}
+
 type Control struct {
 	ID          string `json:"operation_id"`
 	Kind        string `json:"kind"`
@@ -126,6 +139,7 @@ type State struct {
 	ThreadID          string                         `json:"thread_id,omitempty"`
 	Operations        map[string]Operation           `json:"operations"`
 	Events            []Event                        `json:"events"`
+	RejectedEvents    []RejectedEvent                `json:"rejected_events,omitempty"`
 	Controls          map[string]Control             `json:"controls"`
 	Continuations     map[string]ContinuationBinding `json:"continuations,omitempty"`
 	ContractVersion   string                         `json:"contract_version"`
@@ -250,6 +264,10 @@ func (m *Store) Close() error { return m.lock.Close() }
 func (m *Store) Snapshot() State {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.snapshotLocked()
+}
+
+func (m *Store) snapshotLocked() State {
 	b, _ := json.Marshal(m.s)
 	var out State
 	json.Unmarshal(b, &out)
@@ -470,6 +488,9 @@ func (m *Store) Observe(incarnation, method string, requestID, params json.RawMe
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if err := m.check(incarnation); err != nil {
+		if errors.Is(err, ErrStale) {
+			return m.rejectStaleEvent(incarnation, method, params)
+		}
 		return err
 	}
 	if len(m.s.Events) >= 8192 || len(params) > 256<<10 {
@@ -530,6 +551,40 @@ func (m *Store) Observe(incarnation, method string, requestID, params json.RawMe
 		m.s.Operations[id] = op
 	}
 	return m.save()
+}
+
+// Caller holds mu. A stale notification cannot enter Events or change tasks,
+// bindings or permissions, even if its thread and turn otherwise look valid.
+func (m *Store) rejectStaleEvent(incarnation, method string, params json.RawMessage) error {
+	if len(m.s.RejectedEvents) >= 1024 || len(params) > 256<<10 {
+		return ErrStale
+	}
+	var p struct {
+		ThreadID string `json:"threadId"`
+		TurnID   string `json:"turnId"`
+		Turn     struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	if json.Unmarshal(params, &p) != nil {
+		return ErrStale
+	}
+	turn := p.TurnID
+	if turn == "" {
+		turn = p.Turn.ID
+	}
+	rejected := RejectedEvent{Incarnation: incarnation, CurrentIncarnation: m.s.Incarnation, Method: method, ThreadID: p.ThreadID, TurnID: turn, ParamsSHA256: digest(params), Reason: "stale incarnation"}
+	for id, op := range m.s.Operations {
+		if op.Incarnation == incarnation && op.TurnID != "" && op.TurnID == turn && (op.ThreadID == "" || op.ThreadID == p.ThreadID) {
+			rejected.OperationID = id
+			break
+		}
+	}
+	m.s.RejectedEvents = append(m.s.RejectedEvents, rejected)
+	if err := m.save(); err != nil {
+		return err
+	}
+	return ErrStale
 }
 
 func (m *Store) BindSource(sha string) error {
