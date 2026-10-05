@@ -469,6 +469,7 @@ func (h *Host) stop(e *Environment) error {
 func (h *Host) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/environments/{id}/reconcile", h.reconcileHandler)
+	mux.HandleFunc("POST /v1/environments/{id}/continuations", h.continuationHandler)
 	mux.HandleFunc("POST /v1/environments", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			ID          string `json:"id"`
@@ -623,6 +624,10 @@ func (h *Host) Handler() http.Handler {
 		respond(w, 200, e)
 	})
 	mux.HandleFunc("/v1/environments/{id}/agent/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("path") == "continuations" {
+			respond(w, http.StatusForbidden, map[string]string{"error": "continuation requires the machine-owned host binding route"})
+			return
+		}
 		h.mu.Lock()
 		e := h.envs[r.PathValue("id")]
 		if e == nil || e.Phase != "running" {

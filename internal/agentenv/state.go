@@ -35,6 +35,7 @@ type Operation struct {
 	InputHash             string                 `json:"input_sha256"`
 	State                 string                 `json:"state"`
 	TurnID                string                 `json:"turn_id,omitempty"`
+	ThreadID              string                 `json:"thread_id,omitempty"`
 	ActorAcknowledged     bool                   `json:"actor_acknowledged"`
 	Completion            string                 `json:"completion,omitempty"`
 	CompletionObservation *CompletionObservation `json:"completion_observation,omitempty"`
@@ -83,7 +84,7 @@ func (m *Store) ObserveRecoveredTurns(incarnation, operation string, raw json.Ra
 		turns[turn.ID] = turn.Status
 	}
 	for id, op := range m.s.Operations {
-		if op.Incarnation == incarnation || op.Completion != "" || op.TurnID == "" {
+		if op.Incarnation == incarnation || op.Completion != "" || op.TurnID == "" || m.closedUnresolved(id) || (op.ThreadID != "" && op.ThreadID != response.Thread.ID) {
 			continue
 		}
 		status, found := turns[op.TurnID]
@@ -119,21 +120,22 @@ type Control struct {
 }
 
 type State struct {
-	EnvironmentID     string               `json:"environment_id"`
-	SessionID         string               `json:"session_id"`
-	Incarnation       string               `json:"incarnation"`
-	ThreadID          string               `json:"thread_id,omitempty"`
-	Operations        map[string]Operation `json:"operations"`
-	Events            []Event              `json:"events"`
-	Controls          map[string]Control   `json:"controls"`
-	ContractVersion   string               `json:"contract_version"`
-	WorkspaceID       string               `json:"workspace_id"`
-	SourceSHA         string               `json:"source_sha,omitempty"`
-	ScopeID           string               `json:"scope_id"`
-	RequestedModel    string               `json:"requested_model"`
-	RequestedProvider string               `json:"requested_provider"`
-	ModelObservation  ModelObservation     `json:"model_observation"`
-	ModelObservations []ModelObservation   `json:"model_observations,omitempty"`
+	EnvironmentID     string                         `json:"environment_id"`
+	SessionID         string                         `json:"session_id"`
+	Incarnation       string                         `json:"incarnation"`
+	ThreadID          string                         `json:"thread_id,omitempty"`
+	Operations        map[string]Operation           `json:"operations"`
+	Events            []Event                        `json:"events"`
+	Controls          map[string]Control             `json:"controls"`
+	Continuations     map[string]ContinuationBinding `json:"continuations,omitempty"`
+	ContractVersion   string                         `json:"contract_version"`
+	WorkspaceID       string                         `json:"workspace_id"`
+	SourceSHA         string                         `json:"source_sha,omitempty"`
+	ScopeID           string                         `json:"scope_id"`
+	RequestedModel    string                         `json:"requested_model"`
+	RequestedProvider string                         `json:"requested_provider"`
+	ModelObservation  ModelObservation               `json:"model_observation"`
+	ModelObservations []ModelObservation             `json:"model_observations,omitempty"`
 }
 
 // ModelObservation is adapter-reported selection, not backend routing attestation.
@@ -333,9 +335,14 @@ func (m *Store) Begin(task Task) (op Operation, dispatch bool, err error) {
 		return existing, false, nil
 	}
 	for _, existing := range m.s.Operations {
-		if existing.Completion == "" {
+		if existing.Completion == "" && !m.continuedBy(existing.ID, task.OperationID) {
 			err = ErrBusy
 			return
+		}
+	}
+	for _, binding := range m.s.Continuations {
+		if binding.Successor.OperationID == task.OperationID && binding.SuccessorInputSHA256 != hash {
+			return Operation{}, false, ErrConflict
 		}
 	}
 	op = Operation{ID: task.OperationID, Incarnation: task.Incarnation, InputHash: hash, State: "dispatching"}
@@ -395,7 +402,20 @@ func (m *Store) ObserveModel(incarnation, operation, method string, raw json.Raw
 	if method == "thread/resume" && out.Thread.ID != m.s.ThreadID {
 		return errors.New("resumed thread identity mismatch")
 	}
+	if op, ok := m.s.Operations[operation]; ok {
+		if method == "thread/start" && op.ThreadID != "" && op.ThreadID != out.Thread.ID {
+			return ErrConflict
+		}
+		op.ThreadID = out.Thread.ID
+		m.s.Operations[operation] = op
+	}
 	m.s.ThreadID = out.Thread.ID
+	for id, binding := range m.s.Continuations {
+		if binding.Successor.OperationID == operation {
+			binding.SuccessorThreadID = out.Thread.ID
+			m.s.Continuations[id] = binding
+		}
+	}
 	m.s.ModelObservation = ModelObservation{Status: "unknown"}
 	if out.Model != "" && out.Provider != "" {
 		m.s.ModelObservation = ModelObservation{Status: "observed", Model: out.Model, Provider: out.Provider, ThreadID: out.Thread.ID, IncarnationID: incarnation, OperationID: operation, ObservedAt: time.Now().UTC().Format(time.RFC3339Nano), SourceMethod: method}
