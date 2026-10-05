@@ -28,15 +28,28 @@ func main() {
 	}
 }
 
-// checkLoopback refuses any listen address that is not a loopback IP.
+// checkLoopback requires a loopback IP and a decimal port in 0..65535.
 func checkLoopback(addr string) error {
-	host, _, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return err
 	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
 		return fmt.Errorf("listen address %q is not a loopback IP", addr)
+	}
+	if len(port) == 0 || len(port) > 5 {
+		return fmt.Errorf("listen port must be an ASCII decimal number in 0..65535")
+	}
+	value := 0
+	for i := 0; i < len(port); i++ {
+		if port[i] < '0' || port[i] > '9' {
+			return fmt.Errorf("listen port must be an ASCII decimal number in 0..65535")
+		}
+		value = value*10 + int(port[i]-'0')
+	}
+	if value > 65535 {
+		return fmt.Errorf("listen port must be an ASCII decimal number in 0..65535")
 	}
 	return nil
 }
