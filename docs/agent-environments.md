@@ -96,6 +96,10 @@ binding. Use a distinct environment for different project inputs; never silently
 replace the retained workspace. No host home or another project's credential
 store is copied into a new environment.
 
+Owner source bundles may include release tags. Initial setup imports those tags
+along with the selected HEAD so release preparation can compare the published
+tag and retained project source without network Git access.
+
 ### Inspection, retention and scope fencing
 
 Task/control lookup requires the original session and incarnation. It may
