@@ -58,7 +58,7 @@ public enum AgentEnvironment {
         let script =
             "set -eu; " + Helper.registerJobUser + "; "
             + "mkdir -p /pomar/job /var/lib/pomar-agent /run/pomar; "
-            + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=/opt/pomar-codex/codex-path:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
+            + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
             + "chmod 700 /var/lib/pomar-agent /run/pomar; rm -f /run/pomar/agent.sock; "
             + "if [ ! -e /var/lib/pomar-agent/workspace-created ]; then "
             + "git init -q /work; git -C /work fetch -q /pomar/source.bundle HEAD; "
