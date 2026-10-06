@@ -137,6 +137,12 @@ func run() error {
 			Args:          []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName},
 			Start:         claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"), UID: 1000, GID: 1000}.Start,
 			Authenticated: claudeactor.CredentialPresent(configDir),
+			// Sign-in for the coding user, through the same relayed egress: the
+			// profile's allowedHosts must include claude.com and
+			// platform.claude.com for it, and api.anthropic.com for inference.
+			Login: func() (claudeactor.Process, error) {
+				return claudeactor.Exec{Binary: *claude, Dir: "/pomar/job", Env: claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/usr/local/bin:/usr/bin:/bin"), UID: 1000, GID: 1000}.Start([]string{"auth", "login", "--claudeai"})
+			},
 		}, broker.Observe)
 		ln, err := listenClaudeBridge()
 		if err != nil {

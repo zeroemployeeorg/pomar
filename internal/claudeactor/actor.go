@@ -49,6 +49,9 @@ type Config struct {
 	// Authenticated reports whether a credential is configured for the coding
 	// user, without reading or returning its value.
 	Authenticated func() bool
+	// Login starts `claude auth login --claudeai` for the coding user, with
+	// stdin and stdout piped; nil leaves sign-in unsupported.
+	Login func() (Process, error)
 	// NewID returns a fresh UUID; nil uses crypto/rand.
 	NewID func() string
 }
@@ -67,9 +70,11 @@ type Actor struct {
 	// permission calls waiting for the controller, by request ID
 	permissions    map[string]*permissionWait
 	nextPermission int
-	done           chan struct{}
-	closeOnce      sync.Once
-	err            error
+	// a sign-in waiting for its code
+	login     *loginRun
+	done      chan struct{}
+	closeOnce sync.Once
+	err       error
 }
 
 // New returns an actor that reports actor messages to observe.
@@ -121,11 +126,15 @@ func (a *Actor) Call(ctx context.Context, method string, params any) (json.RawMe
 			return nil, err
 		}
 		return a.startTurn(p.ThreadID, p.Input)
+	case "account/login/start":
+		return a.startLogin()
+	case "account/login/complete":
+		return a.completeLogin(params)
 	case "turn/interrupt":
 		return a.interruptTurn()
 	}
-	// account/login/start has no stream-json equivalent: Claude Code's
-	// sign-in is an interactive terminal flow (POMAR-CC SOW 01 §5 P4).
+	// Anything else is not part of this adapter.
+
 	return nil, fmt.Errorf("%w: %s", ErrUnsupported, method)
 }
 

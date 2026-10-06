@@ -250,3 +250,46 @@ func TestLivePermissionBridge(t *testing.T) {
 		})
 	}
 }
+
+// The real `claude auth login --claudeai`, with no terminal and an empty,
+// throwaway config directory, yields an authorization URL through the actor.
+// The sign-in is then abandoned: no code is sent and no credential is made.
+func TestLiveSignInStartsWithAURL(t *testing.T) {
+	binary := liveBinary(t)
+	home, _ := os.MkdirTemp("/tmp", "pccsi")
+	defer os.RemoveAll(home)
+	config := filepath.Join(home, "cfg")
+	env := []string{"PATH=/usr/bin:/bin", "HOME=" + home, "CLAUDE_CONFIG_DIR=" + config, "BROWSER=/usr/bin/false", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"}
+	var proc Process
+	actor := New(Config{
+		Version:       "2.1.280",
+		Start:         func([]string) (Process, error) { t.Fatal("no turn in this test"); return nil, nil },
+		Authenticated: CredentialPresent(config),
+		Login: func() (Process, error) {
+			p, err := Exec{Binary: binary, Dir: home, Env: env, UID: -1, GID: -1}.Start([]string{"auth", "login", "--claudeai"})
+			proc = p
+			return p, err
+		},
+	}, func(agentenv.Message) error { return nil })
+	raw, err := actor.Call(context.Background(), "account/login/start", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Type    string `json:"type"`
+		LoginID string `json:"loginId"`
+		AuthURL string `json:"authUrl"`
+	}
+	json.Unmarshal(raw, &out)
+	if out.Type != "claudeAiOAuth" || out.LoginID == "" || !strings.HasPrefix(out.AuthURL, "https://") || !strings.Contains(out.AuthURL, "/oauth/authorize?") {
+		t.Fatalf("login start: %s", raw)
+	}
+	host := out.AuthURL[len("https://"):]
+	host = host[:strings.Index(host, "/")]
+	t.Logf("authorization URL host %s, %d bytes (not logged in full)", host, len(out.AuthURL))
+	proc.Interrupt()
+	proc.Wait()
+	if CredentialPresent(config)() {
+		t.Fatal("a credential exists after an abandoned sign-in")
+	}
+}
