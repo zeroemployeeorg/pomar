@@ -49,6 +49,11 @@ type HostConfig struct {
 	CPUs                   int                           `json:"cpus"`
 	MemoryBytes            uint64                        `json:"memoryBytes"`
 	Profiles               map[string]EnvironmentProfile `json:"profiles,omitempty"`
+	// Agent is the coding agent: empty or "codex" (the default), or "claude";
+	// CodexArchive is then that agent's pinned package. AgentVersion pins
+	// Claude Code's version, and is required for it.
+	Agent        string `json:"agent,omitempty"`
+	AgentVersion string `json:"agentVersion,omitempty"`
 }
 
 // EnvironmentProfile selects project inputs supplied by the service owner.
@@ -61,6 +66,36 @@ type EnvironmentProfile struct {
 	SourceBundle           string   `json:"sourceBundle"`
 	SourceSHA              string   `json:"sourceSHA"`
 	AllowedHosts           []string `json:"allowedHosts"`
+	// Agent, AgentVersion and AgentArchive(SHA256) select a profile's own
+	// coding agent and its pinned package; empty keeps the host's.
+	Agent              string `json:"agent,omitempty"`
+	AgentVersion       string `json:"agentVersion,omitempty"`
+	AgentArchive       string `json:"agentArchive,omitempty"`
+	AgentArchiveSHA256 string `json:"agentArchiveSHA256,omitempty"`
+}
+
+var agentVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,3}$`)
+
+// ValidateAgent refuses an unknown agent, a Claude Code agent without a
+// pinned version, a version on Codex, and controller capabilities with
+// Claude Code (the controller bridge is qualified for Codex app-server only).
+func ValidateAgent(c HostConfig) error {
+	switch c.Agent {
+	case "", "codex":
+		if c.AgentVersion != "" {
+			return errors.New("an agent version applies to the claude agent only")
+		}
+	case "claude":
+		if !agentVersion.MatchString(c.AgentVersion) {
+			return errors.New("the claude agent needs a pinned numeric agentVersion")
+		}
+		if len(c.ControllerCapabilities) > 0 {
+			return errors.New("controller capabilities are not qualified for the claude agent")
+		}
+	default:
+		return fmt.Errorf("unknown agent %q", c.Agent)
+	}
+	return nil
 }
 
 func (h *Host) profileConfig(name string) (HostConfig, error) {
@@ -77,6 +112,12 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 	c.SourceBundle, c.SourceSHA = p.SourceBundle, p.SourceSHA
 	c.AllowedHosts = append([]string(nil), p.AllowedHosts...)
 	c.ControllerCapabilities = append([]string(nil), p.ControllerCapabilities...)
+	if p.Agent != "" {
+		c.Agent, c.AgentVersion = p.Agent, p.AgentVersion
+	}
+	if p.AgentArchive != "" {
+		c.CodexArchive, c.CodexArchiveSHA256 = p.AgentArchive, p.AgentArchiveSHA256
+	}
 	return c, nil
 }
 
@@ -160,9 +201,23 @@ func OpenHost(config HostConfig) (*Host, error) {
 	if !filepath.IsAbs(config.Root) || config.MaxLive < 1 || config.MaxLive > 3 || config.CPUs < 1 || config.CPUs > 4 || config.MemoryBytes < 512<<20 || config.MemoryBytes > 8<<30 {
 		return nil, errors.New("invalid development resource configuration")
 	}
+	if err := ValidateAgent(config); err != nil {
+		return nil, err
+	}
 	for name, p := range config.Profiles {
 		if err := ValidateControllerCapabilities(p.ControllerCapabilities); err != nil {
 			return nil, err
+		}
+		effective := config
+		effective.ControllerCapabilities = p.ControllerCapabilities
+		if p.Agent != "" {
+			effective.Agent, effective.AgentVersion = p.Agent, p.AgentVersion
+		}
+		if err := ValidateAgent(effective); err != nil {
+			return nil, fmt.Errorf("profile %s: %w", name, err)
+		}
+		if (p.AgentArchive == "") != (p.AgentArchiveSHA256 == "") || (p.AgentArchive != "" && (!filepath.IsAbs(p.AgentArchive) || !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(p.AgentArchiveSHA256))) {
+			return nil, fmt.Errorf("profile %s: an agent archive needs an absolute path and its sha256", name)
 		}
 		if !environmentID.MatchString(name) || !filepath.IsAbs(p.Base) || !filepath.IsAbs(p.SourceBundle) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(p.SourceSHA) || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(p.ImageDigest) || !strings.HasSuffix(p.ImageRef, "@"+p.ImageDigest) {
 			return nil, errors.New("invalid owner environment profile")
