@@ -64,9 +64,12 @@ type Actor struct {
 	turn      string // the active turn, or ""
 	started   bool   // turn/started emitted for the active turn
 	interrupt bool   // an interrupt was requested for the active turn
-	done      chan struct{}
-	closeOnce sync.Once
-	err       error
+	// permission calls waiting for the controller, by request ID
+	permissions    map[string]*permissionWait
+	nextPermission int
+	done           chan struct{}
+	closeOnce      sync.Once
+	err            error
 }
 
 // New returns an actor that reports actor messages to observe.
@@ -134,11 +137,11 @@ func (a *Actor) Notify(method string, params any) error {
 	return fmt.Errorf("%w: notify %s", ErrUnsupported, method)
 }
 
-// Answer would deliver a permission decision or a controller reply. They
-// arrive through the MCP bridge, which is not wired in this version: no
-// request is ever raised, so any answer is refused rather than dropped.
+// Answer delivers the controller's decision for a permission request raised
+// through the bridge. Controller tool replies are not supported for Claude
+// Code until the bridge is qualified for it (POMAR-CC SOW 01 §5 P2).
 func (a *Actor) Answer(id json.RawMessage, result any) error {
-	return fmt.Errorf("%w: answer %s", ErrUnsupported, string(id))
+	return a.answerPermission(id, result)
 }
 
 // Done closes when the Claude Code process has exited.
@@ -323,6 +326,8 @@ func (a *Actor) handle(l streamLine, raw []byte) error {
 			a.proc = nil
 		}
 		a.turn, a.started, a.interrupt = "", false, false
+		// A permission call still waiting when its turn ends is denied.
+		a.cancelPermissions()
 		a.mu.Unlock()
 		return a.emit("turn/completed", map[string]any{"threadId": thread, "turn": map[string]string{"id": turn, "status": status}})
 	}

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -21,10 +22,56 @@ import (
 )
 
 func main() {
+	run := run
+	if len(os.Args) > 1 && os.Args[1] == "claude-mcp" {
+		run = runClaudeMCP
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "pomar-agent-guest:", err)
 		os.Exit(1)
 	}
+}
+
+// The bridge between Claude Code's permission tool and the root broker: the
+// broker listens; the MCP server, started by Claude Code as the coding user,
+// connects. Only the coding user can reach it, in its own directory: the
+// broker's root-only /run/pomar is not opened up for it.
+const claudeBridgeSocket = "/run/pomar-claude/bridge.sock"
+
+// runClaudeMCP is `pomar-agent-guest claude-mcp -socket S`: the MCP server on
+// stdio that forwards Claude Code's permission calls to the bridge socket.
+func runClaudeMCP() error {
+	fs := flag.NewFlagSet("claude-mcp", flag.ContinueOnError)
+	socket := fs.String("socket", claudeBridgeSocket, "the root broker's bridge socket")
+	if err := fs.Parse(os.Args[2:]); err != nil {
+		return err
+	}
+	return claudeactor.ServeMCP(os.Stdin, os.Stdout, func(tool string, args json.RawMessage) (claudeactor.BridgeReply, error) {
+		return claudeactor.Forward(*socket, tool, args)
+	})
+}
+
+// listenClaudeBridge makes the bridge socket for the coding user (uid 1000)
+// only, refusing to replace an existing path.
+func listenClaudeBridge() (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(claudeBridgeSocket), 0o755); err != nil {
+		return nil, err
+	}
+	if _, err := os.Lstat(claudeBridgeSocket); err == nil {
+		return nil, fmt.Errorf("claude bridge socket already exists; refusing to replace it")
+	}
+	ln, err := net.Listen("unix", claudeBridgeSocket)
+	if err != nil {
+		return nil, err
+	}
+	if err = os.Chown(claudeBridgeSocket, 1000, 1000); err == nil {
+		err = os.Chmod(claudeBridgeSocket, 0o600)
+	}
+	if err != nil {
+		ln.Close()
+		return nil, err
+	}
+	return ln, nil
 }
 
 func run() error {
@@ -73,15 +120,31 @@ func run() error {
 			return fmt.Errorf("-actor claude needs -claude-version")
 		}
 		configDir := "/pomar/job/.claude"
-		actor = claudeactor.New(claudeactor.Config{
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		mcpConfig, err := claudeactor.MCPConfig(self, claudeBridgeSocket)
+		if err != nil {
+			return err
+		}
+		ca := claudeactor.New(claudeactor.Config{
 			Version: *claudeVersion,
 			// Not --bare: it never reads OAuth credentials (claude --help, 2.1.280).
 			// Only the environment's own user settings load; a task repository's
 			// project or local settings cannot add hooks or permission rules.
-			Args:          []string{"--setting-sources", "user", "--strict-mcp-config"},
+			// The only MCP server is Pomar's permission bridge.
+			Args:          []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName},
 			Start:         claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"), UID: 1000, GID: 1000}.Start,
 			Authenticated: claudeactor.CredentialPresent(configDir),
 		}, broker.Observe)
+		ln, err := listenClaudeBridge()
+		if err != nil {
+			return err
+		}
+		defer ln.Close()
+		go ca.ServeBridge(ln)
+		actor = ca
 		return serve(broker, actor, socket)
 	}
 	cmd := exec.Command(*codex, "app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"", "-c", "analytics.enabled=false")
