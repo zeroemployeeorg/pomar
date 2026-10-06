@@ -130,6 +130,8 @@ type Control struct {
 	Incarnation string `json:"incarnation"`
 	InputHash   string `json:"input_sha256"`
 	State       string `json:"state"`
+	Evidence    string `json:"evidence,omitempty"`
+	Refusal     string `json:"refusal,omitempty"`
 }
 
 type State struct {
@@ -514,7 +516,7 @@ func (m *Store) Observe(incarnation, method string, requestID, params json.RawMe
 	sequence := uint64(len(m.s.Events) + 1)
 	event := Event{Sequence: sequence, Incarnation: incarnation, Method: method, RequestID: requestID, Params: params}
 	if len(requestID) > 0 {
-		event.PermissionID = permissionKey(requestID)
+		event.PermissionID = permissionKey(incarnation, requestID)
 	}
 	var p struct {
 		ThreadID string `json:"threadId"`
@@ -671,6 +673,25 @@ func (m *Store) UnsupportedControl(id string) error {
 		return err
 	}
 	c.State = "unsupported"
+	m.s.Controls[id] = c
+	return m.save()
+}
+
+// RefusePermission records proven non-dispatch without releasing the operation
+// ID. A later request with that permission ID cannot make a retry send an answer.
+func (m *Store) RefusePermission(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c, ok := m.s.Controls[id]
+	if !ok || c.Kind != "permission" || c.State != "dispatching" {
+		return errors.New("permission refusal requires an undispatched control")
+	}
+	if err := m.check(c.Incarnation); err != nil {
+		return err
+	}
+	c.State = "refused"
+	c.Evidence = "durable_non_acceptance"
+	c.Refusal = "unknown or already answered permission request"
 	m.s.Controls[id] = c
 	return m.save()
 }

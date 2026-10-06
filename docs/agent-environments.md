@@ -124,6 +124,15 @@ unavailable broker is unknown. Never replay based on an unbound 404 or 502.
 Changing any authority-bearing input under a recorded ID conflicts. Login,
 permission decisions and interrupts are also journaled before dispatch.
 
+Permission IDs are opaque keys bound to the originating actor incarnation and
+native request ID. A provider may reuse a native ID after replacement without
+colliding with retained permission evidence. Controllers must still send the
+current expected incarnation. An answer naming no live pending permission is
+retained as `refused` with `durable_non_acceptance`: that answer did not reach the
+actor. Its operation ID remains bound to its original input, so a later pending
+request cannot turn an identical retry into a dispatch. This differs from an
+answer attempted with uncertain delivery, which remains `acceptance_unknown`.
+
 The journal retains at most 8,192 events, 256 KiB per event and 16 MiB overall.
 There is no silent eviction: exceeding a bound closes the actor protocol
 connection and requires execution fencing before recovery. Event sequences

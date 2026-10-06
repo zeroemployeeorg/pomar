@@ -80,8 +80,8 @@ func (b *Broker) Initialize(ctx context.Context, actor Actor) error {
 	return nil
 }
 
-func permissionKey(id json.RawMessage) string {
-	sum := sha256.Sum256(id)
+func permissionKey(incarnation string, id json.RawMessage) string {
+	sum := sha256.Sum256(append([]byte(incarnation+"\x00"), id...))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -114,7 +114,7 @@ func (b *Broker) Observe(m Message) error {
 		return err
 	}
 	if len(m.ID) > 0 {
-		b.pending[permissionKey(m.ID)] = m
+		b.pending[permissionKey(b.incarnation, m.ID)] = m
 	}
 	return nil
 }
@@ -466,6 +466,10 @@ func (b *Broker) Handler() http.Handler {
 			return
 		}
 		if !dispatch {
+			if control.State == "refused" {
+				respond(w, http.StatusConflict, control)
+				return
+			}
 			if control.State == "unsupported" {
 				respond(w, http.StatusNotImplemented, map[string]string{"status": "unsupported", "operation_id": control.ID})
 				return
@@ -475,8 +479,11 @@ func (b *Broker) Handler() http.Handler {
 		}
 		m, ok := b.pending[r.PathValue("id")]
 		if !ok {
-			b.Store.FinishControl(req.OperationID, false)
-			failure(w, errors.New("unknown or already answered permission request"))
+			if err := b.Store.RefusePermission(req.OperationID); err != nil {
+				failure(w, err)
+				return
+			}
+			respond(w, http.StatusConflict, b.Store.Snapshot().Controls[req.OperationID])
 			return
 		}
 		// Only per-request decisions. No blanket session/execpolicy approval.
