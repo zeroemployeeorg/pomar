@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 type controllerActor struct {
@@ -106,6 +107,13 @@ func TestControllerReplyDurableDuplicateConflictAndDistinctAcknowledgement(t *te
 	if a.answers != 1 {
 		t.Fatal("duplicate native delivery")
 	}
+	// Returning a receipt must not expose mutable pointers into the journal.
+	got.Reply.Text = "caller mutation"
+	got.Binding.NativeRequestID[0] = '9'
+	retained := b.Store.Snapshot().ControllerRequests[req.ID]
+	if retained.Reply.Text != reply.Text || string(retained.Binding.NativeRequestID) != "42" {
+		t.Fatal("returned receipt mutated retained evidence")
+	}
 	// Ack is a fresh authenticated actor request, not inferred from delivery or completion.
 	ack := m
 	ack.ID = json.RawMessage(`43`)
@@ -132,7 +140,7 @@ func TestControllerConcurrentRepliesAndLostNativeWriteNeverReplay(t *testing.T) 
 		go func() {
 			defer wg.Done()
 			got, err := b.ReplyController(req.ID, reply)
-			if err != nil || got.State != "acceptance_unknown" {
+			if err != nil || (got.State != "acceptance_unknown" && got.State != "dispatching") {
 				t.Errorf("%+v %v", got, err)
 			}
 		}()
@@ -256,6 +264,56 @@ func TestControllerAdapterConfigurationAndHTTPBounds(t *testing.T) {
 	}
 	if a.answers != 0 {
 		t.Fatal("bad HTTP reply delivered")
+	}
+}
+
+func TestControllerBlockedNativeWriteKeepsInspectionAndDuplicatesAvailable(t *testing.T) {
+	b, a, m := controllerFixture(t)
+	if err := b.Observe(m); err != nil {
+		t.Fatal(err)
+	}
+	request := firstController(t, b)
+	started, release := make(chan struct{}), make(chan struct{})
+	a.beforeAnswer = func() { close(started); <-release }
+	reply := ControllerReply{ReplyID: "reply", Binding: request.Binding, Text: "data", Success: true}
+	finished := make(chan error, 1)
+	go func() { _, err := b.ReplyController(request.ID, reply); finished <- err }()
+	<-started
+	inspection := make(chan bool, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		b.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/v1/controller/requests", nil))
+		duplicate, err := b.ReplyController(request.ID, reply)
+		inspection <- w.Code == 200 && err == nil && duplicate.State == "dispatching"
+	}()
+	select {
+	case ok := <-inspection:
+		if !ok {
+			t.Error("blocked delivery hid retained dispatch")
+		}
+	case <-time.After(time.Second):
+		t.Error("native write blocked inspection")
+	}
+	close(release)
+	if err := <-finished; err != nil {
+		t.Fatal(err)
+	}
+	if a.answers != 1 {
+		t.Fatal("blocked reply replayed")
+	}
+}
+
+func TestControllerJSONRejectsDuplicateFieldsAndDeepNesting(t *testing.T) {
+	for _, raw := range []string{`{"capability":"inbox","capability":"ack","data":"body"}`, `{"binding":{"session_id":"one","session_id":"two"}}`, strings.Repeat("[", 18) + "0" + strings.Repeat("]", 18)} {
+		var value any
+		if strictJSON([]byte(raw), &value) == nil {
+			t.Fatal("ambiguous JSON accepted")
+		}
+	}
+	for _, raw := range []string{"null", "true", "{}", "1.1"} {
+		if validNativeID(json.RawMessage(raw)) {
+			t.Fatal("invalid native request identity", raw)
+		}
 	}
 }
 

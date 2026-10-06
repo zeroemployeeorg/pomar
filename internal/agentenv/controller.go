@@ -100,6 +100,9 @@ func nativeReply(reply ControllerReply) any {
 }
 
 func strictJSON(raw []byte, v any) error {
+	if err := uniqueJSONKeys(json.NewDecoder(bytes.NewReader(raw)), 0); err != nil {
+		return err
+	}
 	d := json.NewDecoder(bytes.NewReader(raw))
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {
@@ -109,6 +112,48 @@ func strictJSON(raw []byte, v any) error {
 		return errors.New("trailing JSON")
 	}
 	return nil
+}
+
+func uniqueJSONKeys(d *json.Decoder, depth int) error {
+	if depth > 16 {
+		return errors.New("JSON nesting exceeds limit")
+	}
+	token, err := d.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, container := token.(json.Delim)
+	if !container {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := map[string]bool{}
+		for d.More() {
+			key, err := d.Token()
+			if err != nil {
+				return err
+			}
+			name, ok := key.(string)
+			if !ok || seen[name] {
+				return errors.New("duplicate JSON field")
+			}
+			seen[name] = true
+			if err = uniqueJSONKeys(d, depth+1); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for d.More() {
+			if err := uniqueJSONKeys(d, depth+1); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("invalid JSON container")
+	}
+	_, err = d.Token()
+	return err
 }
 
 func validNativeID(raw json.RawMessage) bool {
@@ -207,12 +252,23 @@ func (b *Broker) observeControllerRequest(message Message) error {
 
 // ReplyController syncs identity, content and digest before any native write.
 // Successful writes are transport evidence only, never recipient acknowledgements.
-func (b *Broker) ReplyController(id string, reply ControllerReply) (ControllerRequest, error) {
+func (b *Broker) ReplyController(id string, reply ControllerReply) (out ControllerRequest, failure error) {
+	defer func() {
+		raw, _ := json.Marshal(out)
+		var copy ControllerRequest
+		json.Unmarshal(raw, &copy)
+		out = copy
+	}()
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	m := b.Store
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	locked := true
+	unlock := func() { m.mu.Unlock(); b.mu.Unlock() }
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 	if err := m.check(reply.Binding.Incarnation); err != nil {
 		return ControllerRequest{}, err
 	}
@@ -246,6 +302,7 @@ func (b *Broker) ReplyController(id string, reply ControllerReply) (ControllerRe
 	if !b.controllerReady || b.resumeFailure != nil || !live || op.Completion != "" || op.Incarnation != b.incarnation || op.TurnID != request.Binding.TurnID {
 		return request, ErrStale
 	}
+	reply.Binding = request.Binding
 	request.Reply = &reply
 	request.ReplySHA256 = hash
 	request.State = "dispatching"
@@ -254,7 +311,16 @@ func (b *Broker) ReplyController(id string, reply ControllerReply) (ControllerRe
 		return request, err
 	}
 	delete(b.controllerPending, id)
+	// Inspection and identical retries must remain available while a native
+	// write is blocked. The durable dispatching record already forbids replay.
+	unlock()
+	locked = false
 	err := b.Actor.Answer(nativeID, nativeReply(reply))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if checkErr := m.check(b.incarnation); checkErr != nil {
+		return request, checkErr
+	}
 	request.State = "written"
 	if err != nil {
 		request.State = "acceptance_unknown"

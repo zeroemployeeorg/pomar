@@ -107,7 +107,8 @@ and active bound turn. Each request contains:
 Post to `/v1/controller/requests/{request_id}/reply` with **all four fields**:
 `reply_id` (a unique operation ID), `binding` (the complete binding above),
 `text` (string), and `success` (boolean). Unknown fields/trailing JSON are
-refused. The native answer's exact schema is:
+refused, including duplicate field names and nesting beyond 16 levels. The
+native answer's exact schema is:
 
 ```json
 {"contentItems": [{"type": "inputText", "text": "controller response"}], "success": true}
@@ -124,7 +125,9 @@ transport limit before the decoded-text limit.
 
 States are `pending`, `dispatching`, `written`, `acceptance_unknown`, or
 `fenced`. `written` means a successful local transport write, not proof of
-native consumption. A failed/short write or an interrupted dispatch remains
+native consumption. Inspection and identical retries remain available during
+a blocked native write and return its retained `dispatching` state. A
+failed/short write or an interrupted dispatch remains
 unresolved and is never automatically replayed, including after restart.
 Matching native `item/completed` evidence and the requesting actor's answer
 can qualify consumption; this API does not currently reconcile an uncertain
