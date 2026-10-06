@@ -182,9 +182,13 @@ func TestControllerRejectsUnboundRequestsAndReplies(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := firstController(t, b)
-	for _, field := range []string{"environment", "session", "operation", "input", "thread", "turn", "request", "call", "incarnation"} {
+	for _, field := range []string{"environment", "session", "workspace", "scope", "operation", "input", "thread", "turn", "request", "call", "incarnation"} {
 		reply := ControllerReply{ReplyID: "reply", Binding: req.Binding, Text: "data", Success: true}
 		switch field {
+		case "workspace":
+			reply.Binding.WorkspaceID = "other"
+		case "scope":
+			reply.Binding.ScopeID = "other"
 		case "environment":
 			reply.Binding.EnvironmentID = "other"
 		case "session":

@@ -87,6 +87,8 @@ and active bound turn. Each request contains:
   "binding": {
     "environment_id": "environment",
     "session_id": "session",
+    "workspace_id": "workspace-environment",
+    "scope_id": "scope-actor-one",
     "incarnation": "actor-one",
     "operation_id": "operation",
     "input_sha256": "retained-task-input-digest",

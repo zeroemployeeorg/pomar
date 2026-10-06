@@ -66,6 +66,8 @@ func controllerTools(names []string) []map[string]any {
 type ControllerBinding struct {
 	EnvironmentID   string          `json:"environment_id"`
 	SessionID       string          `json:"session_id"`
+	WorkspaceID     string          `json:"workspace_id"`
+	ScopeID         string          `json:"scope_id"`
 	Incarnation     string          `json:"incarnation"`
 	OperationID     string          `json:"operation_id"`
 	InputSHA256     string          `json:"input_sha256"`
@@ -179,7 +181,7 @@ func (b *Broker) observeControllerRequest(message Message) error {
 	if operation.ID == "" {
 		return ErrStale
 	}
-	binding := ControllerBinding{m.s.EnvironmentID, m.s.SessionID, b.incarnation, operation.ID, operation.InputHash, p.ThreadID, p.TurnID, append(json.RawMessage(nil), message.ID...), p.CallID}
+	binding := ControllerBinding{EnvironmentID: m.s.EnvironmentID, SessionID: m.s.SessionID, WorkspaceID: m.s.WorkspaceID, ScopeID: m.s.ScopeID, Incarnation: b.incarnation, OperationID: operation.ID, InputSHA256: operation.InputHash, ThreadID: p.ThreadID, TurnID: p.TurnID, NativeRequestID: append(json.RawMessage(nil), message.ID...), CallID: p.CallID}
 	raw, _ := json.Marshal(binding)
 	id := digest(raw)
 	request := ControllerRequest{ID: id, Binding: binding, Capability: args.Capability, Data: args.Data, NativeParamsSHA256: digest(message.Params), State: "pending"}
