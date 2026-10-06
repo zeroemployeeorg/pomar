@@ -444,7 +444,7 @@ func (h *Host) start(e *Environment) error {
 	if err != nil {
 		return err
 	}
-	if e.Spec.Profile != "" && (cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef) {
+	if cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef {
 		return errors.New("retained project inputs changed; use a distinct environment")
 	}
 	e.Spec.Incarnation = randomID()

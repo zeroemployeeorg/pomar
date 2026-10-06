@@ -91,8 +91,9 @@ neither the active-environment limit nor running VM resources. Resource caps and
 the host's maximum live count remain owner-controlled.
 
 A duplicate creation cannot switch profiles. Restart adopts current supervisor
-artifacts but refuses a changed or missing named project's source/base/image
-binding. Use a distinct environment for different project inputs; never silently
+artifacts but refuses a changed source/base/image binding for both named profiles
+and profile-less environments. A missing named profile also refuses restart.
+Use a distinct environment for different project inputs; never silently
 replace the retained workspace. No host home or another project's credential
 store is copied into a new environment.
 
