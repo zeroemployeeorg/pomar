@@ -51,6 +51,17 @@ func TestControllerRealNativeExchange(t *testing.T) {
 	}
 	cmd := exec.Command(binary, "app-server", "--listen", "stdio://", "-c", "analytics.enabled=false")
 	cmd.Dir = workspace
+	cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=" + os.Getenv("PATH")}
+	if home := os.Getenv("CODEX_HOME"); home != "" {
+		cmd.Env = append(cmd.Env, "CODEX_HOME="+home)
+	}
+	selection, err := SelectAdapterBinary("openai", "codex-app-server", "0.160.0", binary, cmd.Args[1:], cmd.Env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = b.ConfigureAdapterSelection(selection); err != nil {
+		t.Fatal(err)
+	}
 	in, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)

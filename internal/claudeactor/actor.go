@@ -63,10 +63,6 @@ type Config struct {
 	ControllerCapabilities []string
 }
 
-// controllerQualified names the Claude Code versions the controller bridge
-// is qualified against (live_test.go TestLiveControllerTool).
-var controllerQualified = map[string]bool{"2.1.280": true}
-
 // Actor is one adapter connection, bound to one broker incarnation.
 type Actor struct {
 	cfg     Config
@@ -444,8 +440,8 @@ func newUUID() string {
 }
 
 // Adapter describes this actor to the shared broker (POMAR-CC proposal P2):
-// its session report, and whether the controller bridge is qualified for its
-// pinned Claude Code version.
+// its session report. Controller qualification is not claimed here: it comes
+// from the owner's pinned adapter selection (agentenv.qualifiedController).
 func (a *Actor) Adapter() agentenv.AdapterInfo {
 	return agentenv.AdapterInfo{
 		Provider: "anthropic", Name: "claude-code", Version: a.cfg.Version,
@@ -455,7 +451,6 @@ func (a *Actor) Adapter() agentenv.AdapterInfo {
 			"permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"},
 			"permission_decisions":      []string{"accept", "decline", "cancel"},
 		},
-		ControllerQualified: controllerQualified[a.cfg.Version],
-		NativeMethod:        "item/tool/call",
+		NativeMethod: "item/tool/call",
 	}
 }

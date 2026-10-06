@@ -123,6 +123,18 @@ func openController(t *testing.T, dir, incarnation string, s script, authenticat
 	if err := h.broker.ConfigureController(capabilities); err != nil {
 		t.Fatal(err)
 	}
+	if len(capabilities) > 0 {
+		// The owner's pinned selection qualifies the controller, never the
+		// actor's own description: the qualified darwin/arm64 2.1.280 pin.
+		sha := "387a5c5dcdbb815085edf0baf79591f9d8894efe922bceaf3d75b1b08055229d"
+		if version != "2.1.280" {
+			sha = strings.Repeat("e", 64)
+		}
+		selection := agentenv.AdapterSelection{Provider: "anthropic", Name: "claude-code", Version: version, Platform: "darwin/arm64", Executable: "/opt/pomar-claude/bin/claude", ExecutableSHA256: sha, ConfigurationSHA256: strings.Repeat("c", 64)}
+		if err := h.broker.ConfigureAdapterSelection(selection); err != nil {
+			t.Fatal(err)
+		}
+	}
 	cfg := Config{
 		Version:                version,
 		ControllerCapabilities: capabilities,

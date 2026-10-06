@@ -91,8 +91,9 @@ neither the active-environment limit nor running VM resources. Resource caps and
 the host's maximum live count remain owner-controlled.
 
 A duplicate creation cannot switch profiles. Restart adopts current supervisor
-artifacts but refuses a changed or missing named project's source/base/image
-binding. Use a distinct environment for different project inputs; never silently
+artifacts but refuses a changed source/base/image binding for both named profiles
+and profile-less environments. A missing named profile also refuses restart.
+Use a distinct environment for different project inputs; never silently
 replace the retained workspace. No host home or another project's credential
 store is copied into a new environment.
 
@@ -123,6 +124,15 @@ or inaccessible journal, identity mismatch, old incarnation lookup miss or
 unavailable broker is unknown. Never replay based on an unbound 404 or 502.
 Changing any authority-bearing input under a recorded ID conflicts. Login,
 permission decisions and interrupts are also journaled before dispatch.
+
+Permission IDs are opaque keys bound to the originating actor incarnation and
+native request ID. A provider may reuse a native ID after replacement without
+colliding with retained permission evidence. Controllers must still send the
+current expected incarnation. An answer naming no live pending permission is
+retained as `refused` with `durable_non_acceptance`: that answer did not reach the
+actor. Its operation ID remains bound to its original input, so a later pending
+request cannot turn an identical retry into a dispatch. This differs from an
+answer attempted with uncertain delivery, which remains `acceptance_unknown`.
 
 The journal retains at most 8,192 events, 256 KiB per event and 16 MiB overall.
 There is no silent eviction: exceeding a bound closes the actor protocol
@@ -237,6 +247,29 @@ image's login profile resets `PATH`. It leaves retained workspace and user files
 
 ## Adapter
 
+Adapter descriptions are reported facts, separate from execution authority.
+The guest owner selects the provider, adapter/version, platform and executable;
+the broker retains that executable's SHA-256 and a digest of its fixed launch
+arguments and explicit environment before creating a thread. Resume refuses a
+different selection. Raw launch-configuration and credential bytes do not enter
+this binding. Mutable provider user settings and tools still require their own
+effective-configuration compatibility evidence; this digest alone does not
+establish that evidence.
+
+The session report separates `owner_selection`, provider-specific negotiation
+and `controller_qualified`. A descriptor's `ControllerQualified` claim is
+ignored. Controller access requires a known qualified executable/version and
+platform plus that provider's native negotiation. The current policy contains
+the qualified Codex 0.160.0 Linux/arm64 and Darwin/arm64 executable pins. Claude
+2.1.280 can report its own adapter without passing a Codex user-agent gate; its
+controller bridge remains unqualified. An undescribed, unselected actor reports
+unknown identity rather than implicitly becoming Codex.
+
+A retained thread created before adapter binding was recorded cannot be
+retrospectively attributed by this interface. Continue it with its previous
+binary, or create a distinct environment; no automatic migration or task replay
+is performed.
+
 Codex app-server uses newline-delimited JSON RPC on stdio. Initialize the
 connection, start/resume a non-ephemeral thread in `/work`, and retain the thread
 and turn IDs. The broker remains connected when the controller disconnects.
@@ -259,8 +292,10 @@ turn, with the same name and input, once; its `tool_use` id is the call ID.
 The controller's reply through `POST /v1/controller/requests/{id}/reply` is
 the tool result, and `success: false` makes it an error result. A request
 still waiting when its turn ends gets an error result, and a later reply is
-refused as stale. Controller capabilities are accepted only for a Claude Code
-version whose bridge is qualified (`TestLiveControllerTool`).
+refused as stale. As for Codex, the controller is enabled only for an
+owner-selected executable pinned in the qualification policy: Claude Code
+2.1.280 on darwin/arm64 (`TestLiveControllerTool`); its linux/arm64 executable
+is pinned only after an in-guest qualification.
 
 ## First assignment and acceptance
 
