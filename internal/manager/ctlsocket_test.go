@@ -16,7 +16,8 @@ import (
 // limited to 104 bytes on macOS, and t.TempDir's paths can be longer.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("", "pctl")
+	// Leave room for root/manager/manager.sock beneath the caller's TMPDIR.
+	d, err := os.MkdirTemp("", "p")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,9 +86,9 @@ func serveWithCtl(t *testing.T, ctlMode os.FileMode) (owner, ctl *Client, ctlSoc
 // The stream's control socket serves start, stop and reads, and nothing that
 // removes a record or evicts a cache; the owner's socket keeps every route.
 func TestCtlSocketServesTheStreamsRoutesOnly(t *testing.T) {
-	owner, ctl, ctlSock, _ := serveWithCtl(t, 0o750)
+	owner, ctl, ctlSock, errs := serveWithCtl(t, 0o750)
 	if owner == nil {
-		t.Fatal("manager did not start")
+		t.Fatalf("manager did not start: %v", <-errs)
 	}
 	fi, err := os.Stat(ctlSock)
 	if err != nil {
