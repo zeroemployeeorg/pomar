@@ -76,9 +76,13 @@ type EnvironmentProfile struct {
 
 var agentVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,3}$`)
 
+// claudeControllerVersions are the Claude Code versions whose controller
+// bridge is qualified (internal/claudeactor, TestLiveControllerTool).
+var claudeControllerVersions = map[string]bool{"2.1.280": true}
+
 // ValidateAgent refuses an unknown agent, a Claude Code agent without a
-// pinned version, a version on Codex, and controller capabilities with
-// Claude Code (the controller bridge is qualified for Codex app-server only).
+// pinned version, a version on Codex, and controller capabilities with a
+// Claude Code version whose controller bridge is not qualified.
 func ValidateAgent(c HostConfig) error {
 	switch c.Agent {
 	case "", "codex":
@@ -89,8 +93,8 @@ func ValidateAgent(c HostConfig) error {
 		if !agentVersion.MatchString(c.AgentVersion) {
 			return errors.New("the claude agent needs a pinned numeric agentVersion")
 		}
-		if len(c.ControllerCapabilities) > 0 {
-			return errors.New("controller capabilities are not qualified for the claude agent")
+		if len(c.ControllerCapabilities) > 0 && !claudeControllerVersions[c.AgentVersion] {
+			return errors.New("controller capabilities are not qualified for this claude agent version")
 		}
 	default:
 		return fmt.Errorf("unknown agent %q", c.Agent)

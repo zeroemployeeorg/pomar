@@ -249,6 +249,19 @@ Pinned protocol source: Codex CLI 0.160.0 generated JSON schemas. See official
 [app-server documentation](https://developers.openai.com/codex/app-server) and
 [headless authentication](https://developers.openai.com/codex/auth).
 
+Claude Code (`-actor claude`, pinned 2.1.280) speaks the same
+`pomar.controller/v1`. The configured capabilities list
+`pomar_controller_request`, with the same schema, on Pomar's MCP server, and
+the launch allows that tool rather than putting it to the permission tool.
+A call is raised as the same native `item/tool/call` request and journaled by
+the broker. It is bound to a tool call Claude Code emitted in the active
+turn, with the same name and input, once; its `tool_use` id is the call ID.
+The controller's reply through `POST /v1/controller/requests/{id}/reply` is
+the tool result, and `success: false` makes it an error result. A request
+still waiting when its turn ends gets an error result, and a later reply is
+refused as stale. Controller capabilities are accepted only for a Claude Code
+version whose bridge is qualified (`TestLiveControllerTool`).
+
 ## First assignment and acceptance
 
 The initial assignment uses an isolated Pomar checkout: accept only ASCII

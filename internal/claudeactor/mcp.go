@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 )
@@ -67,9 +68,23 @@ type mcpMessage struct {
 	Params  json.RawMessage `json:"params,omitempty"`
 }
 
+// ControllerTool is the controller request tool (pomar.controller/v1), the
+// same name and schema the shared broker gives a Codex thread as a dynamic
+// tool. It is listed only when the environment configures capabilities.
+const ControllerTool = "pomar_controller_request"
+
+// controllerTextLimit is the shared broker's bound on request and reply text.
+const controllerTextLimit = 32 << 10
+
 // ServeMCP runs the MCP server on in/out until in ends. call forwards a tool
 // call; ServeMCP lists exactly the permission tool.
 func ServeMCP(in io.Reader, out io.Writer, call func(tool string, args json.RawMessage) (bridgeReply, error)) error {
+	return ServeMCPController(in, out, nil, call)
+}
+
+// ServeMCPController is ServeMCP that also lists the controller request tool
+// for the environment's configured capabilities, when there are any.
+func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call func(tool string, args json.RawMessage) (bridgeReply, error)) error {
 	var mu sync.Mutex
 	write := func(v any) {
 		b, _ := json.Marshal(v)
@@ -113,20 +128,31 @@ func ServeMCP(in io.Reader, out io.Writer, call func(tool string, args json.RawM
 		case "ping":
 			reply(m.ID, map[string]any{})
 		case "tools/list":
-			reply(m.ID, map[string]any{"tools": []any{map[string]any{
+			tools := []any{map[string]any{
 				"name":        PermissionTool,
 				"description": "Pomar's approval for an action Claude Code would take. The environment's controller decides.",
 				"inputSchema": map[string]any{"type": "object", "properties": map[string]any{
 					"tool_name": map[string]string{"type": "string"},
 					"input":     map[string]string{"type": "object"},
 				}, "required": []string{"tool_name", "input"}},
-			}}})
+			}}
+			if len(capabilities) > 0 {
+				tools = append(tools, map[string]any{
+					"name":        ControllerTool,
+					"description": "Request a configured controller capability with bounded data. Delivery is not an acknowledgement. Never include credentials, host commands, socket paths or replacement recipient identities.",
+					"inputSchema": map[string]any{"type": "object", "additionalProperties": false, "required": []string{"capability", "data"}, "properties": map[string]any{
+						"capability": map[string]any{"type": "string", "enum": capabilities},
+						"data":       map[string]any{"type": "string", "maxLength": controllerTextLimit},
+					}},
+				})
+			}
+			reply(m.ID, map[string]any{"tools": tools})
 		case "tools/call":
 			var p struct {
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
 			}
-			if err := json.Unmarshal(m.Params, &p); err != nil || p.Name != PermissionTool {
+			if err := json.Unmarshal(m.Params, &p); err != nil || !(p.Name == PermissionTool || (p.Name == ControllerTool && len(capabilities) > 0)) {
 				fail(m.ID, -32602, "unknown tool")
 				continue
 			}
@@ -136,8 +162,12 @@ func ServeMCP(in io.Reader, out io.Writer, call func(tool string, args json.RawM
 				defer wg.Done()
 				r, err := call(name, args)
 				if err != nil {
-					// The bridge is unreachable: never an implicit approval.
+					// The bridge is unreachable: never an implicit approval,
+					// and never a controller reply.
 					r = bridgeReply{Text: denyText("the Pomar bridge is unavailable"), IsError: false}
+					if name == ControllerTool {
+						r = bridgeReply{Text: "the Pomar bridge is unavailable; the request was not delivered", IsError: true}
+					}
 				}
 				reply(id, map[string]any{"content": []any{map[string]string{"type": "text", "text": r.Text}}, "isError": r.IsError})
 			}(m.ID, p.Name, p.Arguments)
@@ -169,11 +199,21 @@ type BridgeReply = bridgeReply
 // PermissionToolName is the --permission-prompt-tool value.
 const PermissionToolName = "mcp__" + MCPServerName + "__" + PermissionTool
 
+// ControllerToolName is the controller tool as Claude Code names it, for
+// --allowedTools: the call itself is the controlled exchange, so it is not
+// also put to the permission tool.
+const ControllerToolName = "mcp__" + MCPServerName + "__" + ControllerTool
+
 // MCPConfig is the --mcp-config JSON naming only Pomar's bridge: the guest
-// binary's claude-mcp subcommand, pointed at the bridge socket.
-func MCPConfig(guestBinary, socket string) (string, error) {
+// binary's claude-mcp subcommand, pointed at the bridge socket, listing the
+// controller tool for the given capabilities, if any.
+func MCPConfig(guestBinary, socket string, capabilities ...string) (string, error) {
+	args := []string{"claude-mcp", "-socket", socket}
+	if len(capabilities) > 0 {
+		args = append(args, "-controller-capabilities", strings.Join(capabilities, ","))
+	}
 	b, err := json.Marshal(map[string]any{"mcpServers": map[string]any{MCPServerName: map[string]any{
-		"type": "stdio", "command": guestBinary, "args": []string{"claude-mcp", "-socket", socket},
+		"type": "stdio", "command": guestBinary, "args": args,
 	}}})
 	return string(b), err
 }

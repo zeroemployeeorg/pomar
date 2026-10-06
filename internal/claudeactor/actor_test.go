@@ -103,16 +103,31 @@ var counter int
 
 func open(t *testing.T, dir, incarnation string, s script, authenticated bool) *harness {
 	t.Helper()
+	h, err := openController(t, dir, incarnation, s, authenticated, "2.1.280", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return h
+}
+
+// openController opens the harness with the environment's controller
+// capabilities configured on the broker and the actor, as the guest does.
+func openController(t *testing.T, dir, incarnation string, s script, authenticated bool, version string, capabilities []string) (*harness, error) {
+	t.Helper()
 	store, err := agentenv.Open(dir, "env-1", "session-1", incarnation)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { store.Close() })
 	h := &harness{t: t, dir: dir, store: store, broker: agentenv.NewBroker(store, "/work")}
+	if err := h.broker.ConfigureController(capabilities); err != nil {
+		t.Fatal(err)
+	}
 	cfg := Config{
-		Version:       "2.1.280",
-		Args:          []string{"--setting-sources", "user", "--strict-mcp-config"},
-		Authenticated: func() bool { return authenticated },
+		Version:                version,
+		ControllerCapabilities: capabilities,
+		Args:                   []string{"--setting-sources", "user", "--strict-mcp-config"},
+		Authenticated:          func() bool { return authenticated },
 		NewID: func() string {
 			h.mu.Lock()
 			defer h.mu.Unlock()
@@ -130,10 +145,7 @@ func open(t *testing.T, dir, incarnation string, s script, authenticated bool) *
 	h.actor = New(cfg, h.broker.Observe)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := h.broker.Initialize(ctx, h.actor); err != nil {
-		t.Fatal(err)
-	}
-	return h
+	return h, h.broker.Initialize(ctx, h.actor)
 }
 
 func (h *harness) waitOp(id string, want func(agentenv.Operation) bool) agentenv.Operation {

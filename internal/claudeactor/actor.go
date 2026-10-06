@@ -17,6 +17,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
+	"strings"
 	"sync"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
@@ -54,7 +56,16 @@ type Config struct {
 	Login func() (Process, error)
 	// NewID returns a fresh UUID; nil uses crypto/rand.
 	NewID func() string
+	// ControllerCapabilities are the environment's configured controller
+	// capabilities, fixed at startup as the broker's are; the launch must
+	// list the controller tool for them (MCPConfig) and allow it
+	// (--allowedTools ControllerToolName).
+	ControllerCapabilities []string
 }
+
+// controllerQualified names the Claude Code versions the controller bridge
+// is qualified against (live_test.go TestLiveControllerTool).
+var controllerQualified = map[string]bool{"2.1.280": true}
 
 // Actor is one adapter connection, bound to one broker incarnation.
 type Actor struct {
@@ -75,6 +86,11 @@ type Actor struct {
 	toolUses      map[string]*toolUse
 	toolUseSeen   chan struct{}
 	bridgeWaiting int
+	// controller requests waiting for their reply, by request ID
+	controllers    map[string]chan bridgeReply
+	nextController int
+	// nonce makes this actor's request IDs unique across incarnations
+	nonce string
 	// a sign-in waiting for its code
 	login     *loginRun
 	done      chan struct{}
@@ -87,7 +103,8 @@ func New(cfg Config, observe func(agentenv.Message) error) *Actor {
 	if cfg.NewID == nil {
 		cfg.NewID = newUUID
 	}
-	return &Actor{cfg: cfg, observe: observe, done: make(chan struct{})}
+	nonce := strings.ReplaceAll(newUUID(), "-", "")[:12]
+	return &Actor{cfg: cfg, observe: observe, done: make(chan struct{}), nonce: nonce}
 }
 
 var (
@@ -110,6 +127,34 @@ func (a *Actor) Call(ctx context.Context, method string, params any) (json.RawMe
 		}
 		return json.Marshal(map[string]any{"account": nil})
 	case "thread/start":
+		// The broker passes the controller tool as a dynamic tool, as for
+		// Codex; Claude Code's tools are fixed at launch, so they must be
+		// exactly the ones this actor was configured with.
+		var p struct {
+			DynamicTools []struct {
+				Name        string `json:"name"`
+				InputSchema struct {
+					Properties struct {
+						Capability struct {
+							Enum []string `json:"enum"`
+						} `json:"capability"`
+					} `json:"properties"`
+				} `json:"inputSchema"`
+			} `json:"dynamicTools"`
+		}
+		if err := remarshal(params, &p); err != nil {
+			return nil, err
+		}
+		var offered []string
+		for _, t := range p.DynamicTools {
+			if t.Name != ControllerTool {
+				return nil, fmt.Errorf("claude actor: unsupported dynamic tool %q", t.Name)
+			}
+			offered = append(offered, t.InputSchema.Properties.Capability.Enum...)
+		}
+		if !slices.Equal(offered, a.cfg.ControllerCapabilities) {
+			return nil, errors.New("claude actor: the controller tools differ from the launch configuration")
+		}
 		return a.startThread(ctx)
 	case "thread/resume":
 		var p struct {
@@ -151,10 +196,12 @@ func (a *Actor) Notify(method string, params any) error {
 	return fmt.Errorf("%w: notify %s", ErrUnsupported, method)
 }
 
-// Answer delivers the controller's decision for a permission request raised
-// through the bridge. Controller tool replies are not supported for Claude
-// Code until the bridge is qualified for it (POMAR-CC SOW 01 §5 P2).
+// Answer delivers the controller's reply to a controller request, or its
+// decision on a permission request, raised through the bridge.
 func (a *Actor) Answer(id json.RawMessage, result any) error {
+	if ok, err := a.answerController(id, result); ok {
+		return err
+	}
 	return a.answerPermission(id, result)
 }
 
@@ -397,8 +444,8 @@ func newUUID() string {
 }
 
 // Adapter describes this actor to the shared broker (POMAR-CC proposal P2):
-// its session report, and that the controller bridge is not yet qualified
-// for Claude Code, so controller capabilities stay refused.
+// its session report, and whether the controller bridge is qualified for its
+// pinned Claude Code version.
 func (a *Actor) Adapter() agentenv.AdapterInfo {
 	return agentenv.AdapterInfo{
 		Provider: "anthropic", Name: "claude-code", Version: a.cfg.Version,
@@ -408,6 +455,7 @@ func (a *Actor) Adapter() agentenv.AdapterInfo {
 			"permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"},
 			"permission_decisions":      []string{"accept", "decline", "cancel"},
 		},
-		ControllerQualified: false,
+		ControllerQualified: controllerQualified[a.cfg.Version],
+		NativeMethod:        "item/tool/call",
 	}
 }
