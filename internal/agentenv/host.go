@@ -27,38 +27,40 @@ import (
 // HostConfig is supplied by the service owner, never by a guest. A dedicated
 // development data root is required; CI manager state is not opened here.
 type HostConfig struct {
-	Root               string                        `json:"root"`
-	Helper             string                        `json:"helper"`
-	Store              string                        `json:"store"`
-	Base               string                        `json:"base"`
-	Kernel             string                        `json:"kernel"`
-	InitRef            string                        `json:"initRef"`
-	InitDigest         string                        `json:"initDigest"`
-	ImageRef           string                        `json:"imageRef"`
-	ImageDigest        string                        `json:"imageDigest"`
-	GuestBinary        string                        `json:"guestBinary"`
-	ShimBinary         string                        `json:"shimBinary"`
-	CodexArchive       string                        `json:"codexArchive"`
-	CodexArchiveSHA256 string                        `json:"codexArchiveSHA256"`
-	SourceBundle       string                        `json:"sourceBundle"`
-	SourceSHA          string                        `json:"sourceSHA"`
-	GoProxySocket      string                        `json:"goProxySocket"`
-	AllowedHosts       []string                      `json:"allowedHosts"`
-	MaxLive            int                           `json:"maxLive"`
-	CPUs               int                           `json:"cpus"`
-	MemoryBytes        uint64                        `json:"memoryBytes"`
-	Profiles           map[string]EnvironmentProfile `json:"profiles,omitempty"`
+	ControllerCapabilities []string                      `json:"controllerCapabilities,omitempty"`
+	Root                   string                        `json:"root"`
+	Helper                 string                        `json:"helper"`
+	Store                  string                        `json:"store"`
+	Base                   string                        `json:"base"`
+	Kernel                 string                        `json:"kernel"`
+	InitRef                string                        `json:"initRef"`
+	InitDigest             string                        `json:"initDigest"`
+	ImageRef               string                        `json:"imageRef"`
+	ImageDigest            string                        `json:"imageDigest"`
+	GuestBinary            string                        `json:"guestBinary"`
+	ShimBinary             string                        `json:"shimBinary"`
+	CodexArchive           string                        `json:"codexArchive"`
+	CodexArchiveSHA256     string                        `json:"codexArchiveSHA256"`
+	SourceBundle           string                        `json:"sourceBundle"`
+	SourceSHA              string                        `json:"sourceSHA"`
+	GoProxySocket          string                        `json:"goProxySocket"`
+	AllowedHosts           []string                      `json:"allowedHosts"`
+	MaxLive                int                           `json:"maxLive"`
+	CPUs                   int                           `json:"cpus"`
+	MemoryBytes            uint64                        `json:"memoryBytes"`
+	Profiles               map[string]EnvironmentProfile `json:"profiles,omitempty"`
 }
 
 // EnvironmentProfile selects project inputs supplied by the service owner.
 // Creation accepts only a name; a controller cannot supply filesystem paths.
 type EnvironmentProfile struct {
-	Base         string   `json:"base"`
-	ImageRef     string   `json:"imageRef"`
-	ImageDigest  string   `json:"imageDigest"`
-	SourceBundle string   `json:"sourceBundle"`
-	SourceSHA    string   `json:"sourceSHA"`
-	AllowedHosts []string `json:"allowedHosts"`
+	ControllerCapabilities []string `json:"controllerCapabilities,omitempty"`
+	Base                   string   `json:"base"`
+	ImageRef               string   `json:"imageRef"`
+	ImageDigest            string   `json:"imageDigest"`
+	SourceBundle           string   `json:"sourceBundle"`
+	SourceSHA              string   `json:"sourceSHA"`
+	AllowedHosts           []string `json:"allowedHosts"`
 }
 
 func (h *Host) profileConfig(name string) (HostConfig, error) {
@@ -74,6 +76,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 	c.Base, c.ImageRef, c.ImageDigest = p.Base, p.ImageRef, p.ImageDigest
 	c.SourceBundle, c.SourceSHA = p.SourceBundle, p.SourceSHA
 	c.AllowedHosts = append([]string(nil), p.AllowedHosts...)
+	c.ControllerCapabilities = append([]string(nil), p.ControllerCapabilities...)
 	return c, nil
 }
 
@@ -151,10 +154,16 @@ func randomID() string {
 }
 
 func OpenHost(config HostConfig) (*Host, error) {
+	if err := ValidateControllerCapabilities(config.ControllerCapabilities); err != nil {
+		return nil, err
+	}
 	if !filepath.IsAbs(config.Root) || config.MaxLive < 1 || config.MaxLive > 3 || config.CPUs < 1 || config.CPUs > 4 || config.MemoryBytes < 512<<20 || config.MemoryBytes > 8<<30 {
 		return nil, errors.New("invalid development resource configuration")
 	}
 	for name, p := range config.Profiles {
+		if err := ValidateControllerCapabilities(p.ControllerCapabilities); err != nil {
+			return nil, err
+		}
 		if !environmentID.MatchString(name) || !filepath.IsAbs(p.Base) || !filepath.IsAbs(p.SourceBundle) || !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(p.SourceSHA) || !regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(p.ImageDigest) || !strings.HasSuffix(p.ImageRef, "@"+p.ImageDigest) {
 			return nil, errors.New("invalid owner environment profile")
 		}
