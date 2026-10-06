@@ -34,8 +34,8 @@ func (fakeActor) Notify(string, any) error          { return nil }
 func (fakeActor) Answer(json.RawMessage, any) error { return nil }
 func (fakeActor) Done() <-chan struct{}             { return make(chan struct{}) }
 
-// A describing actor reports itself; its own declaration, not Codex's
-// userAgent, gates the controller bridge.
+// A describing actor reports itself. Its declaration cannot grant controller
+// access, and a provider-specific negotiation requires an owner selection.
 func TestDescribingActorGatesTheControllerBridge(t *testing.T) {
 	open := func(t *testing.T, caps []string) *Broker {
 		s, err := Open(t.TempDir()+"/state", "env-1", "session-1", "inc-1")
@@ -61,8 +61,8 @@ func TestDescribingActorGatesTheControllerBridge(t *testing.T) {
 		t.Fatalf("an unqualified adapter with controller capabilities: %v", err)
 	}
 	info.ControllerQualified = true
-	if err := open(t, []string{"inbox"}).Initialize(context.Background(), describedActor{info: info}); err != nil {
-		t.Fatalf("a qualified adapter: %v", err)
+	if err := open(t, []string{"inbox"}).Initialize(context.Background(), describedActor{info: info}); err == nil {
+		t.Fatal("an adapter's own claim granted controller authority")
 	}
 	// An actor that does not describe itself keeps the Codex userAgent gate.
 	if err := open(t, []string{"inbox"}).Initialize(context.Background(), fakeActor{}); err == nil {

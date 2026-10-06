@@ -246,6 +246,29 @@ image's login profile resets `PATH`. It leaves retained workspace and user files
 
 ## Adapter
 
+Adapter descriptions are reported facts, separate from execution authority.
+The guest owner selects the provider, adapter/version, platform and executable;
+the broker retains that executable's SHA-256 and a digest of its fixed launch
+arguments and explicit environment before creating a thread. Resume refuses a
+different selection. Raw launch-configuration and credential bytes do not enter
+this binding. Mutable provider user settings and tools still require their own
+effective-configuration compatibility evidence; this digest alone does not
+establish that evidence.
+
+The session report separates `owner_selection`, provider-specific negotiation
+and `controller_qualified`. A descriptor's `ControllerQualified` claim is
+ignored. Controller access requires a known qualified executable/version and
+platform plus that provider's native negotiation. The current policy contains
+the qualified Codex 0.160.0 Linux/arm64 and Darwin/arm64 executable pins. Claude
+2.1.280 can report its own adapter without passing a Codex user-agent gate; its
+controller bridge remains unqualified. An undescribed, unselected actor reports
+unknown identity rather than implicitly becoming Codex.
+
+A retained thread created before adapter binding was recorded cannot be
+retrospectively attributed by this interface. Continue it with its previous
+binary, or create a distinct environment; no automatic migration or task replay
+is performed.
+
 Codex app-server uses newline-delimited JSON RPC on stdio. Initialize the
 connection, start/resume a non-ephemeral thread in `/work`, and retain the thread
 and turn IDs. The broker remains connected when the controller disconnects.

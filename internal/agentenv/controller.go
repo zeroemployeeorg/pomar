@@ -336,9 +336,14 @@ func (b *Broker) controllerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /v1/controller/requests", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()
 		ready := b.controllerReady
+		info := b.adapter()
 		b.mu.Unlock()
 		state := b.Store.Snapshot()
-		respond(w, 200, map[string]any{"contract": "pomar.controller/v1", "native_method": b.adapter().NativeMethod, "adapter_version": b.adapter().Version, "supported": ready, "configured_capabilities": state.ControllerCapabilities, "requests": state.ControllerRequests})
+		method := ""
+		if ready {
+			method = "item/tool/call"
+		}
+		respond(w, 200, map[string]any{"contract": "pomar.controller/v1", "native_method": method, "reported_native_method": info.NativeMethod, "adapter_version": info.Version, "supported": ready, "configured_capabilities": state.ControllerCapabilities, "requests": state.ControllerRequests})
 	})
 	mux.HandleFunc("POST /v1/controller/requests/{id}/reply", func(w http.ResponseWriter, r *http.Request) {
 		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 64<<10))
