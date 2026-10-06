@@ -11,7 +11,7 @@ import (
 )
 
 func TestValidateAgent(t *testing.T) {
-	for _, ok := range []HostConfig{{}, {Agent: "codex"}, {Agent: "claude", AgentVersion: "2.1.280"}} {
+	for _, ok := range []HostConfig{{}, {Agent: "codex"}, {Agent: "claude", AgentVersion: "2.1.280"}, {Agent: "claude", AgentVersion: "2.1.280", ControllerCapabilities: []string{"inbox"}}} {
 		if err := ValidateAgent(ok); err != nil {
 			t.Errorf("%+v: %v", ok, err)
 		}
@@ -20,7 +20,8 @@ func TestValidateAgent(t *testing.T) {
 		{Agent: "claude"},
 		{Agent: "claude", AgentVersion: "latest"},
 		{Agent: "claude", AgentVersion: "2.1.280; rm"},
-		{Agent: "claude", AgentVersion: "2.1.280", ControllerCapabilities: []string{"inbox"}},
+		// The controller bridge is qualified per Claude Code version.
+		{Agent: "claude", AgentVersion: "2.1.279", ControllerCapabilities: []string{"inbox"}},
 		{Agent: "codex", AgentVersion: "1.0.0"},
 		{Agent: "other"},
 	} {
@@ -81,8 +82,8 @@ func TestBadAgentProfilesAreRefused(t *testing.T) {
 	base.ImageRef = "docker.io/library/node@" + base.ImageDigest
 	for name, mutate := range map[string]func(*EnvironmentProfile){
 		"claude without a version": func(p *EnvironmentProfile) { p.Agent = "claude" },
-		"claude with capabilities": func(p *EnvironmentProfile) {
-			p.Agent, p.AgentVersion, p.ControllerCapabilities = "claude", "2.1.280", []string{"inbox"}
+		"claude with capabilities on an unqualified version": func(p *EnvironmentProfile) {
+			p.Agent, p.AgentVersion, p.ControllerCapabilities = "claude", "2.1.279", []string{"inbox"}
 		},
 		"an archive without its sha256": func(p *EnvironmentProfile) {
 			p.Agent, p.AgentVersion, p.AgentArchive = "claude", "2.1.280", "/a.tar.gz"

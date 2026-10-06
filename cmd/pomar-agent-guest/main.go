@@ -43,10 +43,15 @@ const claudeBridgeSocket = "/run/pomar-claude/bridge.sock"
 func runClaudeMCP() error {
 	fs := flag.NewFlagSet("claude-mcp", flag.ContinueOnError)
 	socket := fs.String("socket", claudeBridgeSocket, "the root broker's bridge socket")
+	capabilities := fs.String("controller-capabilities", "", "the environment's controller capabilities, comma-separated, for the controller request tool")
 	if err := fs.Parse(os.Args[2:]); err != nil {
 		return err
 	}
-	return claudeactor.ServeMCP(os.Stdin, os.Stdout, func(tool string, args json.RawMessage) (claudeactor.BridgeReply, error) {
+	var names []string
+	if *capabilities != "" {
+		names = strings.Split(*capabilities, ",")
+	}
+	return claudeactor.ServeMCPController(os.Stdin, os.Stdout, names, func(tool string, args json.RawMessage) (claudeactor.BridgeReply, error) {
 		return claudeactor.Forward(*socket, tool, args)
 	})
 }
@@ -112,10 +117,8 @@ func run() error {
 	}
 	var actor agentenv.Actor
 	if *actorKind == "claude" {
-		if len(names) > 0 {
-			// The controller bridge is qualified for Codex app-server only.
-			return fmt.Errorf("controller capabilities are not qualified for -actor claude")
-		}
+		// Controller capabilities are refused at Initialize unless the
+		// controller bridge is qualified for this Claude Code version.
 		if *claudeVersion == "" {
 			return fmt.Errorf("-actor claude needs -claude-version")
 		}
@@ -124,11 +127,21 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		mcpConfig, err := claudeactor.MCPConfig(self, claudeBridgeSocket)
+		mcpConfig, err := claudeactor.MCPConfig(self, claudeBridgeSocket, names...)
 		if err != nil {
 			return err
 		}
+		// Not --bare: it never reads OAuth credentials (claude --help, 2.1.280).
+		// Only the environment's own user settings load; a task repository's
+		// project or local settings cannot add hooks or permission rules.
+		// The only MCP server is Pomar's bridge. The controller request tool,
+		// when configured, is the controlled exchange itself, so it is allowed
+		// rather than put to the permission tool. The owner's adapter selection
+		// binds these arguments, so it covers the controller tool too.
 		args := []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName}
+		if len(names) > 0 {
+			args = append(args, "--allowedTools", claudeactor.ControllerToolName)
+		}
 		env := claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin")
 		selection, err := agentenv.SelectAdapterBinary("anthropic", "claude-code", *claudeVersion, *claude, args, env)
 		if err != nil {
@@ -138,14 +151,11 @@ func run() error {
 			return err
 		}
 		ca := claudeactor.New(claudeactor.Config{
-			Version: *claudeVersion,
-			// Not --bare: it never reads OAuth credentials (claude --help, 2.1.280).
-			// Only the environment's own user settings load; a task repository's
-			// project or local settings cannot add hooks or permission rules.
-			// The only MCP server is Pomar's permission bridge.
-			Args:          args,
-			Start:         claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: env, UID: 1000, GID: 1000}.Start,
-			Authenticated: claudeactor.CredentialPresent(configDir),
+			Version:                *claudeVersion,
+			ControllerCapabilities: names,
+			Args:                   args,
+			Start:                  claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: env, UID: 1000, GID: 1000}.Start,
+			Authenticated:          claudeactor.CredentialPresent(configDir),
 			// Sign-in for the coding user, through the same relayed egress: the
 			// profile's allowedHosts must include claude.com and
 			// platform.claude.com for it, and api.anthropic.com for inference.

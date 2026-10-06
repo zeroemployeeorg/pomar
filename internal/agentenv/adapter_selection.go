@@ -91,8 +91,20 @@ func (b *Broker) ConfigureAdapterSelection(selection AdapterSelection) error {
 const qualifiedCodexLinux = "50b06603bdcdac39b714f5c3e68583c002b8ad8779ebfdaaf4932ff016b379c0"
 const qualifiedCodexDarwin = "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8adac6c4dbf1b4b"
 
+// Claude Code 2.1.280's controller request tool (internal/claudeactor),
+// qualified natively against this darwin/arm64 executable by
+// TestLiveControllerTool. Its linux/arm64 executable is pinned only after its
+// own in-guest qualification.
+const qualifiedClaudeDarwin = "387a5c5dcdbb815085edf0baf79591f9d8894efe922bceaf3d75b1b08055229d"
+
 func qualifiedController(selection *AdapterSelection) bool {
-	if selection == nil || selection.Provider != "openai" || selection.Name != "codex-app-server" || selection.Version != "0.160.0" {
+	if selection == nil {
+		return false
+	}
+	if selection.Provider == "anthropic" && selection.Name == "claude-code" && selection.Version == "2.1.280" {
+		return selection.Platform == "darwin/arm64" && selection.ExecutableSHA256 == qualifiedClaudeDarwin
+	}
+	if selection.Provider != "openai" || selection.Name != "codex-app-server" || selection.Version != "0.160.0" {
 		return false
 	}
 	return (selection.Platform == "linux/arm64" && selection.ExecutableSHA256 == qualifiedCodexLinux) || (selection.Platform == "darwin/arm64" && selection.ExecutableSHA256 == qualifiedCodexDarwin)
