@@ -30,6 +30,27 @@ public enum AgentEnvironment {
         public var cpus: Int
         public var memoryBytes: UInt64
         public var controllerCapabilities: [String]? = nil
+        /// The coding agent: nil or "codex" (the default), or "claude". The
+        /// pinned, hash-checked archive above is that agent's package.
+        public var agent: String? = nil
+        /// The pinned agent version, required for "claude".
+        public var agentVersion: String? = nil
+    }
+
+    /// The agent an environment runs; anything else is refused.
+    public static func validAgent(_ o: Options) -> Bool {
+        switch o.agent ?? "codex" {
+        case "codex":
+            return o.agentVersion == nil
+        case "claude":
+            // A dotted numeric version only; the controller bridge is
+            // qualified for Codex alone, so no capabilities with Claude Code.
+            guard let v = o.agentVersion, !v.isEmpty, v.count <= 32,
+                  v.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }), !v.hasPrefix("."), !v.hasSuffix(".") else { return false }
+            return (o.controllerCapabilities ?? []).isEmpty
+        default:
+            return false
+        }
     }
 
     public static func valid(_ o: Options) -> Bool {
@@ -38,7 +59,7 @@ public enum AgentEnvironment {
         }
         let sha: (String, Int) -> Bool = { s, n in s.count == n && s.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) } }
         return id(o.environment) && id(o.session) && id(o.incarnation)
-            && validControllerCapabilities(o.controllerCapabilities ?? [])
+            && validControllerCapabilities(o.controllerCapabilities ?? []) && validAgent(o)
             && sha(o.sourceSHA, 40) && sha(o.codexArchiveSHA256, 64)
             && o.cpus > 0 && o.cpus <= 4 && o.memoryBytes >= 512 * 1024 * 1024 && o.memoryBytes <= 8 * 1024 * 1024 * 1024
             && o.rootfs == o.directory + "/workspace.ext4"
@@ -63,21 +84,41 @@ public enum AgentEnvironment {
 
     /// Source is installed once. Restarts retain Git changes, Codex home and
     /// the root-owned broker journal. No host directory is mounted.
-    public static func setupCommand(sourceSHA: String) -> [String] {
+    public static func setupCommand(sourceSHA: String, agent: String = "codex") -> [String] {
+        // Codex: /opt/pomar-codex and CODEX_HOME. Claude Code: /opt/pomar-claude
+        // and CLAUDE_CONFIG_DIR, and a stale bridge socket from a previous
+        // boot removed (the broker refuses to replace one).
+        let claude = agent == "claude"
+        let path = claude ? "/opt/pomar-claude/bin" : "/opt/pomar-codex/codex-path"
+        let install = claude
+            ? "mkdir -p /opt/pomar-claude /pomar/job/.claude; chmod 700 /pomar/job/.claude; rm -f /run/pomar-claude/bridge.sock; "
+                + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-claude; "
+                + "chmod -R go-w /opt/pomar-claude; chown -R 1000:1000 /pomar/job"
+            : "mkdir -p /opt/pomar-codex /pomar/job/.codex; chmod 700 /pomar/job/.codex; "
+                + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-codex; "
+                + "chmod -R go-w /opt/pomar-codex; chown -R 1000:1000 /pomar/job"
         let script =
             "set -eu; " + Helper.registerJobUser + "; "
             + "mkdir -p /pomar/job /var/lib/pomar-agent /run/pomar; "
-            + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
+            + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=" + path + ":/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
             + "chmod 700 /var/lib/pomar-agent /run/pomar; rm -f /run/pomar/agent.sock; "
             + "if [ ! -e /var/lib/pomar-agent/workspace-created ]; then "
             + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle HEAD; "
             + "git -C /work -c advice.detachedHead=false checkout -q --detach " + sourceSHA + "; "
             + "test \"$(git -C /work rev-parse HEAD)\" = " + sourceSHA + "; "
             + "chown -R 1000:1000 /work /pomar/job; touch /var/lib/pomar-agent/workspace-created; fi; "
-            + "mkdir -p /opt/pomar-codex /pomar/job/.codex; chmod 700 /pomar/job/.codex; "
-            + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-codex; "
-            + "chmod -R go-w /opt/pomar-codex; chown -R 1000:1000 /pomar/job"
+            + install
         return ["/bin/sh", "-c", script]
+    }
+
+    /// The broker's arguments: the Codex default, or Claude Code's actor.
+    public static func brokerArguments(_ o: Options) -> [String] {
+        var args = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
+                    "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
+        if o.agent == "claude" {
+            args += ["-actor", "claude", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]
+        }
+        return args
     }
 
     public static func run(_ o: Options) async -> Int32 {
@@ -151,7 +192,7 @@ public enum AgentEnvironment {
             try await container.copyIn(from: URL(fileURLWithPath: o.codexArchive), to: URL(fileURLWithPath: "/pomar/codex-package.tar.gz"), mode: 0o600)
             try await container.copyIn(from: URL(fileURLWithPath: o.sourceBundle), to: URL(fileURLWithPath: "/pomar/source.bundle"), mode: 0o600)
             let setup = try await container.exec("agent-setup") { config in
-                config.arguments = setupCommand(sourceSHA: o.sourceSHA); config.stdout = out; config.stderr = out
+                config.arguments = setupCommand(sourceSHA: o.sourceSHA, agent: o.agent ?? "codex"); config.stdout = out; config.stderr = out
             }
             try await setup.start(); let result = try await setup.wait(); try await setup.delete()
             guard result.exitCode == 0 else { throw CocoaError(.fileReadCorruptFile) }
@@ -160,8 +201,7 @@ public enum AgentEnvironment {
             _ = try await Helper.startProxyShim(container, shim: o.shimBinary, output: out, name: "agent-go-shim",
                 listen: Helper.proxyListen, socket: Helper.proxySocket, ready: "/pomar/go.ready", copy: false)
             let broker = try await container.exec("agent-broker") { config in
-                config.arguments = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
-                                    "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
+                config.arguments = brokerArguments(o)
                 config.stdout = out; config.stderr = out
             }
             try await broker.start()

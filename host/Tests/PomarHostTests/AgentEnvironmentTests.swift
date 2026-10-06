@@ -87,3 +87,54 @@ import Foundation
     #expect(try Data(contentsOf: dir.appendingPathComponent("vm-status.json")) == original)
     #expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("vm-status-actor-one.json").path))
 }
+
+// The Codex default is byte-for-byte the setup command before the agent
+// option existed; Claude Code installs into its own paths.
+@Test func setupCommandKeepsCodexAndAddsClaude() {
+    let sha = String(repeating: "b", count: 40)
+    let codexGolden =
+        "set -eu; " + Helper.registerJobUser + "; "
+        + "mkdir -p /pomar/job /var/lib/pomar-agent /run/pomar; "
+        + "mkdir -p /etc/profile.d; printf '%s\\n' 'export PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin' > /etc/profile.d/pomar-agent.sh; chmod 644 /etc/profile.d/pomar-agent.sh; "
+        + "chmod 700 /var/lib/pomar-agent /run/pomar; rm -f /run/pomar/agent.sock; "
+        + "if [ ! -e /var/lib/pomar-agent/workspace-created ]; then "
+        + "git init -q /work; git -C /work fetch -q --tags /pomar/source.bundle HEAD; "
+        + "git -C /work -c advice.detachedHead=false checkout -q --detach " + sha + "; "
+        + "test \"$(git -C /work rev-parse HEAD)\" = " + sha + "; "
+        + "chown -R 1000:1000 /work /pomar/job; touch /var/lib/pomar-agent/workspace-created; fi; "
+        + "mkdir -p /opt/pomar-codex /pomar/job/.codex; chmod 700 /pomar/job/.codex; "
+        + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-codex; "
+        + "chmod -R go-w /opt/pomar-codex; chown -R 1000:1000 /pomar/job"
+    #expect(AgentEnvironment.setupCommand(sourceSHA: sha) == ["/bin/sh", "-c", codexGolden])
+    #expect(AgentEnvironment.setupCommand(sourceSHA: sha, agent: "codex") == ["/bin/sh", "-c", codexGolden])
+    let claude = AgentEnvironment.setupCommand(sourceSHA: sha, agent: "claude")[2]
+    #expect(claude.contains("export PATH=/opt/pomar-claude/bin:"))
+    #expect(claude.contains("mkdir -p /opt/pomar-claude /pomar/job/.claude; chmod 700 /pomar/job/.claude; rm -f /run/pomar-claude/bridge.sock;"))
+    #expect(claude.contains("tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-claude;"))
+    #expect(!claude.contains("pomar-codex"))
+}
+
+@Test func agentChoiceIsValidated() {
+    var o = agentOptions()
+    #expect(AgentEnvironment.valid(o))  // the Codex default
+    o.agent = "claude"; o.agentVersion = "2.1.280"
+    #expect(AgentEnvironment.valid(o))
+    for bad in [nil, "", "latest", "2.1.280; rm", ".2.1", "2.1."] {
+        o.agentVersion = bad
+        #expect(!AgentEnvironment.valid(o))
+    }
+    o.agentVersion = "2.1.280"; o.controllerCapabilities = ["inbox"]
+    #expect(!AgentEnvironment.valid(o))  // the controller bridge is Codex-only
+    var codex = agentOptions(); codex.agentVersion = "1.0.0"
+    #expect(!AgentEnvironment.valid(codex))
+    var other = agentOptions(); other.agent = "other"
+    #expect(!AgentEnvironment.valid(other))
+}
+
+@Test func brokerArgumentsNameTheAgent() {
+    let codex = AgentEnvironment.brokerArguments(agentOptions())
+    #expect(codex == ["/pomar/agent-guest", "-environment", "demo", "-session", "session-one", "-incarnation", "actor-one",
+                      "-source-sha", String(repeating: "b", count: 40), "-controller-capabilities", ""])
+    var o = agentOptions(); o.agent = "claude"; o.agentVersion = "2.1.280"
+    #expect(AgentEnvironment.brokerArguments(o) == codex + ["-actor", "claude", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", "2.1.280"])
+}
