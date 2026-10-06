@@ -135,6 +135,7 @@ type Control struct {
 }
 
 type State struct {
+	AdapterSelection       *AdapterSelection              `json:"adapter_selection,omitempty"`
 	ControllerCapabilities []string                       `json:"controller_capabilities,omitempty"`
 	ControllerRequests     map[string]ControllerRequest   `json:"controller_requests,omitempty"`
 	EnvironmentID          string                         `json:"environment_id"`

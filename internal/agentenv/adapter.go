@@ -1,24 +1,23 @@
 package agentenv
 
 // AdapterInfo is what an actor reports about its adapter: the session
-// report's adapter fields, and whether the controller bridge is qualified
-// for it (POMAR-CC proposal P2). The shared broker no longer assumes the
-// actor is Codex.
+// report's adapter fields. These are reported facts, not execution authority.
 type AdapterInfo struct {
 	Provider string
 	Name     string
 	Version  string
 	// Capabilities is the session report's "capabilities" object.
 	Capabilities map[string]any
-	// ControllerQualified is true only when the controller bridge's native
-	// tool exchange is qualified for this adapter and version.
+	// Deprecated: an actor's qualification claim is ignored. Qualification
+	// comes from the owner's pinned selection and Pomar's capability policy.
 	ControllerQualified bool
 	// NativeMethod names the adapter's native controller request method.
 	NativeMethod string
 }
 
 // Describer is implemented by an actor that reports its own adapter. An
-// actor that does not is described as Codex app-server 0.160.0, as before.
+// actor that does not is unknown until the owner selects it and its protocol
+// negotiation confirms the selected identity.
 type Describer interface {
 	Adapter() AdapterInfo
 }
@@ -27,17 +26,24 @@ type Describer interface {
 func codexAdapter() AdapterInfo {
 	return AdapterInfo{
 		Provider: "openai", Name: "codex-app-server", Version: "0.160.0",
-		Capabilities:        map[string]any{"version": "pomar.codex-capabilities/v1", "supported_operations": []string{"session.inspect", "login.device_code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"}, "permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, "permission_decisions": []string{"accept", "decline", "cancel"}},
-		ControllerQualified: true, NativeMethod: "item/tool/call",
+		Capabilities: map[string]any{"version": "pomar.codex-capabilities/v1", "supported_operations": []string{"session.inspect", "login.device_code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"}, "permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, "permission_decisions": []string{"accept", "decline", "cancel"}},
+		NativeMethod: "item/tool/call",
 	}
 }
 
-// adapter is the actor's own description, or Codex's for an actor without one.
+// adapter reports the actor's description without treating it as a grant.
 func (b *Broker) adapter() AdapterInfo {
 	if d, ok := b.Actor.(Describer); ok {
 		return d.Adapter()
 	}
-	return codexAdapter()
+	selection := b.Store.Snapshot().AdapterSelection
+	if selection != nil && selection.Provider == "openai" && b.negotiatedCodex {
+		if selection.Version == "0.160.0" {
+			return codexAdapter()
+		}
+		return AdapterInfo{Provider: selection.Provider, Name: selection.Name, Version: selection.Version, Capabilities: map[string]any{}}
+	}
+	return AdapterInfo{Provider: "unknown", Name: "unknown", Version: "unknown", Capabilities: map[string]any{}}
 }
 
 func (a AdapterInfo) report() map[string]any {

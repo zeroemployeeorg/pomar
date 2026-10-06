@@ -128,14 +128,23 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		args := []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName}
+		env := claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin")
+		selection, err := agentenv.SelectAdapterBinary("anthropic", "claude-code", *claudeVersion, *claude, args, env)
+		if err != nil {
+			return err
+		}
+		if err = broker.ConfigureAdapterSelection(selection); err != nil {
+			return err
+		}
 		ca := claudeactor.New(claudeactor.Config{
 			Version: *claudeVersion,
 			// Not --bare: it never reads OAuth credentials (claude --help, 2.1.280).
 			// Only the environment's own user settings load; a task repository's
 			// project or local settings cannot add hooks or permission rules.
 			// The only MCP server is Pomar's permission bridge.
-			Args:          []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName},
-			Start:         claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"), UID: 1000, GID: 1000}.Start,
+			Args:          args,
+			Start:         claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: env, UID: 1000, GID: 1000}.Start,
 			Authenticated: claudeactor.CredentialPresent(configDir),
 			// Sign-in for the coding user, through the same relayed egress: the
 			// profile's allowedHosts must include claude.com and
@@ -156,6 +165,13 @@ func run() error {
 	cmd := exec.Command(*codex, "app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"", "-c", "analytics.enabled=false")
 	cmd.Dir = *workspace
 	cmd.Env = []string{"HOME=/pomar/job", "CODEX_HOME=/pomar/job/.codex", "PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "HTTPS_PROXY=http://127.0.0.1:7072", "HTTP_PROXY=http://127.0.0.1:7072", "ALL_PROXY=http://127.0.0.1:7072", "GOPROXY=http://127.0.0.1:7070", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly"}
+	selection, err := agentenv.SelectAdapterBinary("openai", "codex-app-server", "0.160.0", cmd.Path, cmd.Args[1:], cmd.Env)
+	if err != nil {
+		return err
+	}
+	if err = broker.ConfigureAdapterSelection(selection); err != nil {
+		return err
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 1000, Gid: 1000}, Setpgid: true}
 	in, err := cmd.StdinPipe()
 	if err != nil {

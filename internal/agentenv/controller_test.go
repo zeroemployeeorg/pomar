@@ -43,6 +43,9 @@ func controllerFixture(t *testing.T) (*Broker, *controllerActor, Message) {
 	s := newStore(t)
 	b := NewBroker(s, t.TempDir())
 	a := &controllerActor{fixtureActor: actorFixture(), version: "0.160.0"}
+	if err := b.ConfigureAdapterSelection(qualifiedFixtureSelection()); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.ConfigureController([]string{"inbox", "ack", "answer"}); err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +244,9 @@ func TestControllerAdapterConfigurationAndHTTPBounds(t *testing.T) {
 		}
 	}
 	b := NewBroker(newStore(t), t.TempDir())
+	if err := b.ConfigureAdapterSelection(qualifiedFixtureSelection()); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.ConfigureController([]string{"inbox"}); err != nil {
 		t.Fatal(err)
 	}

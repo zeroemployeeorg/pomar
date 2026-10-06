@@ -38,6 +38,7 @@ type Broker struct {
 	loginPending      bool
 	resumeFailure     error
 	controllerReady   bool
+	negotiatedCodex   bool
 	controllerPending map[string]json.RawMessage
 }
 
@@ -49,6 +50,10 @@ func (b *Broker) Initialize(ctx context.Context, actor Actor) error {
 	b.Actor = actor
 	params := map[string]any{"clientInfo": map[string]string{"name": "pomar", "title": "Pomar", "version": "0.1.0"}}
 	enabled := len(b.Store.Snapshot().ControllerCapabilities) > 0
+	selection := b.Store.Snapshot().AdapterSelection
+	if enabled && !qualifiedController(selection) {
+		return errors.New("controller tools are not qualified for the owner-selected adapter")
+	}
 	if enabled {
 		params["capabilities"] = map[string]bool{"experimentalApi": true}
 	}
@@ -56,20 +61,29 @@ func (b *Broker) Initialize(ctx context.Context, actor Actor) error {
 	if err != nil {
 		return err
 	}
-	if enabled {
+	if selection != nil {
 		if d, ok := actor.(Describer); ok {
-			// A describing actor declares its own qualification (P2).
-			if info := d.Adapter(); !info.ControllerQualified {
-				return fmt.Errorf("controller tools are not qualified for %s %s", info.Name, info.Version)
+			info := d.Adapter()
+			if info.Provider != selection.Provider || info.Name != selection.Name || info.Version != selection.Version {
+				return errors.New("reported adapter does not match owner selection")
 			}
-		} else {
+		}
+		// Codex-specific negotiation is not imposed on Claude's protocol.
+		if selection.Provider == "openai" {
 			var out struct {
 				UserAgent string `json:"userAgent"`
 			}
-			if json.Unmarshal(raw, &out) != nil || !strings.Contains(out.UserAgent, "/0.160.0 ") {
-				return errors.New("controller tools require negotiated codex app-server 0.160.0")
+			if json.Unmarshal(raw, &out) != nil || !strings.Contains(out.UserAgent, "/"+selection.Version+" ") {
+				return errors.New("selected Codex version was not negotiated")
 			}
+			b.mu.Lock()
+			b.negotiatedCodex = true
+			b.mu.Unlock()
+		} else if _, ok := actor.(Describer); !ok {
+			return errors.New("selected provider requires its own adapter description")
 		}
+	}
+	if enabled {
 		b.mu.Lock()
 		b.controllerReady = true
 		b.mu.Unlock()
@@ -295,7 +309,13 @@ func (b *Broker) Handler() http.Handler {
 			}
 		}
 		b.mu.Unlock()
-		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "recovery": recovery, "adapter": b.adapter().report()})
+		b.mu.Lock()
+		adapter := b.adapter().report()
+		adapter["owner_selection"] = b.Store.Snapshot().AdapterSelection
+		adapter["controller_qualified"] = b.controllerReady
+		adapter["codex_negotiated"] = b.negotiatedCodex
+		b.mu.Unlock()
+		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "recovery": recovery, "adapter": adapter})
 	})
 	mux.HandleFunc("POST /v1/login", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
