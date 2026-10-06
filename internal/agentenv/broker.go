@@ -333,6 +333,45 @@ func (b *Broker) Handler() http.Handler {
 		}
 		respond(w, 200, map[string]any{"operation": b.Store.Snapshot().Controls[req.OperationID], "login": json.RawMessage(raw)})
 	})
+	// Completing a sign-in that needs a code from the person (Claude Code's
+	// OAuth). The code reaches the actor only: the journal records the login
+	// ID, never the code, and the response carries no credential.
+	mux.HandleFunc("POST /v1/login/complete", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Incarnation string `json:"expected_incarnation"`
+			OperationID string `json:"operation_id"`
+			LoginID     string `json:"login_id"`
+			Code        string `json:"code"`
+		}
+		if !decode(w, r, &req) {
+			return
+		}
+		if req.Incarnation != b.Store.Snapshot().Incarnation {
+			failure(w, ErrStale)
+			return
+		}
+		control, dispatch, err := b.Store.BeginControl("login-complete", req.OperationID, req.Incarnation, map[string]string{"login_id": req.LoginID})
+		if err != nil {
+			failure(w, err)
+			return
+		}
+		if !dispatch {
+			respond(w, 200, control)
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+		defer cancel()
+		raw, err := b.Actor.Call(ctx, "account/login/complete", map[string]string{"loginId": req.LoginID, "code": req.Code})
+		if journalErr := b.Store.FinishControl(req.OperationID, err == nil); journalErr != nil {
+			failure(w, journalErr)
+			return
+		}
+		if err != nil {
+			failure(w, errors.New("sign-in completion uncertain; inspect account status"))
+			return
+		}
+		respond(w, 200, map[string]any{"operation": b.Store.Snapshot().Controls[req.OperationID], "login": json.RawMessage(raw)})
+	})
 	mux.HandleFunc("POST /v1/tasks", func(w http.ResponseWriter, r *http.Request) {
 		var req Task
 		if !decode(w, r, &req) {
