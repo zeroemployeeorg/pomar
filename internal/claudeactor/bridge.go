@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 )
@@ -55,10 +56,109 @@ func (a *Actor) serveBridgeConn(c net.Conn) {
 	c.Write(append(b, '\n'))
 }
 
+// A bridge request is honoured only when it names a tool call Claude Code
+// itself emitted on stdout in the current turn, with the same tool and the
+// same input, once per call (adviser note r41 §3.2). Qualified on 2.1.280:
+// the permission call carries tool_use_id, and the assistant tool_use line
+// arrives on stdout before it. Anything else, including a request the coding
+// user writes to the socket directly, is refused unrecorded.
+
+// toolUseWait bounds how long a bridge request waits for its tool_use line.
+var toolUseWait = 5 * time.Second
+
+// maxBridgeWaiting caps bridge requests waiting at once, so the queue cannot
+// be flooded.
+const maxBridgeWaiting = 16
+
+type toolUse struct {
+	name      string
+	input     string // canonical JSON
+	requested bool
+}
+
+// recordToolUses notes the tool_use blocks of an assistant message in the
+// current turn and wakes requests waiting for them; a.mu must be held.
+func (a *Actor) recordToolUses(message json.RawMessage) {
+	var m struct {
+		Content []struct {
+			Type  string          `json:"type"`
+			ID    string          `json:"id"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
+		} `json:"content"`
+	}
+	if json.Unmarshal(message, &m) != nil {
+		return
+	}
+	for _, c := range m.Content {
+		if c.Type != "tool_use" || c.ID == "" {
+			continue
+		}
+		if a.toolUses == nil {
+			a.toolUses = map[string]*toolUse{}
+		}
+		if _, seen := a.toolUses[c.ID]; !seen {
+			a.toolUses[c.ID] = &toolUse{name: c.Name, input: canonical(c.Input)}
+		}
+	}
+	if a.toolUseSeen != nil {
+		close(a.toolUseSeen)
+		a.toolUseSeen = nil
+	}
+}
+
+func canonical(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return ""
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
+}
+
+// bindToolUse waits for the named tool call and claims it; a.mu must be held,
+// and is held again on return.
+func (a *Actor) bindToolUse(id, name string, input json.RawMessage) string {
+	if id == "" {
+		return "the request names no tool call"
+	}
+	deadline := time.Now().Add(toolUseWait)
+	for {
+		if u, ok := a.toolUses[id]; ok {
+			switch {
+			case u.requested:
+				return "that tool call has already been asked about"
+			case u.name != name || u.input != canonical(input):
+				return "the request does not match the tool call"
+			}
+			u.requested = true
+			return ""
+		}
+		left := time.Until(deadline)
+		if left <= 0 {
+			return "no such tool call in this turn"
+		}
+		if a.toolUseSeen == nil {
+			a.toolUseSeen = make(chan struct{})
+		}
+		seen := a.toolUseSeen
+		a.mu.Unlock()
+		select {
+		case <-seen:
+		case <-time.After(left):
+		case <-a.done:
+			a.mu.Lock()
+			return "the actor ended"
+		}
+		a.mu.Lock()
+	}
+}
+
 func (a *Actor) requestPermission(args json.RawMessage) string {
 	var p struct {
-		ToolName string          `json:"tool_name"`
-		Input    json.RawMessage `json:"input"`
+		ToolName  string          `json:"tool_name"`
+		Input     json.RawMessage `json:"input"`
+		ToolUseID string          `json:"tool_use_id"`
 	}
 	if json.Unmarshal(args, &p) != nil || p.ToolName == "" {
 		return denyText("malformed permission request")
@@ -67,6 +167,21 @@ func (a *Actor) requestPermission(args json.RawMessage) string {
 	if a.turn == "" || a.thread == "" {
 		a.mu.Unlock()
 		return denyText("no active Pomar turn")
+	}
+	if a.bridgeWaiting >= maxBridgeWaiting {
+		a.mu.Unlock()
+		return denyText("too many waiting requests")
+	}
+	a.bridgeWaiting++
+	turnAtStart := a.turn
+	refusal := a.bindToolUse(p.ToolUseID, p.ToolName, p.Input)
+	a.bridgeWaiting--
+	if refusal == "" && a.turn != turnAtStart {
+		refusal = "the turn ended"
+	}
+	if refusal != "" {
+		a.mu.Unlock()
+		return denyText(refusal)
 	}
 	a.nextPermission++
 	id, _ := json.Marshal(fmt.Sprintf("claude-permission-%d", a.nextPermission))
