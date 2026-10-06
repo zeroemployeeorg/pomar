@@ -13,11 +13,21 @@ import (
 )
 
 // shortDir is a temporary directory with a short path: a Unix socket's path is
-// limited to 104 bytes on macOS, and t.TempDir's paths can be longer.
+// limited to 103 bytes plus a terminator on macOS, and t.TempDir's paths can
+// be longer. Budget the deepest fixture socket, including MkdirTemp's maximum
+// ten-digit suffix, against the canonical root: a short symlink is not enough.
 func shortDir(t *testing.T) string {
 	t.Helper()
-	// Leave room for root/manager/manager.sock beneath the caller's TMPDIR.
-	d, err := os.MkdirTemp("", "p")
+	root, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	longest := filepath.Join(root, strings.Repeat("0", 10), "attempts", "npm-1", "npmproxy.sock")
+	if len(longest) > 103 {
+		t.Fatalf("canonical TMPDIR leaves no room for fixture sockets: longest path is %d bytes, limit 103; use a shorter physical temporary root", len(longest))
+	}
+	// An empty prefix leaves all remaining bytes for the generated suffix.
+	d, err := os.MkdirTemp(root, "")
 	if err != nil {
 		t.Fatal(err)
 	}
