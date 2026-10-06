@@ -29,6 +29,7 @@ public enum AgentEnvironment {
         public var goProxySocket: String
         public var cpus: Int
         public var memoryBytes: UInt64
+        public var controllerCapabilities: [String]? = nil
     }
 
     public static func valid(_ o: Options) -> Bool {
@@ -37,11 +38,19 @@ public enum AgentEnvironment {
         }
         let sha: (String, Int) -> Bool = { s, n in s.count == n && s.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) } }
         return id(o.environment) && id(o.session) && id(o.incarnation)
+            && validControllerCapabilities(o.controllerCapabilities ?? [])
             && sha(o.sourceSHA, 40) && sha(o.codexArchiveSHA256, 64)
             && o.cpus > 0 && o.cpus <= 4 && o.memoryBytes >= 512 * 1024 * 1024 && o.memoryBytes <= 8 * 1024 * 1024 * 1024
             && o.rootfs == o.directory + "/workspace.ext4"
             && o.controlSocket == o.directory + "/agent.sock"
             && o.egressSocket == o.directory + "/egress.sock"
+    }
+
+    public static func validControllerCapabilities(_ names: [String]) -> Bool {
+        names.count <= 16 && Set(names).count == names.count && names.allSatisfy { name in
+            !name.isEmpty && name.utf8.count <= 64 && name.first!.isASCII && ("a"..."z").contains(String(name.first!))
+                && name.allSatisfy { $0.isASCII && (("a"..."z").contains(String($0)) || ("0"..."9").contains(String($0)) || $0 == "_") }
+        }
     }
 
     static func status(_ o: Options, _ phase: String, stopped: Bool = false, error: String = "") {
@@ -151,7 +160,8 @@ public enum AgentEnvironment {
             _ = try await Helper.startProxyShim(container, shim: o.shimBinary, output: out, name: "agent-go-shim",
                 listen: Helper.proxyListen, socket: Helper.proxySocket, ready: "/pomar/go.ready", copy: false)
             let broker = try await container.exec("agent-broker") { config in
-                config.arguments = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA]
+                config.arguments = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
+                                    "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
                 config.stdout = out; config.stderr = out
             }
             try await broker.start()

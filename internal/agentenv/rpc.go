@@ -89,7 +89,11 @@ func (r *RPC) write(v any) error {
 		return err
 	}
 	b = append(b, '\n')
-	_, err = r.w.Write(b)
+	var n int
+	n, err = r.w.Write(b)
+	if err == nil && n != len(b) {
+		err = io.ErrShortWrite
+	}
 	return err
 }
 

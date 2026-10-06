@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -33,6 +34,7 @@ func run() error {
 	codex := flag.String("codex", "/opt/pomar-codex/bin/codex", "pinned codex binary")
 	workspace := flag.String("workspace", "/work", "isolated workspace")
 	sourceSHA := flag.String("source-sha", "", "initial source commit")
+	capabilities := flag.String("controller-capabilities", "", "owner-configured comma-separated controller capability names")
 	flag.Parse()
 	if os.Getuid() != 0 {
 		return fmt.Errorf("guest broker requires root inside its VM")
@@ -46,6 +48,13 @@ func run() error {
 		return err
 	}
 	broker := agentenv.NewBroker(store, *workspace)
+	var names []string
+	if *capabilities != "" {
+		names = strings.Split(*capabilities, ",")
+	}
+	if err = broker.ConfigureController(names); err != nil {
+		return err
+	}
 	cmd := exec.Command(*codex, "app-server", "--listen", "stdio://", "-c", "cli_auth_credentials_store=\"file\"", "-c", "analytics.enabled=false")
 	cmd.Dir = *workspace
 	cmd.Env = []string{"HOME=/pomar/job", "CODEX_HOME=/pomar/job/.codex", "PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "HTTPS_PROXY=http://127.0.0.1:7072", "HTTP_PROXY=http://127.0.0.1:7072", "ALL_PROXY=http://127.0.0.1:7072", "GOPROXY=http://127.0.0.1:7070", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly"}

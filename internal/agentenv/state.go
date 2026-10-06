@@ -133,23 +133,25 @@ type Control struct {
 }
 
 type State struct {
-	EnvironmentID     string                         `json:"environment_id"`
-	SessionID         string                         `json:"session_id"`
-	Incarnation       string                         `json:"incarnation"`
-	ThreadID          string                         `json:"thread_id,omitempty"`
-	Operations        map[string]Operation           `json:"operations"`
-	Events            []Event                        `json:"events"`
-	RejectedEvents    []RejectedEvent                `json:"rejected_events,omitempty"`
-	Controls          map[string]Control             `json:"controls"`
-	Continuations     map[string]ContinuationBinding `json:"continuations,omitempty"`
-	ContractVersion   string                         `json:"contract_version"`
-	WorkspaceID       string                         `json:"workspace_id"`
-	SourceSHA         string                         `json:"source_sha,omitempty"`
-	ScopeID           string                         `json:"scope_id"`
-	RequestedModel    string                         `json:"requested_model"`
-	RequestedProvider string                         `json:"requested_provider"`
-	ModelObservation  ModelObservation               `json:"model_observation"`
-	ModelObservations []ModelObservation             `json:"model_observations,omitempty"`
+	ControllerCapabilities []string                       `json:"controller_capabilities,omitempty"`
+	ControllerRequests     map[string]ControllerRequest   `json:"controller_requests,omitempty"`
+	EnvironmentID          string                         `json:"environment_id"`
+	SessionID              string                         `json:"session_id"`
+	Incarnation            string                         `json:"incarnation"`
+	ThreadID               string                         `json:"thread_id,omitempty"`
+	Operations             map[string]Operation           `json:"operations"`
+	Events                 []Event                        `json:"events"`
+	RejectedEvents         []RejectedEvent                `json:"rejected_events,omitempty"`
+	Controls               map[string]Control             `json:"controls"`
+	Continuations          map[string]ContinuationBinding `json:"continuations,omitempty"`
+	ContractVersion        string                         `json:"contract_version"`
+	WorkspaceID            string                         `json:"workspace_id"`
+	SourceSHA              string                         `json:"source_sha,omitempty"`
+	ScopeID                string                         `json:"scope_id"`
+	RequestedModel         string                         `json:"requested_model"`
+	RequestedProvider      string                         `json:"requested_provider"`
+	ModelObservation       ModelObservation               `json:"model_observation"`
+	ModelObservations      []ModelObservation             `json:"model_observations,omitempty"`
 }
 
 // ModelObservation is adapter-reported selection, not backend routing attestation.
@@ -240,6 +242,19 @@ func Open(dir, environment, session, incarnation string) (*Store, error) {
 	}
 	if m.s.Controls == nil {
 		m.s.Controls = map[string]Control{}
+	}
+	if m.s.ControllerRequests == nil {
+		m.s.ControllerRequests = map[string]ControllerRequest{}
+	}
+	for id, request := range m.s.ControllerRequests {
+		if request.State == "dispatching" {
+			request.State = "acceptance_unknown"
+			m.s.ControllerRequests[id] = request
+		}
+		if request.State == "pending" && request.Binding.Incarnation != m.s.Incarnation {
+			request.State = "fenced"
+			m.s.ControllerRequests[id] = request
+		}
 	}
 	m.s.ContractVersion = "pomar.agent/v1"
 	m.s.ModelObservation = ModelObservation{Status: "unknown"}

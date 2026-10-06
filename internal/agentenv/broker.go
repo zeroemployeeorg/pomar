@@ -28,25 +28,44 @@ type Actor interface {
 }
 
 type Broker struct {
-	Store         *Store
-	Actor         Actor
-	Workspace     string
-	incarnation   string
-	mu            sync.Mutex
-	pending       map[string]Message
-	authenticated bool
-	loginPending  bool
-	resumeFailure error
+	Store             *Store
+	Actor             Actor
+	Workspace         string
+	incarnation       string
+	mu                sync.Mutex
+	pending           map[string]Message
+	authenticated     bool
+	loginPending      bool
+	resumeFailure     error
+	controllerReady   bool
+	controllerPending map[string]json.RawMessage
 }
 
 func NewBroker(store *Store, workspace string) *Broker {
-	return &Broker{Store: store, Workspace: workspace, incarnation: store.Snapshot().Incarnation, pending: map[string]Message{}}
+	return &Broker{Store: store, Workspace: workspace, incarnation: store.Snapshot().Incarnation, pending: map[string]Message{}, controllerPending: map[string]json.RawMessage{}}
 }
 
 func (b *Broker) Initialize(ctx context.Context, actor Actor) error {
 	b.Actor = actor
-	if _, err := actor.Call(ctx, "initialize", map[string]any{"clientInfo": map[string]string{"name": "pomar", "title": "Pomar", "version": "0.1.0"}}); err != nil {
+	params := map[string]any{"clientInfo": map[string]string{"name": "pomar", "title": "Pomar", "version": "0.1.0"}}
+	enabled := len(b.Store.Snapshot().ControllerCapabilities) > 0
+	if enabled {
+		params["capabilities"] = map[string]bool{"experimentalApi": true}
+	}
+	raw, err := actor.Call(ctx, "initialize", params)
+	if err != nil {
 		return err
+	}
+	if enabled {
+		var out struct {
+			UserAgent string `json:"userAgent"`
+		}
+		if json.Unmarshal(raw, &out) != nil || !strings.Contains(out.UserAgent, "/0.160.0 ") {
+			return errors.New("controller tools require negotiated codex app-server 0.160.0")
+		}
+		b.mu.Lock()
+		b.controllerReady = true
+		b.mu.Unlock()
 	}
 	if err := actor.Notify("initialized", map[string]any{}); err != nil {
 		return err
@@ -67,6 +86,9 @@ func (b *Broker) Observe(m Message) error {
 	if m.Method == "account/login/completed" {
 		b.loginPending = false
 		return nil
+	}
+	if m.Method == "item/tool/call" && len(m.ID) > 0 {
+		return b.observeControllerRequest(m)
 	}
 	if !(strings.HasPrefix(m.Method, "item/") || m.Method == "turn/started" || m.Method == "turn/completed" || m.Method == "error") {
 		return nil
@@ -140,7 +162,17 @@ func (b *Broker) Submit(task Task) (Operation, error) {
 	}
 	s := b.Store.Snapshot()
 	if s.ThreadID == "" {
-		raw, err := b.Actor.Call(ctx, "thread/start", map[string]any{"cwd": b.Workspace, "approvalPolicy": "on-request", "sandbox": "danger-full-access", "ephemeral": false})
+		params := map[string]any{"cwd": b.Workspace, "approvalPolicy": "on-request", "sandbox": "danger-full-access", "ephemeral": false}
+		if len(s.ControllerCapabilities) > 0 {
+			b.mu.Lock()
+			ready := b.controllerReady
+			b.mu.Unlock()
+			if !ready {
+				return unknown(errors.New("controller tools not negotiated"))
+			}
+			params["dynamicTools"] = controllerTools(s.ControllerCapabilities)
+		}
+		raw, err := b.Actor.Call(ctx, "thread/start", params)
 		if err != nil {
 			return unknown(err)
 		}
@@ -224,6 +256,7 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func (b *Broker) Handler() http.Handler {
 	mux := http.NewServeMux()
+	b.controllerRoutes(mux)
 	mux.HandleFunc("POST /v1/continuations", b.continuationHandler)
 	mux.HandleFunc("GET /v1/workspace", func(w http.ResponseWriter, r *http.Request) {
 		b.mu.Lock()

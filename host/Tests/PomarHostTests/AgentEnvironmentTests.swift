@@ -41,6 +41,15 @@ func agentOptions() -> AgentEnvironment.Options {
     }
 }
 
+@Test func controllerCapabilitiesRemainOwnerNamedAndBounded() {
+    for invalid in [["inbox", "inbox"], ["/bin/sh"], ["Socket"], [String(repeating: "a", count: 65)], Array(0...16).map { "cap\($0)" }] {
+        var o = agentOptions(); o.controllerCapabilities = invalid
+        #expect(!AgentEnvironment.valid(o))
+    }
+    var o = agentOptions(); o.controllerCapabilities = ["inbox", "ack", "answer"]
+    #expect(AgentEnvironment.valid(o))
+}
+
 import Darwin
 import Foundation
 

@@ -20,7 +20,7 @@ func TestProjectProfileKeepsSeparateSourceAndNetworkOnReopen(t *testing.T) {
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
-	p := EnvironmentProfile{Base: filepath.Join(root, "python.ext4"), ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: filepath.Join(root, "zeocore.bundle"), SourceSHA: strings.Repeat("b", 40), AllowedHosts: []string{"pypi.org"}}
+	p := EnvironmentProfile{Base: filepath.Join(root, "python.ext4"), ImageDigest: "sha256:" + strings.Repeat("a", 64), SourceBundle: filepath.Join(root, "zeocore.bundle"), SourceSHA: strings.Repeat("b", 40), AllowedHosts: []string{"pypi.org"}, ControllerCapabilities: []string{"inbox"}}
 	p.ImageRef = "docker.io/library/python@" + p.ImageDigest
 	cfg := HostConfig{Root: root, MaxLive: 1, CPUs: 2, MemoryBytes: 4 << 30, SourceSHA: strings.Repeat("c", 40), AllowedHosts: []string{"auth.example"}, Profiles: map[string]EnvironmentProfile{"python-project": p}}
 	h, err := OpenHost(cfg)
@@ -56,6 +56,9 @@ func TestProjectProfileKeepsSeparateSourceAndNetworkOnReopen(t *testing.T) {
 	}
 	if e.Spec.SourceSHA != p.SourceSHA || e.Spec.ImageDigest != p.ImageDigest || e.Spec.Profile != "python-project" || e.Spec.Profiles != nil {
 		t.Fatal("project inputs leaked or lost", e.Spec)
+	}
+	if len(e.Spec.ControllerCapabilities) != 1 || e.Spec.ControllerCapabilities[0] != "inbox" {
+		t.Fatal("owner capabilities lost")
 	}
 	if r := create(body); r.Code != 200 {
 		t.Fatal("healthy duplicate refused", r.Code)
