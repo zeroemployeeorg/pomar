@@ -68,10 +68,10 @@ func TestUnsupportedPermissionResponseIsExplicit(t *testing.T) {
 	a := actorFixture()
 	b.Actor = a
 	id := json.RawMessage(`33`)
-	b.pending[permissionKey(id)] = Message{ID: id, Method: "item/permissions/requestApproval"}
+	b.pending[permissionKey(b.incarnation, id)] = Message{ID: id, Method: "item/permissions/requestApproval"}
 	body := `{"expected_incarnation":"actor-one","operation_id":"unsupported","decision":"accept"}`
 	w := httptest.NewRecorder()
-	b.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/permissions/"+permissionKey(id), strings.NewReader(body)))
+	b.Handler().ServeHTTP(w, httptest.NewRequest("POST", "/v1/permissions/"+permissionKey(b.incarnation, id), strings.NewReader(body)))
 	if w.Code != 501 || !strings.Contains(w.Body.String(), `"status":"unsupported"`) || a.answers != 0 {
 		t.Fatal(w.Code, w.Body.String())
 	}

@@ -145,7 +145,7 @@ func TestOldIncarnationCannotAnswerOrExecute(t *testing.T) {
 	if err := b.Observe(Message{ID: id, Method: "item/commandExecution/requestApproval", Params: json.RawMessage(`{"command":"go test ./cmd/pomar-shim"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"/v1/tasks", "/v1/permissions/" + permissionKey(id), "/v1/interrupt", "/v1/login"} {
+	for _, path := range []string{"/v1/tasks", "/v1/permissions/" + permissionKey(b.incarnation, id), "/v1/interrupt", "/v1/login"} {
 		body := `{"expected_incarnation":"old"}`
 		if path == "/v1/tasks" {
 			body = `{"expected_incarnation":"old","operation_id":"task","text":"edit"}`
