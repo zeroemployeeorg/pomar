@@ -57,11 +57,18 @@ func (b *Broker) Initialize(ctx context.Context, actor Actor) error {
 		return err
 	}
 	if enabled {
-		var out struct {
-			UserAgent string `json:"userAgent"`
-		}
-		if json.Unmarshal(raw, &out) != nil || !strings.Contains(out.UserAgent, "/0.160.0 ") {
-			return errors.New("controller tools require negotiated codex app-server 0.160.0")
+		if d, ok := actor.(Describer); ok {
+			// A describing actor declares its own qualification (P2).
+			if info := d.Adapter(); !info.ControllerQualified {
+				return fmt.Errorf("controller tools are not qualified for %s %s", info.Name, info.Version)
+			}
+		} else {
+			var out struct {
+				UserAgent string `json:"userAgent"`
+			}
+			if json.Unmarshal(raw, &out) != nil || !strings.Contains(out.UserAgent, "/0.160.0 ") {
+				return errors.New("controller tools require negotiated codex app-server 0.160.0")
+			}
 		}
 		b.mu.Lock()
 		b.controllerReady = true
@@ -288,7 +295,7 @@ func (b *Broker) Handler() http.Handler {
 			}
 		}
 		b.mu.Unlock()
-		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "recovery": recovery, "adapter": map[string]any{"provider": "openai", "name": "codex-app-server", "version": "0.160.0", "capabilities": map[string]any{"version": "pomar.codex-capabilities/v1", "supported_operations": []string{"session.inspect", "login.device_code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"}, "permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"}, "permission_decisions": []string{"accept", "decline", "cancel"}}}})
+		respond(w, 200, map[string]any{"session": b.Store.Snapshot(), "actor": status, "environment_alive": err == nil, "authenticated": ok, "recovery": recovery, "adapter": b.adapter().report()})
 	})
 	mux.HandleFunc("POST /v1/login", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
