@@ -161,6 +161,17 @@ limits the binary diff to 4 MiB and limits untracked regular files to 32 files
 and 4 MiB total. Symlinks and paths escaping the workspace are refused. This
 is a bounded development export, not an immutable publication artifact.
 
+Result export returns HTTP 422 when changed tracked or untracked paths name a
+credential store or private configuration: `.codex`, `.claude`, `.ssh`, `.aws`,
+`.azure`, `.kube`, `.credentials.json`, `.netrc`, `.npmrc`, `.pypirc`, common SSH
+private-key names, or `.env` and its variants. `.env.example`, `.env.sample` and
+`.env.template` remain ordinary source templates. Tracked diffs use only the
+literal paths checked by the exporter, so a new path cannot join the diff
+between the check and export. This policy does not discover or redact secrets
+copied into ordinary source files, templates or actor messages. Treat result
+content as private, untrusted workspace data requiring review before sharing;
+an egress allowlist does not make exported content safe to publish.
+
 For actual wheel and source-distribution bytes, use the
 [bounded candidate carrier and receiver](agent-candidate-export.md). Raw binary
 files in the untracked JSON strings are not a lossless artifact transport.

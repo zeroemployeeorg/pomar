@@ -563,14 +563,22 @@ func (b *Broker) Handler() http.Handler {
 			return
 		}
 		defer root.Close()
-		diff, err := b.gitOutput(r.Context(), "diff", "--no-ext-diff", "--no-textconv", "--binary", "HEAD")
+		diff, err := b.exportDiff(r.Context())
 		if err != nil {
+			if errors.Is(err, errCredentialExport) {
+				respond(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
+				return
+			}
 			failure(w, errors.New("diff unavailable or exceeds limit"))
 			return
 		}
 		paths, err := b.gitOutput(r.Context(), "ls-files", "--others", "--exclude-standard", "-z")
 		if err != nil {
 			failure(w, err)
+			return
+		}
+		if err := checkExportPaths(paths); err != nil {
+			respond(w, http.StatusUnprocessableEntity, map[string]string{"error": err.Error()})
 			return
 		}
 		untracked := map[string]string{}
