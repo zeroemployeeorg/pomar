@@ -70,6 +70,11 @@ type Actor struct {
 	// permission calls waiting for the controller, by request ID
 	permissions    map[string]*permissionWait
 	nextPermission int
+	// tool calls Claude Code emitted in the current turn, by tool_use id,
+	// that a bridge request may name (bridge.go)
+	toolUses      map[string]*toolUse
+	toolUseSeen   chan struct{}
+	bridgeWaiting int
 	// a sign-in waiting for its code
 	login     *loginRun
 	done      chan struct{}
@@ -238,6 +243,7 @@ func (a *Actor) startTurn(thread string, input []struct {
 		return nil, fmt.Errorf("claude actor: turn not delivered: %w", err)
 	}
 	a.turn, a.started, a.interrupt = turn, false, false
+	a.toolUses = nil
 	return json.Marshal(map[string]any{"turn": map[string]string{"id": turn}})
 }
 
@@ -318,6 +324,11 @@ func (a *Actor) handle(l streamLine, raw []byte) error {
 	}
 	switch l.Type {
 	case "assistant", "user":
+		if l.Type == "assistant" {
+			a.mu.Lock()
+			a.recordToolUses(l.Message)
+			a.mu.Unlock()
+		}
 		return a.emit("item/completed", map[string]any{"threadId": thread, "turnId": turn, "item": map[string]any{"type": "claude/" + l.Type, "message": l.Message}})
 	case "result":
 		a.mu.Lock()
@@ -335,7 +346,9 @@ func (a *Actor) handle(l streamLine, raw []byte) error {
 			a.proc = nil
 		}
 		a.turn, a.started, a.interrupt = "", false, false
-		// A permission call still waiting when its turn ends is denied.
+		// A permission call still waiting when its turn ends is denied, and
+		// the turn's tool calls can no longer be named.
+		a.toolUses = nil
 		a.cancelPermissions()
 		a.mu.Unlock()
 		return a.emit("turn/completed", map[string]any{"threadId": thread, "turn": map[string]string{"id": turn, "status": status}})

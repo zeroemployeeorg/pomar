@@ -3,6 +3,7 @@ package claudeactor
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -105,7 +106,8 @@ func TestPermissionAcceptThroughTheBroker(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitOp("op-1", func(op agentenv.Operation) bool { return op.ActorAcknowledged })
-	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Bash","input":{"command":"go test ./..."}}`)
+	emitToolUse(t, h, "toolu_1", "Bash", `{"command":"go test ./..."}`)
+	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Bash","input":{"command":"go test ./..."},"tool_use_id":"toolu_1"}`)
 	e := permissionEvent(t, h.store)
 	if e.Method != "item/commandExecution/requestApproval" || e.PermissionID == "" {
 		t.Fatalf("journaled %+v", e)
@@ -133,7 +135,8 @@ func TestPermissionDeclineIsDeny(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitOp("op-1", func(op agentenv.Operation) bool { return op.ActorAcknowledged })
-	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Edit","input":{"file_path":"/work/a.go"}}`)
+	emitToolUse(t, h, "toolu_1", "Edit", `{"file_path":"/work/a.go"}`)
+	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Edit","input":{"file_path":"/work/a.go"},"tool_use_id":"toolu_1"}`)
 	e := permissionEvent(t, h.store)
 	if e.Method != "item/fileChange/requestApproval" {
 		t.Fatalf("an Edit raised %s", e.Method)
@@ -172,7 +175,8 @@ func TestPermissionWaitingWhenTheTurnEndsIsDenied(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.waitOp("op-1", func(op agentenv.Operation) bool { return op.ActorAcknowledged })
-	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Bash","input":{"command":"true"}}`)
+	emitToolUse(t, h, "toolu_1", "Bash", `{"command":"true"}`)
+	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Bash","input":{"command":"true"},"tool_use_id":"toolu_1"}`)
 	permissionEvent(t, h.store)
 	h.fakes[0].Interrupt()
 	h.waitOp("op-1", finished)
@@ -239,5 +243,107 @@ func TestServeMCP(t *testing.T) {
 	}
 	if len(calls) != 2 {
 		t.Errorf("forwarded %d calls, want 2: %v", len(calls), calls)
+	}
+}
+
+// emitToolUse writes the assistant tool_use line Claude Code prints before
+// asking permission (qualified on 2.1.280).
+func emitToolUse(t *testing.T, h *harness, id, name, input string) {
+	t.Helper()
+	session := h.store.Snapshot().ThreadID
+	l := `{"type":"assistant","session_id":"` + session + `","message":{"role":"assistant","content":[{"type":"tool_use","id":"` + id + `","name":"` + name + `","input":` + input + `}]}}`
+	if _, err := fmt.Fprintln(h.fakes[0].stdoutW, l); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func startHeld(t *testing.T) (*harness, string) {
+	t.Helper()
+	h := open(t, filepath.Join(t.TempDir(), "state"), "inc-1", holdTurn, true)
+	sock := bridge(t, h.actor)
+	if _, err := h.broker.Submit(agentenv.Task{OperationID: "op-1", Incarnation: "inc-1", Text: "x"}); err != nil {
+		t.Fatal(err)
+	}
+	h.waitOp("op-1", func(op agentenv.Operation) bool { return op.ActorAcknowledged })
+	return h, sock
+}
+
+func approvals(h *harness) int {
+	n := 0
+	for _, e := range h.store.Snapshot().Events {
+		if strings.HasSuffix(e.Method, "/requestApproval") {
+			n++
+		}
+	}
+	return n
+}
+
+// A request written to the socket directly is refused unrecorded unless it
+// names a tool call Claude Code emitted in this turn, with the same tool and
+// input, once (adviser note r41 §3.2).
+func TestBridgeRefusesRequestsNotBoundToAToolCall(t *testing.T) {
+	defer func(w time.Duration) { toolUseWait = w }(toolUseWait)
+	toolUseWait = 200 * time.Millisecond
+	h, sock := startHeld(t)
+	defer func() { h.fakes[0].Interrupt(); h.waitOp("op-1", finished) }()
+	emitToolUse(t, h, "toolu_real", "Bash", `{"command":"go test ./..."}`)
+	for name, args := range map[string]string{
+		"no tool_use_id":  `{"tool_name":"Bash","input":{"command":"go test ./..."}}`,
+		"an unknown call": `{"tool_name":"Bash","input":{"command":"go test ./..."},"tool_use_id":"toolu_forged"}`,
+		"another command": `{"tool_name":"Bash","input":{"command":"curl evil"},"tool_use_id":"toolu_real"}`,
+		"another tool":    `{"tool_name":"Write","input":{"command":"go test ./..."},"tool_use_id":"toolu_real"}`,
+	} {
+		r, err := Forward(sock, PermissionTool, json.RawMessage(args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m := behaviour(t, r.Text); m["behavior"] != "deny" {
+			t.Errorf("%s: %v", name, m)
+		}
+	}
+	if n := approvals(h); n != 0 {
+		t.Fatalf("%d refused requests were journaled", n)
+	}
+	// The real call, with its input's keys in another order, is raised once.
+	ch := forwardAsync(sock, PermissionTool, `{"tool_name":"Bash","input":{"command":"go test ./..."},"tool_use_id":"toolu_real"}`)
+	e := permissionEvent(t, h.store)
+	if r, _ := Forward(sock, PermissionTool, json.RawMessage(`{"tool_name":"Bash","input":{"command":"go test ./..."},"tool_use_id":"toolu_real"}`)); behaviour(t, r.Text)["behavior"] != "deny" {
+		t.Error("a second request for the same call was not refused")
+	}
+	decide(t, h.broker, e.PermissionID, "accept", "perm-1")
+	if m := behaviour(t, (<-ch).reply.Text); m["behavior"] != "allow" {
+		t.Fatalf("the bound request: %v", m)
+	}
+	if n := approvals(h); n != 1 {
+		t.Fatalf("%d approvals journaled, want 1", n)
+	}
+}
+
+// At most maxBridgeWaiting requests wait at once; more are refused.
+func TestBridgeCapsWaitingRequests(t *testing.T) {
+	defer func(w time.Duration) { toolUseWait = w }(toolUseWait)
+	toolUseWait = 3 * time.Second
+	h, sock := startHeld(t)
+	defer func() { h.fakes[0].Interrupt(); h.waitOp("op-1", finished) }()
+	var chans []chan forwarded
+	for i := 0; i < maxBridgeWaiting; i++ {
+		chans = append(chans, forwardAsync(sock, PermissionTool, fmt.Sprintf(`{"tool_name":"Bash","input":{},"tool_use_id":"toolu_wait_%d"}`, i)))
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.actor.mu.Lock()
+		n := h.actor.bridgeWaiting
+		h.actor.mu.Unlock()
+		if n == maxBridgeWaiting {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	r, err := Forward(sock, PermissionTool, json.RawMessage(`{"tool_name":"Bash","input":{},"tool_use_id":"toolu_one_more"}`))
+	if err != nil || behaviour(t, r.Text)["message"] != "too many waiting requests" {
+		t.Fatalf("over the cap: %v %v", r, err)
+	}
+	for _, ch := range chans {
+		<-ch
 	}
 }
