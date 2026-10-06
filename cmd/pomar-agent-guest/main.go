@@ -74,8 +74,11 @@ func run() error {
 		}
 		configDir := "/pomar/job/.claude"
 		actor = claudeactor.New(claudeactor.Config{
-			Version:       *claudeVersion,
-			Args:          []string{"--bare", "--strict-mcp-config"},
+			Version: *claudeVersion,
+			// Not --bare: it never reads OAuth credentials (claude --help, 2.1.280).
+			// Only the environment's own user settings load; a task repository's
+			// project or local settings cannot add hooks or permission rules.
+			Args:          []string{"--setting-sources", "user", "--strict-mcp-config"},
 			Start:         claudeactor.Exec{Binary: *claude, Dir: *workspace, Env: claudeactor.GuestEnv("/pomar/job", configDir, "/opt/pomar-claude/bin:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"), UID: 1000, GID: 1000}.Start,
 			Authenticated: claudeactor.CredentialPresent(configDir),
 		}, broker.Observe)

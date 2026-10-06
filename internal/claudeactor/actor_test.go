@@ -60,6 +60,11 @@ func newFake(args []string, s script) *fakeClaude {
 					<-f.interrupt
 					continue
 				}
+				if out == "EXIT" {
+					// As qualified on 2.1.280: print mode exits after an
+					// interrupted turn's result.
+					return
+				}
 				fmt.Fprintln(f.stdoutW, out)
 			}
 		}
@@ -106,7 +111,7 @@ func open(t *testing.T, dir, incarnation string, s script, authenticated bool) *
 	h := &harness{t: t, dir: dir, store: store, broker: agentenv.NewBroker(store, "/work")}
 	cfg := Config{
 		Version:       "2.1.280",
-		Args:          []string{"--bare", "--strict-mcp-config"},
+		Args:          []string{"--setting-sources", "user", "--strict-mcp-config"},
 		Authenticated: func() bool { return authenticated },
 		NewID: func() string {
 			h.mu.Lock()
@@ -166,7 +171,7 @@ func TestTaskThroughTheSharedBroker(t *testing.T) {
 	s := h.store.Snapshot()
 	f := h.fakes[0]
 	args := strings.Join(f.args, " ")
-	for _, want := range []string{"-p --input-format stream-json --output-format stream-json --verbose", "--bare --strict-mcp-config", "--session-id " + s.ThreadID} {
+	for _, want := range []string{"-p --input-format stream-json --output-format stream-json --verbose", "--setting-sources user --strict-mcp-config", "--session-id " + s.ThreadID} {
 		if !strings.Contains(args, want) {
 			t.Errorf("args %q lack %q", args, want)
 		}
@@ -321,4 +326,61 @@ func TestResumeAfterReplacement(t *testing.T) {
 		t.Fatalf("resume replayed %d input(s)", n)
 	}
 	first.fakes[0].Interrupt()
+}
+
+// After an interrupted turn, Claude Code's print mode exits (qualified on
+// 2.1.280). That is not actor departure: the next task resumes the same
+// session in a new process, and the earlier task is never replayed.
+func TestNextTaskAfterInterruptResumesTheSession(t *testing.T) {
+	calls := 0
+	script := func(_ *fakeClaude, session string, _ int, _ string) []string {
+		calls++
+		if calls == 1 {
+			return []string{
+				line(map[string]any{"type": "system", "subtype": "init", "session_id": session}),
+				"WAIT-INTERRUPT",
+				line(map[string]any{"type": "result", "subtype": "error_during_execution", "session_id": session, "is_error": true}),
+				"EXIT",
+			}
+		}
+		return happy(nil, session, 0, "")
+	}
+	h := open(t, filepath.Join(t.TempDir(), "state"), "inc-1", script, true)
+	if _, err := h.broker.Submit(agentenv.Task{OperationID: "op-1", Incarnation: "inc-1", Text: "first"}); err != nil {
+		t.Fatal(err)
+	}
+	h.waitOp("op-1", func(op agentenv.Operation) bool { return op.ActorAcknowledged })
+	thread := h.store.Snapshot().ThreadID
+	if _, err := h.actor.Call(context.Background(), "turn/interrupt", map[string]string{"threadId": thread}); err != nil {
+		t.Fatal(err)
+	}
+	if op := h.waitOp("op-1", finished); op.Completion != "interrupted" {
+		t.Fatalf("first completion %q", op.Completion)
+	}
+	<-h.fakes[0].exited
+	if _, err := h.broker.Submit(agentenv.Task{OperationID: "op-2", Incarnation: "inc-1", Text: "second"}); err != nil {
+		t.Fatal(err)
+	}
+	if op := h.waitOp("op-2", finished); op.Completion != "completed" {
+		t.Fatalf("second completion %q", op.Completion)
+	}
+	select {
+	case <-h.actor.Done():
+		t.Fatal("the actor reported departure after an interrupted turn")
+	default:
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.fakes) != 2 {
+		t.Fatalf("%d processes, want 2", len(h.fakes))
+	}
+	second := h.fakes[1]
+	if args := strings.Join(second.args, " "); !strings.Contains(args, "--resume "+thread) {
+		t.Fatalf("the next process args %q", args)
+	}
+	second.mu.Lock()
+	defer second.mu.Unlock()
+	if len(second.inputs) != 1 || !strings.Contains(second.inputs[0], "Pomar operation op-2.") {
+		t.Fatalf("the next process got %q (the earlier task must not be replayed)", second.inputs)
+	}
 }

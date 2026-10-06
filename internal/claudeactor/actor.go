@@ -41,7 +41,8 @@ type Config struct {
 	// against; it is reported, not verified, like Codex's userAgent check.
 	Version string
 	// Args are the fixed arguments before the session flags, for example
-	// --bare --strict-mcp-config --mcp-config FILE --permission-prompt-tool T.
+	// --setting-sources user --strict-mcp-config. Not --bare: in 2.1.280 it
+	// never reads OAuth credentials (claude --help).
 	Args []string
 	// Start launches the process with the full argument list.
 	Start func(args []string) (Process, error)
@@ -190,6 +191,15 @@ func (a *Actor) startTurn(thread string, input []struct {
 	Text string `json:"text"`
 }) (json.RawMessage, error) {
 	a.mu.Lock()
+	if a.proc == nil && a.thread != "" && thread == a.thread && a.err == nil {
+		// The previous turn was interrupted and its process exited: resume
+		// the same session in a new process before this turn.
+		a.mu.Unlock()
+		if err := a.launch(thread, "--resume", thread); err != nil {
+			return nil, err
+		}
+		a.mu.Lock()
+	}
 	defer a.mu.Unlock()
 	if a.proc == nil || thread != a.thread || a.err != nil {
 		return nil, ErrNoThread
@@ -271,7 +281,7 @@ func (a *Actor) read(proc Process) {
 	if err == nil {
 		err = io.EOF
 	}
-	a.finish(err)
+	a.finish(proc, err)
 }
 
 func (a *Actor) handle(l streamLine, raw []byte) error {
@@ -306,6 +316,12 @@ func (a *Actor) handle(l streamLine, raw []byte) error {
 		case l.IsError || (l.Subtype != "" && l.Subtype != "success"):
 			status = "failed"
 		}
+		if status == "interrupted" {
+			// Print mode exits after an interrupted turn (qualified on
+			// 2.1.280): retire this process now, so the next turn resumes
+			// the session in a new one, and this one's exit is ignored.
+			a.proc = nil
+		}
 		a.turn, a.started, a.interrupt = "", false, false
 		a.mu.Unlock()
 		return a.emit("turn/completed", map[string]any{"threadId": thread, "turn": map[string]string{"id": turn, "status": status}})
@@ -322,8 +338,14 @@ func (a *Actor) emit(method string, params any) error {
 	return a.observe(agentenv.Message{Method: method, Params: raw})
 }
 
-func (a *Actor) finish(err error) {
+func (a *Actor) finish(proc Process, err error) {
 	a.mu.Lock()
+	if a.proc != proc {
+		// A retired process (after an interrupted turn) ending is expected;
+		// the session continues in the next process.
+		a.mu.Unlock()
+		return
+	}
 	a.err = err
 	a.mu.Unlock()
 	a.closeOnce.Do(func() { close(a.done) })
