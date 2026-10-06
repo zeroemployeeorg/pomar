@@ -382,3 +382,19 @@ func newUUID() string {
 	b[8] = b[8]&0x3f | 0x80
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
+
+// Adapter describes this actor to the shared broker (POMAR-CC proposal P2):
+// its session report, and that the controller bridge is not yet qualified
+// for Claude Code, so controller capabilities stay refused.
+func (a *Actor) Adapter() agentenv.AdapterInfo {
+	return agentenv.AdapterInfo{
+		Provider: "anthropic", Name: "claude-code", Version: a.cfg.Version,
+		Capabilities: map[string]any{
+			"version":                   "pomar.claude-capabilities/v1",
+			"supported_operations":      []string{"session.inspect", "login.code", "task.submit", "operation.inspect", "events.read", "permission.respond", "turn.interrupt", "result.export", "thread.resume_after_fence"},
+			"permission_response_kinds": []string{"item/commandExecution/requestApproval", "item/fileChange/requestApproval"},
+			"permission_decisions":      []string{"accept", "decline", "cancel"},
+		},
+		ControllerQualified: false,
+	}
+}

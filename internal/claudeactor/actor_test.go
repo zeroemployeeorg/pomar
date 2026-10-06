@@ -384,3 +384,27 @@ func TestNextTaskAfterInterruptResumesTheSession(t *testing.T) {
 		t.Fatalf("the next process got %q (the earlier task must not be replayed)", second.inputs)
 	}
 }
+
+// The session report names Claude Code, not Codex (P2).
+func TestSessionReportsClaudeCode(t *testing.T) {
+	h := open(t, filepath.Join(t.TempDir(), "state"), "inc-1", happy, true)
+	srv := httptest.NewServer(h.broker.Handler())
+	defer srv.Close()
+	resp, err := http.Get(srv.URL + "/v1/session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var s struct {
+		Adapter struct {
+			Provider     string         `json:"provider"`
+			Name         string         `json:"name"`
+			Version      string         `json:"version"`
+			Capabilities map[string]any `json:"capabilities"`
+		} `json:"adapter"`
+	}
+	json.NewDecoder(resp.Body).Decode(&s)
+	if s.Adapter.Provider != "anthropic" || s.Adapter.Name != "claude-code" || s.Adapter.Version != "2.1.280" || s.Adapter.Capabilities["version"] != "pomar.claude-capabilities/v1" {
+		t.Fatalf("adapter %+v", s.Adapter)
+	}
+}
