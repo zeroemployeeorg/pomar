@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,7 +55,7 @@ func Forward(socket string, tool string, args json.RawMessage) (bridgeReply, err
 		return bridgeReply{}, err
 	}
 	var r bridgeReply
-	line, err := bufio.NewReader(c).ReadBytes('\n')
+	line, err := readLine(c)
 	if err != nil {
 		return bridgeReply{}, err
 	}
@@ -75,6 +76,10 @@ const ControllerTool = "pomar_controller_request"
 
 // controllerTextLimit is the shared broker's bound on request and reply text.
 const controllerTextLimit = 32 << 10
+
+// maxMCPInFlight bounds tool calls the MCP server serves at once; the bridge
+// itself refuses beyond maxBridgeWaiting outstanding requests.
+const maxMCPInFlight = 2 * maxBridgeWaiting
 
 // ServeMCP runs the MCP server on in/out until in ends. call forwards a tool
 // call; ServeMCP lists exactly the permission tool.
@@ -101,6 +106,7 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 	s := bufio.NewScanner(in)
 	s.Buffer(make([]byte, 4096), 4<<20)
 	var wg sync.WaitGroup
+	var inFlight atomic.Int32
 	defer wg.Wait()
 	for s.Scan() {
 		var m mcpMessage
@@ -156,10 +162,17 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 				fail(m.ID, -32602, "unknown tool")
 				continue
 			}
-			// A call waits for the controller; others are served meanwhile.
+			// A call waits for the controller; others are served meanwhile,
+			// up to a bound on calls in flight.
+			if inFlight.Add(1) > maxMCPInFlight {
+				inFlight.Add(-1)
+				fail(m.ID, -32000, "too many tool calls in flight")
+				continue
+			}
 			wg.Add(1)
 			go func(id json.RawMessage, name string, args json.RawMessage) {
 				defer wg.Done()
+				defer inFlight.Add(-1)
 				r, err := call(name, args)
 				if err != nil {
 					// The bridge is unreachable: never an implicit approval,

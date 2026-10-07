@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 )
@@ -87,6 +88,11 @@ type Actor struct {
 	nextController int
 	// nonce makes this actor's request IDs unique across incarnations
 	nonce string
+	// Claude Code reported that the configured credential failed to
+	// authenticate; cleared by a completed sign-in
+	authFailed bool
+	// the bridge's waits (bridge.go), fixed when the actor is created
+	useWait, readWait time.Duration
 	// a sign-in waiting for its code
 	login     *loginRun
 	done      chan struct{}
@@ -100,7 +106,7 @@ func New(cfg Config, observe func(agentenv.Message) error) *Actor {
 		cfg.NewID = newUUID
 	}
 	nonce := strings.ReplaceAll(newUUID(), "-", "")[:12]
-	return &Actor{cfg: cfg, observe: observe, done: make(chan struct{}), nonce: nonce}
+	return &Actor{cfg: cfg, observe: observe, done: make(chan struct{}), nonce: nonce, useWait: toolUseWait, readWait: bridgeReadWait}
 }
 
 var (
@@ -116,9 +122,13 @@ func (a *Actor) Call(ctx context.Context, method string, params any) (json.RawMe
 	case "initialize":
 		return json.Marshal(map[string]string{"userAgent": fmt.Sprintf("%s/%s (claude-code %s)", Name, "0.1.0", a.cfg.Version)})
 	case "account/read":
-		// The account is "present" when a credential is configured; its value
-		// is never read here, returned or journaled.
-		if a.cfg.Authenticated != nil && a.cfg.Authenticated() {
+		// The account is "present" when a credential is configured and Claude
+		// Code has not since reported that it failed to authenticate with it;
+		// its value is never read here, returned or journaled.
+		a.mu.Lock()
+		failed := a.authFailed
+		a.mu.Unlock()
+		if !failed && a.cfg.Authenticated != nil && a.cfg.Authenticated() {
 			return json.Marshal(map[string]any{"account": map[string]string{"type": "claude-code"}})
 		}
 		return json.Marshal(map[string]any{"account": nil})
@@ -311,6 +321,11 @@ type streamLine struct {
 	SessionID string          `json:"session_id"`
 	IsError   bool            `json:"is_error"`
 	Message   json.RawMessage `json:"message"`
+	// An API error Claude Code reports as an assistant line (qualified on
+	// 2.1.280): "error":"authentication_failed" with is_api_error_message.
+	// Raw, so an unexpected shape is ignored rather than fatal.
+	Error             json.RawMessage `json:"error"`
+	IsAPIErrorMessage bool            `json:"is_api_error_message"`
 }
 
 func (a *Actor) read(proc Process) {
@@ -370,6 +385,12 @@ func (a *Actor) handle(l streamLine, raw []byte) error {
 		if l.Type == "assistant" {
 			a.mu.Lock()
 			a.recordToolUses(l.Message)
+			if l.IsAPIErrorMessage && string(l.Error) == `"authentication_failed"` {
+				// The credential no longer works: the environment reports no
+				// account until it is signed in again, so the next assignment
+				// is refused and its controller can see that a sign-in is due.
+				a.authFailed = true
+			}
 			a.mu.Unlock()
 		}
 		return a.emit("item/completed", map[string]any{"threadId": thread, "turnId": turn, "item": map[string]any{"type": "claude/" + l.Type, "message": l.Message}})
@@ -419,6 +440,23 @@ func (a *Actor) finish(proc Process, err error) {
 	a.err = err
 	a.mu.Unlock()
 	a.closeOnce.Do(func() { close(a.done) })
+}
+
+// signedInAgain clears a reported authentication failure after a completed
+// sign-in, and retires an idle process that may still hold the old
+// credential, so the next turn resumes the session in a new one.
+func (a *Actor) signedInAgain() {
+	a.mu.Lock()
+	failed := a.authFailed
+	a.authFailed = false
+	var retired Process
+	if failed && a.turn == "" && a.proc != nil {
+		retired, a.proc = a.proc, nil
+	}
+	a.mu.Unlock()
+	if retired != nil {
+		retired.Stdin().Close()
+	}
 }
 
 func remarshal(in, out any) error {

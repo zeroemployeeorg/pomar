@@ -2,9 +2,11 @@ package claudeactor
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"slices"
 	"strings"
@@ -43,10 +45,12 @@ func (a *Actor) ServeBridge(ln net.Listener) error {
 
 func (a *Actor) serveBridgeConn(c net.Conn) {
 	defer c.Close()
-	line, err := bufio.NewReader(c).ReadBytes('\n')
+	c.SetReadDeadline(time.Now().Add(a.readWait))
+	line, err := readLine(c)
 	if err != nil {
 		return
 	}
+	c.SetReadDeadline(time.Time{})
 	var req bridgeRequest
 	var reply bridgeReply
 	switch {
@@ -70,12 +74,39 @@ func (a *Actor) serveBridgeConn(c net.Conn) {
 // arrives on stdout before it. Anything else, including a request the coding
 // user writes to the socket directly, is refused unrecorded.
 
-// toolUseWait bounds how long a bridge request waits for its tool_use line.
+// toolUseWait bounds how long a bridge request waits for its tool_use line;
+// each actor takes it when created.
 var toolUseWait = 5 * time.Second
 
-// maxBridgeWaiting caps bridge requests waiting at once, so the queue cannot
-// be flooded.
+// maxBridgeWaiting caps the bridge requests outstanding at once: those
+// waiting for their tool_use line, and those raised and waiting for the
+// controller's answer or reply. The queue cannot be flooded.
 const maxBridgeWaiting = 16
+
+// maxBridgeLine bounds one bridge request or reply line. Claude Code's own
+// MCP messages reach the server within its 4 MiB line limit; a reply can echo
+// a request's input back.
+const maxBridgeLine = 8 << 20
+
+// bridgeReadWait bounds how long a connection may take to send its request;
+// each actor takes it when created.
+var bridgeReadWait = 10 * time.Second
+
+var errLineTooLong = errors.New("claude actor: bridge line exceeds its limit")
+
+// readLine reads one newline-terminated line of at most maxBridgeLine bytes.
+func readLine(r io.Reader) ([]byte, error) {
+	line, err := bufio.NewReaderSize(io.LimitReader(r, maxBridgeLine+1), 64<<10).ReadBytes('\n')
+	if len(line) > maxBridgeLine {
+		return nil, errLineTooLong
+	}
+	return line, err
+}
+
+// pendingBridge counts outstanding bridge requests; a.mu must be held.
+func (a *Actor) pendingBridge() int {
+	return a.bridgeWaiting + len(a.permissions) + len(a.controllers)
+}
 
 type toolUse struct {
 	name      string
@@ -114,13 +145,64 @@ func (a *Actor) recordToolUses(message json.RawMessage) {
 	}
 }
 
+// canonical is raw's canonical JSON for comparing a request with its tool
+// call: keys sorted, numbers kept exactly as written (never through float64,
+// so distinct large integers stay distinct), and "" (matching nothing) for
+// invalid JSON, trailing data or a duplicate key, whose meaning would depend
+// on which parser reads it.
 func canonical(raw json.RawMessage) string {
-	var v any
-	if json.Unmarshal(raw, &v) != nil {
+	if !uniqueKeys(json.NewDecoder(bytes.NewReader(raw)), 0) {
 		return ""
 	}
-	b, _ := json.Marshal(v)
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.UseNumber()
+	var v any
+	if d.Decode(&v) != nil || d.Decode(new(any)) != io.EOF {
+		return ""
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
 	return string(b)
+}
+
+// uniqueKeys reports whether the next JSON value has no object with a repeated
+// key, within a bounded depth.
+func uniqueKeys(d *json.Decoder, depth int) bool {
+	if depth > 64 {
+		return false
+	}
+	t, err := d.Token()
+	if err != nil {
+		return false
+	}
+	switch t {
+	case json.Delim('{'):
+		seen := map[string]bool{}
+		for d.More() {
+			k, err := d.Token()
+			name, ok := k.(string)
+			if err != nil || !ok || seen[name] {
+				return false
+			}
+			seen[name] = true
+			if !uniqueKeys(d, depth+1) {
+				return false
+			}
+		}
+		_, err = d.Token()
+		return err == nil
+	case json.Delim('['):
+		for d.More() {
+			if !uniqueKeys(d, depth+1) {
+				return false
+			}
+		}
+		_, err = d.Token()
+		return err == nil
+	}
+	return true
 }
 
 // bindToolUse waits for the named tool call and claims it; a.mu must be held,
@@ -129,7 +211,7 @@ func (a *Actor) bindToolUse(id, name string, input json.RawMessage) string {
 	if id == "" {
 		return "the request names no tool call"
 	}
-	deadline := time.Now().Add(toolUseWait)
+	deadline := time.Now().Add(a.useWait)
 	for {
 		if u, ok := a.toolUses[id]; ok {
 			switch {
@@ -175,7 +257,7 @@ func (a *Actor) requestPermission(args json.RawMessage) string {
 		a.mu.Unlock()
 		return denyText("no active Pomar turn")
 	}
-	if a.bridgeWaiting >= maxBridgeWaiting {
+	if a.pendingBridge() >= maxBridgeWaiting {
 		a.mu.Unlock()
 		return denyText("too many waiting requests")
 	}
@@ -288,7 +370,7 @@ func (a *Actor) requestController(args json.RawMessage) bridgeReply {
 		a.mu.Unlock()
 		return refuse("no active Pomar turn")
 	}
-	if a.bridgeWaiting >= maxBridgeWaiting {
+	if a.pendingBridge() >= maxBridgeWaiting {
 		a.mu.Unlock()
 		return refuse("too many waiting requests")
 	}
@@ -372,7 +454,7 @@ func (a *Actor) bindToolUseByContent(name string, input json.RawMessage) (string
 	if want == "" {
 		return "", "malformed request"
 	}
-	deadline := time.Now().Add(toolUseWait)
+	deadline := time.Now().Add(a.useWait)
 	for {
 		ids := make([]string, 0, len(a.toolUses))
 		for id := range a.toolUses {
