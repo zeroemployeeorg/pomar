@@ -3,6 +3,7 @@ package claudeactor
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -40,26 +41,41 @@ type bridgeReply struct {
 	IsError bool   `json:"is_error"`
 }
 
+// ErrDeliveryUncertain is Forward's error when its request was written in full
+// but no reply came back: the bridge may have raised it, and the controller
+// may have answered it. It must not be reported as "not delivered", which
+// invites a resend that would duplicate the effect (adviser note r43 §5.1).
+// Any other Forward error means the request never reached the bridge: the
+// bridge acts only on a complete line.
+var ErrDeliveryUncertain = errors.New("the request reached the Pomar bridge but its reply was lost; delivery is uncertain")
+
+// forwardReplyWait bounds how long Forward waits for its reply once the
+// request is written. The bridge holds a request until the controller answers
+// (RT's answer deadline is 30 minutes), so this is well above that.
+var forwardReplyWait = time.Hour
+
 // Forward sends one tool call to the bridge socket and waits for its reply.
 func Forward(socket string, tool string, args json.RawMessage) (bridgeReply, error) {
 	c, err := net.DialTimeout("unix", socket, 5*time.Second)
 	if err != nil {
-		return bridgeReply{}, err
+		return bridgeReply{}, fmt.Errorf("not delivered: %w", err)
 	}
 	defer c.Close()
 	b, err := json.Marshal(bridgeRequest{Tool: tool, Arguments: args})
 	if err != nil {
-		return bridgeReply{}, err
+		return bridgeReply{}, fmt.Errorf("not delivered: %w", err)
 	}
+	c.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if _, err = c.Write(append(b, '\n')); err != nil {
-		return bridgeReply{}, err
+		return bridgeReply{}, fmt.Errorf("not delivered: %w", err)
 	}
+	c.SetReadDeadline(time.Now().Add(forwardReplyWait))
 	var r bridgeReply
 	line, err := readLine(c)
-	if err != nil {
-		return bridgeReply{}, err
+	if err != nil || json.Unmarshal(line, &r) != nil {
+		return bridgeReply{}, ErrDeliveryUncertain
 	}
-	return r, json.Unmarshal(line, &r)
+	return r, nil
 }
 
 type mcpMessage struct {
@@ -80,6 +96,17 @@ const controllerTextLimit = 32 << 10
 // maxMCPInFlight bounds tool calls the MCP server serves at once; the bridge
 // itself refuses beyond maxBridgeWaiting outstanding requests.
 const maxMCPInFlight = 2 * maxBridgeWaiting
+
+// maxRecordedCalls bounds the completed tool calls whose outcome a reused
+// request ID is answered with.
+const maxRecordedCalls = 256
+
+// recordedCall is one tool call's input and, once done is closed, its reply.
+type recordedCall struct {
+	input  string
+	done   chan struct{}
+	result map[string]any
+}
 
 // ServeMCP runs the MCP server on in/out until in ends. call forwards a tool
 // call; ServeMCP lists exactly the permission tool.
@@ -108,6 +135,16 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 	var wg sync.WaitGroup
 	var inFlight atomic.Int32
 	defer wg.Wait()
+	// Tool calls by JSON-RPC request ID, for this server's one client
+	// connection: the Claude Code process that started it. A reconnection is
+	// a new process and a new server, so IDs never span connections. A
+	// reused ID with the same tool and input is answered with the one
+	// recorded outcome, waiting for it if still in flight, and is never
+	// dispatched twice. A reused ID with other input is refused. Completed
+	// calls are kept for the last maxRecordedCalls IDs.
+	var callsMu sync.Mutex
+	calls := map[string]*recordedCall{}
+	var completed []string
 	for s.Scan() {
 		var m mcpMessage
 		if err := json.Unmarshal(s.Bytes(), &m); err != nil {
@@ -169,20 +206,64 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 				fail(m.ID, -32000, "too many tool calls in flight")
 				continue
 			}
+			idKey, input := canonical(m.ID), p.Name+"\x00"+canonical(p.Arguments)
+			if idKey == "" {
+				idKey = string(m.ID)
+			}
+			callsMu.Lock()
+			rec, reused := calls[idKey]
+			if reused && rec.input != input {
+				callsMu.Unlock()
+				inFlight.Add(-1)
+				fail(m.ID, -32600, "request id reused with different input")
+				continue
+			}
+			if !reused {
+				rec = &recordedCall{input: input, done: make(chan struct{})}
+				calls[idKey] = rec
+			}
+			callsMu.Unlock()
 			wg.Add(1)
+			if reused {
+				// The same call again: its one outcome, never a second dispatch.
+				go func(id json.RawMessage) {
+					defer wg.Done()
+					defer inFlight.Add(-1)
+					<-rec.done
+					reply(id, rec.result)
+				}(m.ID)
+				continue
+			}
 			go func(id json.RawMessage, name string, args json.RawMessage) {
 				defer wg.Done()
 				defer inFlight.Add(-1)
 				r, err := call(name, args)
-				if err != nil {
-					// The bridge is unreachable: never an implicit approval,
-					// and never a controller reply.
+				switch {
+				case errors.Is(err, ErrDeliveryUncertain):
+					// The bridge may have raised it and the controller may
+					// have answered: never a resend, and never an approval.
+					r = bridgeReply{Text: denyText(ErrDeliveryUncertain.Error() + "; do not repeat it")}
+					if name == ControllerTool {
+						r = bridgeReply{Text: ErrDeliveryUncertain.Error() + ". Do not repeat this request: the controller can inspect the original.", IsError: true}
+					}
+				case err != nil:
+					// The request never reached the bridge: never an implicit
+					// approval, and never a controller reply.
 					r = bridgeReply{Text: denyText("the Pomar bridge is unavailable"), IsError: false}
 					if name == ControllerTool {
 						r = bridgeReply{Text: "the Pomar bridge is unavailable; the request was not delivered", IsError: true}
 					}
 				}
-				reply(id, map[string]any{"content": []any{map[string]string{"type": "text", "text": r.Text}}, "isError": r.IsError})
+				rec.result = map[string]any{"content": []any{map[string]string{"type": "text", "text": r.Text}}, "isError": r.IsError}
+				close(rec.done)
+				callsMu.Lock()
+				completed = append(completed, idKey)
+				if len(completed) > maxRecordedCalls {
+					delete(calls, completed[0])
+					completed = completed[1:]
+				}
+				callsMu.Unlock()
+				reply(id, rec.result)
 			}(m.ID, p.Name, p.Arguments)
 		default:
 			fail(m.ID, -32601, "method not found")
