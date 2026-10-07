@@ -1,5 +1,7 @@
 # Agent environments
 
+Lifecycle event exports retain validated thread/turn identity, completion status and numeric provider error codes. Raw provider diagnostic messages, nested error data and extra lifecycle metadata are omitted; `params_sha256` binds their original bytes without storing them. This applies before durable journaling, so reopening, session snapshots and event reads share the same projection. Supported device-login responses are returned only to the requesting owner and are not journaled. Item/tool text, approval inputs, controller data and ordinary result files remain untrusted content; this projection does not establish arbitrary secret containment or filter guest egress.
+
 Experimental development interface, `pomar.agent/v1`. Agent environments are separate from the
 ephemeral CI attempt API. No CI daemon configuration changes are needed.
 
