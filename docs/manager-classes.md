@@ -56,6 +56,19 @@ must stay private. Source and output verification still belong to the consumer;
 configuration does not make an unqualified image or provisional resource
 figures measured, and does not install or upgrade a permanent daemon.
 
+Named inputs are sent with `-input NAME=PATH`, or as start-request
+`inputs` entries containing `name`, base64 `data` and lowercase hex `sha256`.
+The manager checks the supplied digest and copies the file into
+`/pomar/inputs/NAME`. At most 16 files and 32 MiB in total are accepted.
+The original signed result contains an `inputs` array of the admitted
+`name`, `bytes` and `sha256` records, without file contents. A consumer
+must verify the original signature against its independently retained key,
+then require exactly the expected named inputs, sizes and locally retained
+digests. For example, `opportunity-sources.json` binds those exact sealed
+bytes; it does not certify the document's source, freshness or truth. Those
+checks still belong to the reviewed source gate. Results produced by older
+builds without this field cannot establish that binding.
+
 Profile-driven classes limit the combined output log and named output files
 to 64 MiB. An omitted `log_cap_bytes` becomes 16 MiB; an omitted
 `output_cap_bytes` becomes the remainder, normally 48 MiB. Explicit values
