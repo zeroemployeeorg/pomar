@@ -3,6 +3,7 @@ package manager
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
+	"github.com/zeroemployeeorg/pomar/internal/result"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
@@ -45,12 +47,91 @@ func TestCheckOutputs(t *testing.T) {
 }
 
 func TestOutputArgs(t *testing.T) {
-	if a := outputArgs("/r", nil); a != nil {
+	if a := outputArgs("/r", nil, 0); a != nil {
 		t.Fatalf("no outputs gave %v", a)
 	}
 	want := []string{"--outputs", "a,b", "--outputs-dir", "/r/outputs", "--outputs-max", "67108864"}
-	if a := outputArgs("/r", []string{"a", "b"}); !reflect.DeepEqual(a, want) {
+	if a := outputArgs("/r", []string{"a", "b"}, 0); !reflect.DeepEqual(a, want) {
 		t.Fatalf("args = %v", a)
+	}
+}
+
+func TestClassOutputCapAppliesToGuestAndAggregateCopy(t *testing.T) {
+	args := outputArgs("/r", []string{"first", "second"}, 7)
+	if args[len(args)-1] != "7" {
+		t.Fatalf("guest limit: %v", args)
+	}
+	rec := t.TempDir()
+	dir := filepath.Join(rec, outputsDir)
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first", "second"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("1234"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := collectOutputs(rec, []string{"first", "second"}, 7)
+	if got[0].Status != OutputOK || got[0].Bytes != 4 || got[0].SHA256 != sha("1234") ||
+		got[1].Status != OutputOverCap || got[1].Bytes != 0 || got[1].SHA256 != "" {
+		t.Fatalf("aggregate cap: %+v", got)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "second")); !os.IsNotExist(err) {
+		t.Fatalf("over-cap output retained: %v", err)
+	}
+}
+
+func TestFinishUsesAdmittedOutputCapAfterTableReload(t *testing.T) {
+	m, ctl, v := openSigning(t, true)
+	id := "out-cap"
+	rec := filepath.Join(v.Root(), attemptsDir, id)
+	if err := os.MkdirAll(filepath.Join(rec, outputsDir), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rec, outputsDir, "report.json"), []byte("12345"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	e := terminalEntry(id)
+	e.State, e.ExitCode, e.OutputNames = StateRunning, nil, []string{"report.json"}
+	e.Class.OutputCapBytes = 4
+	m.mu.Lock()
+	m.t.entries[id] = &e
+	if err := m.t.save(); err != nil {
+		m.mu.Unlock()
+		t.Fatal(err)
+	}
+	m.mu.Unlock()
+	// Reload persisted admission evidence while the manager's current class
+	// still uses the legacy, larger limit. Completion must use the entry.
+	loaded, err := loadTable(m.t.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.t = loaded
+	m.mu.Unlock()
+	code := 0
+	m.finish(id, StateExited, "", &code)
+	var reply ResultReply
+	if err := ctl.Do("GET", "/v1/attempts/"+id+"/result", nil, &reply); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(reply.Signature)
+	if err != nil || !result.Verify(m.cfg.Signer.Public(), reply.Result, sig) {
+		t.Fatal("admitted limit result does not verify")
+	}
+	var doc struct {
+		Class   capacity.Class `json:"class"`
+		Outputs []OutputRecord `json:"outputs"`
+	}
+	if err := json.Unmarshal(reply.Result, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc.Class.OutputCapBytes != 4 || len(doc.Outputs) != 1 || doc.Outputs[0].Status != OutputOverCap {
+		t.Fatalf("signed admitted cap: %+v", doc)
+	}
+	if _, err := ctl.Output(id, "report.json", &bytes.Buffer{}); err == nil {
+		t.Fatal("over-cap output served")
 	}
 }
 
@@ -84,7 +165,7 @@ func TestCollectOutputs(t *testing.T) {
 	big("second", 40<<20) // within the cap alone, over it after first
 	os.WriteFile(filepath.Join(dir, "undeclared"), []byte("x"), 0o600)
 
-	got := collectOutputs(rec, []string{"report.json", "missing", "link", "adir", "huge", "first", "second"})
+	got := collectOutputs(rec, []string{"report.json", "missing", "link", "adir", "huge", "first", "second"}, 0)
 	byName := map[string]OutputRecord{}
 	for _, o := range got {
 		byName[o.Name] = o

@@ -646,7 +646,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		if len(inputs) > 0 {
 			args = append(args, "--inputs", filepath.Join(rec, inputsDir))
 		}
-		args = append(args, outputArgs(rec, outputs)...)
+		args = append(args, outputArgs(rec, outputs, class.OutputCapBytes)...)
 		args = append(args, "--pins", pinsPath)
 	}
 	args = append(args, accessArgs(src, jc)...)
@@ -1094,7 +1094,7 @@ func (m *Manager) finish(id string, st State, reason string, code *int) {
 	e.State, e.Reason, e.ExitCode, e.Ended = st, reason, code, time.Now().UTC()
 	e.Log = recordLog(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.claimClass().LogCapBytes)
 	if len(e.OutputNames) > 0 {
-		e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames)
+		e.Outputs = collectOutputs(filepath.Join(m.cfg.Venue.Root(), attemptsDir, id), e.OutputNames, e.claimClass().OutputCapBytes)
 	}
 	m.closeProxy(id)
 	m.closeNPM(id)
