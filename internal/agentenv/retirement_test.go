@@ -275,3 +275,35 @@ func TestRetirementTombstoneSurvivesOwnerRestart(t *testing.T) {
 		t.Fatal(w.Body.String())
 	}
 }
+
+func TestRetirementFailedFinalJournalNeverReportsCompleted(t *testing.T) {
+	h, e, r := retirementFixture(t)
+	input, _ := json.Marshal(r)
+	a := Action{Kind: "retire", Expected: r.Incarnation, State: "cleanup_pending", Retirement: &Retirement{Request: r, InputSHA256: digest(input), WorkspaceState: "cleanup_pending"}}
+	e.Phase = "retired"
+	e.Actions[r.OperationID] = a
+	if err := h.save(e); err != nil {
+		t.Fatal(err)
+	}
+	// The pre-unlink intent is durable. Simulate unlink succeeding but the
+	// final metadata rename failing, while retaining the original intent.
+	if err := os.Remove(e.Spec.Rootfs); err != nil {
+		t.Fatal(err)
+	}
+	journal := filepath.Join(e.Spec.Directory, "environment.json")
+	if err := os.Rename(journal, journal+"-original-intent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(journal, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.finishRetirement(e, a); err == nil {
+		t.Fatal("journal failure ignored")
+	}
+	if h.fatal == nil || e.Phase != "retired" || e.Actions[r.OperationID].State != "cleanup_pending" || e.Actions[r.OperationID].Retirement.WorkspaceState != "cleanup_pending" {
+		t.Fatal("failed commit reported completed")
+	}
+	if w := retireCall(h, r); w.Code != 409 {
+		t.Fatal("mutation allowed through journal uncertainty")
+	}
+}

@@ -192,15 +192,28 @@ func (h *Host) retireHandler(w http.ResponseWriter, r *http.Request) {
 			failure(w, err)
 			return
 		}
-		ret.WorkspaceState = "absent_after_cleanup"
-		a.State = "completed"
-		e.Actions[req.OperationID] = a
-		if err = h.save(e); err != nil {
+		if err = h.finishRetirement(e, a); err != nil {
 			failure(w, err)
 			return
 		}
+		a = e.Actions[req.OperationID]
 	}
 	respond(w, 200, a)
+}
+
+func (h *Host) finishRetirement(e *Environment, a Action) error {
+	a.Retirement.WorkspaceState = "absent_after_cleanup"
+	a.State = "completed"
+	e.Actions[a.Retirement.Request.OperationID] = a
+	if err := h.save(e); err != nil {
+		// Disk absence is observable, but completed journal custody is unknown.
+		// Inspection must not claim the failed final commit succeeded.
+		a.State = "cleanup_pending"
+		a.Retirement.WorkspaceState = "cleanup_pending"
+		e.Actions[a.Retirement.Request.OperationID] = a
+		return err
+	}
+	return nil
 }
 
 func validateRetirementProof(e *Environment, ret *Retirement) error {
