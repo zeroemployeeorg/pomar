@@ -101,6 +101,9 @@ func (a *Actor) completeLogin(params any) (json.RawMessage, error) {
 	a.login = nil
 	a.mu.Unlock()
 	finish := func(success bool) (json.RawMessage, error) {
+		if success {
+			a.signedInAgain()
+		}
 		raw, _ := json.Marshal(map[string]any{"success": success, "loginId": run.id})
 		// Clears the broker's pending login either way, so it can be retried.
 		a.observe(agentenv.Message{Method: "account/login/completed", Params: raw})
