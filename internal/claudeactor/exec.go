@@ -21,6 +21,29 @@ type Exec struct {
 	UID, GID int
 }
 
+// BashRules is Pomar's own permission policy for Claude Code (adviser note
+// r42 §6), passed with --settings under --restricted. --restricted ignores
+// user, project and local settings files, so the agent cannot change it.
+// Pomar, not Claude Code's built-in defaults, names:
+//   - the read-only commands that run without asking;
+//   - the network tools that are refused outright;
+//   - the git operations that reach a remote, which are always asked about.
+//
+// Anything else follows Claude Code's default, which the live probe records
+// per pin (TestLiveProbeBashRules). Prefix rules are a policy layer, not
+// containment: a refused tool can be reached another way (sh -c, env), and
+// the guest's egress allowlist and fence remain what contains it.
+const BashRules = `{"permissions":{` +
+	`"allow":["Bash(ls)","Bash(ls *)","Bash(pwd)","Bash(cat *)","Bash(head *)","Bash(tail *)","Bash(wc *)","Bash(grep *)",` +
+	`"Bash(git status)","Bash(git status *)","Bash(git log)","Bash(git log *)","Bash(git diff)","Bash(git diff *)","Bash(git show *)"],` +
+	`"deny":["Bash(curl *)","Bash(wget *)","Bash(nc *)","Bash(ncat *)","Bash(ssh *)","Bash(scp *)","Bash(sftp *)","Bash(rsync *)","Bash(telnet *)","Bash(ftp *)","WebFetch","WebSearch"],` +
+	`"ask":["Bash(git fetch)","Bash(git fetch *)","Bash(git pull)","Bash(git pull *)","Bash(git push)","Bash(git push *)","Bash(git clone *)","Bash(git remote *)","Bash(git submodule *)","Bash(git ls-remote *)"]}}`
+
+// GuestTools are the built-in tools a guest's Claude Code has, named by Pomar
+// (--restricted adds no command tool --tools does not name): no subagents,
+// scheduling, worktrees or web tools.
+const GuestTools = "Bash,Read,Edit,Write,Glob,Grep,NotebookEdit"
+
 // GuestEnv is the coding user's environment for Claude Code in a Pomar
 // agent environment: egress only through the guest's loopback relay to the
 // host's allowlisted CONNECT proxy, the Go module proxy, and Claude Code's
