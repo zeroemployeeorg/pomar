@@ -96,6 +96,11 @@ func (m *Manager) resultDoc(e Entry) map[string]any {
 	if e.NPM != nil {
 		doc["npm_lock"] = e.NPM
 	}
+	if len(e.Inputs) > 0 {
+		// Bind the bytes validated at admission, without including their
+		// contents or rereading mutable files at completion.
+		doc["inputs"] = e.Inputs
+	}
 	if e.Log != nil {
 		doc["output_log"] = e.Log
 	}

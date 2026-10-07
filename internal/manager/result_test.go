@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -59,6 +60,76 @@ func openSigning(t *testing.T, sign bool) (*Manager, *Client, *venue.Venue) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return m, NewSocketClient(filepath.Join(run, "ctl.sock")), v
+}
+
+func TestResultBindsAdmittedInputsAfterTableReload(t *testing.T) {
+	m, ctl, v := openSigning(t, true)
+	id := "res-inputs"
+	rec := filepath.Join(v.Root(), attemptsDir, id)
+	if err := os.MkdirAll(rec, 0700); err != nil {
+		t.Fatal(err)
+	}
+	input := in("opportunity-sources.json", `{"qualification":"synthetic-only"}`)
+	admitted, err := checkInputs([]Input{input})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeInputs(rec, []Input{input}); err != nil {
+		t.Fatal(err)
+	}
+	e := terminalEntry(id)
+	e.State, e.ExitCode, e.Inputs = StateRunning, nil, admitted
+	m.mu.Lock()
+	m.t.entries[id] = &e
+	err = m.t.save()
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := loadTable(m.t.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.mu.Lock()
+	m.t = loaded
+	m.mu.Unlock()
+	// Signing uses the retained admission record, never rehashes a file
+	// that could have changed after delivery to the guest.
+	if err := os.WriteFile(filepath.Join(rec, inputsDir, input.Name), []byte("changed after admission"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	code := 0
+	m.finish(id, StateExited, "", &code)
+	b, err := ctl.Result(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reply ResultReply
+	if err := json.Unmarshal(b, &reply); err != nil {
+		t.Fatal(err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(reply.Signature)
+	if err != nil || !result.Verify(m.cfg.Signer.Public(), reply.Result, sig) {
+		t.Fatal("original signed input record does not verify")
+	}
+	var doc struct {
+		Inputs []InputRecord `json:"inputs"`
+	}
+	if err := json.Unmarshal(reply.Result, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(doc.Inputs, admitted) || bytes.Contains(reply.Result, input.Data) {
+		t.Fatalf("signed input evidence differs from admission: %+v", doc.Inputs)
+	}
+	for _, replacement := range []string{strings.Repeat("0", 64), strings.Repeat("f", 64)} {
+		forged := bytes.Replace(reply.Result, []byte(input.SHA256), []byte(replacement), 1)
+		if bytes.Equal(forged, reply.Result) || result.Verify(m.cfg.Signer.Public(), forged, sig) {
+			t.Fatal("tampered input digest verifies")
+		}
+	}
+	if _, exists := m.resultDoc(terminalEntry("no-inputs"))["inputs"]; exists {
+		t.Fatal("legacy no-input result changed")
+	}
 }
 
 func terminalEntry(id string) Entry {
