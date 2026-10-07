@@ -50,7 +50,21 @@ func TestCheckLoopbackPort(t *testing.T) {
 // A request to the shim's port arrives unchanged at the Unix socket's
 // server, and its answer comes back.
 func TestForwardsToTheSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "p.sock")
+	// Keep the fixture in TMPDIR without t.TempDir's test-name components:
+	// the recovery workspace already consumes much of Darwin's socket budget.
+	root, err := os.MkdirTemp("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(root) })
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := filepath.Join(root, "p.sock")
+	if len(sock) > 103 {
+		t.Fatalf("fixture socket path is %d bytes; use a shorter physical TMPDIR", len(sock))
+	}
 	ul, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatal(err)
