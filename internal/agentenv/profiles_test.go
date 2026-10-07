@@ -12,11 +12,18 @@ import (
 
 func TestProjectProfileKeepsSeparateSourceAndNetworkOnReopen(t *testing.T) {
 	// Darwin Unix sockets have a short path bound; test names can exceed it.
-	root, err := os.MkdirTemp("", "pomar-profile-")
+	root, err := os.MkdirTemp("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(root) })
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if longest := filepath.Join(root, "python", "egress.sock"); len(longest) > 103 {
+		t.Fatalf("fixture socket path is %d bytes; use a shorter physical TMPDIR", len(longest))
+	}
 	if err := os.Chmod(root, 0700); err != nil {
 		t.Fatal(err)
 	}
