@@ -64,6 +64,7 @@ const usage = `usage:
                                     unpack the pinned image once into a read-only base rootfs
   pomar image check -layout DIR -digest D [-files MANIFEST [-files-root DIR]]
   pomar image load [-root DIR] -host-bin PATH -layout DIR -digest D -name REPO:TAG [-files MANIFEST [-files-root DIR]]
+  pomar image load [-root DIR] -host-bin PATH -layout DIR -catalogue NAME [-files MANIFEST [-files-root DIR]]
                                     an OCI image layout, pinned by its linux/arm64 manifest digest D: every blob
                                     by hash, the platform, the diff IDs, no credential files or Env; load stages
                                     a checked copy and loads that into the image store

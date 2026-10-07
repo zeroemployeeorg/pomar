@@ -15,16 +15,25 @@ import (
 type GuestImage struct {
 	Name   string // what a class names, like "golang-ci"
 	Repo   string // the registry repository
-	Tag    string // the tag it was pinned from, for CheckPinned; never resolved at run time
+	Tag    string // original remote tag, or local store tag guarded by Digest
 	Digest string // the index (or manifest) digest the host pulls by
 	Arm64  string // the linux/arm64 manifest digest: it keys the base
+	// LocalLayout selects a checked, locally loaded tag. The helper still
+	// requires its index digest to equal Digest before unpacking or booting.
+	LocalLayout bool
 	// Packages are pinned Debian packages unpacked into the base after the
 	// image, or none. They are part of the base's key.
 	Packages []debs.Package
 }
 
-// Ref is the reference the host pulls: the repository at its pinned digest.
-func (g GuestImage) Ref() string { return g.Repo + "@" + g.Digest }
+// Ref is the store lookup: remote images use their digest, local layouts
+// use their reviewed tag. Both paths require the pinned digest in the helper.
+func (g GuestImage) Ref() string {
+	if g.LocalLayout {
+		return g.Repo + ":" + g.Tag
+	}
+	return g.Repo + "@" + g.Digest
+}
 
 // PackageSet is the hash of the image's packages (debs.SetHash), or "".
 func (g GuestImage) PackageSet() string {
@@ -56,6 +65,11 @@ var GuestImages = []GuestImage{
 	{Name: "node24-full", Repo: "docker.io/library/node", Tag: "24-bookworm",
 		Digest: "sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4",
 		Arm64:  "sha256:91882e0e5959240d4413fc42c180022bbdd09c5491e00e75faa6c100d8d7751b"},
+	// Guest-qualified local OCI layout; see docs/runner-tools-image.md.
+	// This is a toolchain pin, not a project CI or release qualification.
+	{Name: "node24-python314-chromium", Repo: "localhost/pomar/runner-tools", Tag: "20261007-v5", LocalLayout: true,
+		Digest: "sha256:498c46febe123361a398475cdf47da02426ee1b6d6982ca15f190ac5bcc320bd",
+		Arm64:  "sha256:ab317bddf37bbc3bc03e5f51b40636512b9e2ef1266983791e8e439e24a4d7ae"},
 }
 
 var (
