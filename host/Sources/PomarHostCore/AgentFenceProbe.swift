@@ -14,6 +14,12 @@ public enum AgentFenceProbe {
         public let pid: Int32
         public let uid: UInt32
         public let birth: UInt64
+        public var workspaceAbsent: Bool? = nil
+        public var container: String? = nil
+        enum CodingKeys: String, CodingKey {
+            case environment, session, incarnation, operation, rootfs, helper, pid, uid, birth, container
+            case workspaceAbsent = "workspace_absent"
+        }
     }
     public struct Evidence: Codable {
         public var environment: String
@@ -31,6 +37,8 @@ public enum AgentFenceProbe {
         public var kernelZombiesChecked: [Int32] = []
         public var rootfsDevice: UInt32 = 0
         public var rootfsInode: UInt64 = 0
+        public var workspaceAbsent = false
+        public var containerAbsent = false
         public var issues: [String] = []
         public var confirmed = false
     }
@@ -71,15 +79,44 @@ public enum AgentFenceProbe {
                            incarnation: r.incarnation, operation: r.operation,
                            observedAt: ISO8601DateFormatter().string(from: Date()), observerUID: getuid())
         var disk = stat()
-        guard lstat(r.rootfs, &disk) == 0, disk.st_mode & S_IFMT == S_IFREG,
-              disk.st_uid == r.uid, disk.st_mode & 0o077 == 0 else {
-            out.issues.append("workspace inode/owner/privacy lookup incomplete")
-            return out
+        let absent = r.workspaceAbsent == true
+        if absent {
+            // Only the Go owner selects this mode after its matching waitpid
+            // receipt reports the helper's reserved pre-effect refusal exit.
+            var parent = stat()
+            let directory = URL(fileURLWithPath: r.rootfs).deletingLastPathComponent().path
+            guard lstat(directory, &parent) == 0, parent.st_mode & S_IFMT == S_IFDIR,
+                  parent.st_uid == r.uid, parent.st_mode & 0o077 == 0,
+                  let container = r.container, container.hasPrefix("/"),
+                  container.hasSuffix("/containers/agent-" + r.environment + "-" + r.incarnation),
+                  lstat(r.rootfs, &disk) == -1, errno == ENOENT else {
+                out.issues.append("preboot workspace absence/custody incomplete")
+                return out
+            }
+            var candidate = stat()
+            guard lstat(container, &candidate) == -1, errno == ENOENT else {
+                out.issues.append("preboot container absence incomplete")
+                return out
+            }
+            out.coverage = "direct-vz-preboot-refusal/v1"
+            out.workspaceAbsent = true
+            out.containerAbsent = true
+        } else {
+            guard lstat(r.rootfs, &disk) == 0, disk.st_mode & S_IFMT == S_IFREG,
+                  disk.st_uid == r.uid, disk.st_mode & 0o077 == 0 else {
+                out.issues.append("workspace inode/owner/privacy lookup incomplete")
+                return out
+            }
+            out.rootfsDevice = UInt32(bitPattern: disk.st_dev)
+            out.rootfsInode = disk.st_ino
         }
-        out.rootfsDevice = UInt32(bitPattern: disk.st_dev)
-        out.rootfsInode = disk.st_ino
         func sameDisk(_ v: vinfo_stat) -> Bool {
-            v.vst_dev == out.rootfsDevice && v.vst_ino == out.rootfsInode
+            if absent && v.vst_ino != 0 && v.vst_nlink == 0 {
+                // A missing pathname cannot exclude a still-open, unlinked
+                // inode. Retain uncertainty rather than lose writer custody.
+                out.issues.append("unlinked vnode ownership unresolved during preboot probe")
+            }
+            return !absent && v.vst_dev == out.rootfsDevice && v.vst_ino == out.rootfsInode
         }
         // A second pass covers exits/reparenting and newly observed processes.
         // The Go owner holds the root launch lock and environment operation lock
@@ -195,7 +232,18 @@ public enum AgentFenceProbe {
             }
         }
         var finalDisk = stat()
-        if lstat(r.rootfs, &finalDisk) != 0 || finalDisk.st_dev != disk.st_dev || finalDisk.st_ino != disk.st_ino {
+        if absent {
+            if lstat(r.rootfs, &finalDisk) != -1 || errno != ENOENT {
+                out.workspaceAbsent = false
+                out.issues.append("workspace absence changed during observation")
+            }
+            if let container = r.container {
+                if lstat(container, &finalDisk) != -1 || errno != ENOENT {
+                    out.containerAbsent = false
+                    out.issues.append("container absence changed during observation")
+                }
+            }
+        } else if lstat(r.rootfs, &finalDisk) != 0 || finalDisk.st_dev != disk.st_dev || finalDisk.st_ino != disk.st_ino {
             out.issues.append("workspace inode changed during observation")
         }
         out.issues = Array(Set(out.issues)).sorted()

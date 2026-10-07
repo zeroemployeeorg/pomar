@@ -27,28 +27,31 @@ type ReconcileRequest struct {
 // Reconciliation is a new observation of current fencing; it never repairs a
 // historical vm_stopped=false receipt or claims historical non-execution.
 type Reconciliation struct {
-	Request              ReconcileRequest `json:"request"`
-	InputSHA256          string           `json:"input_sha256"`
-	HistoricalExecution  string           `json:"historical_execution"`
-	ObservedAt           string           `json:"observed_at"`
-	CurrentScope         string           `json:"current_scope"`
-	ReplacementEligible  bool             `json:"replacement_eligible"`
-	EvidenceFile         string           `json:"evidence_file"`
-	EvidenceSHA256       string           `json:"evidence_sha256"`
-	OriginalConfigSHA256 string           `json:"original_config_sha256"`
-	OriginalStatusSHA256 string           `json:"original_status_sha256"`
-	Issues               []string         `json:"issues"`
+	Request                  ReconcileRequest `json:"request"`
+	InputSHA256              string           `json:"input_sha256"`
+	HistoricalExecution      string           `json:"historical_execution"`
+	ObservedAt               string           `json:"observed_at"`
+	CurrentScope             string           `json:"current_scope"`
+	ReplacementEligible      bool             `json:"replacement_eligible"`
+	EvidenceFile             string           `json:"evidence_file"`
+	EvidenceSHA256           string           `json:"evidence_sha256"`
+	OriginalConfigSHA256     string           `json:"original_config_sha256"`
+	OriginalStatusSHA256     string           `json:"original_status_sha256"`
+	OriginalHelperExitSHA256 string           `json:"original_helper_exit_sha256,omitempty"`
+	Issues                   []string         `json:"issues"`
 }
 type FenceProbeRequest struct {
-	Environment string `json:"environment"`
-	Session     string `json:"session"`
-	Incarnation string `json:"incarnation"`
-	Operation   string `json:"operation"`
-	Rootfs      string `json:"rootfs"`
-	Helper      string `json:"helper"`
-	PID         int    `json:"pid"`
-	UID         int    `json:"uid"`
-	Birth       uint64 `json:"birth"`
+	Environment     string `json:"environment"`
+	Session         string `json:"session"`
+	Incarnation     string `json:"incarnation"`
+	Operation       string `json:"operation"`
+	Rootfs          string `json:"rootfs"`
+	Helper          string `json:"helper"`
+	PID             int    `json:"pid"`
+	UID             int    `json:"uid"`
+	Birth           uint64 `json:"birth"`
+	WorkspaceAbsent bool   `json:"workspace_absent,omitempty"`
+	Container       string `json:"container,omitempty"`
 }
 type FenceProbeEvidence struct {
 	Environment             string   `json:"environment"`
@@ -66,6 +69,8 @@ type FenceProbeEvidence struct {
 	KernelZombiesChecked    []int    `json:"kernelZombiesChecked"`
 	RootfsDevice            uint32   `json:"rootfsDevice"`
 	RootfsInode             uint64   `json:"rootfsInode"`
+	WorkspaceAbsent         bool     `json:"workspaceAbsent"`
+	ContainerAbsent         bool     `json:"containerAbsent"`
 	Issues                  []string `json:"issues"`
 	Confirmed               bool     `json:"confirmed"`
 }
@@ -207,7 +212,7 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var original VMSpec
-	if json.Unmarshal(configBytes, &original) != nil || original.Environment != e.Spec.Environment || original.Session != req.SessionID || original.Incarnation != req.Incarnation || original.Rootfs != e.Spec.Rootfs || original.Helper != e.Spec.Helper {
+	if json.Unmarshal(configBytes, &original) != nil || original.Environment != e.Spec.Environment || original.Session != req.SessionID || original.Incarnation != req.Incarnation || original.Rootfs != e.Spec.Rootfs || original.Helper != e.Spec.Helper || original.Directory != e.Spec.Directory || original.Store != e.Spec.Store {
 		failure(w, errors.New("original launch config identity mismatch"))
 		return
 	}
@@ -222,16 +227,36 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	statusBytes, err := readVMStatus(e)
-	if err != nil {
+	preboot := errors.Is(err, os.ErrNotExist) && observedPrebootRefusal(e, birth)
+	if err != nil && !preboot {
 		failure(w, errors.New("original VM receipt unavailable"))
 		return
 	}
 	var originalStatus map[string]string
-	if json.Unmarshal(statusBytes, &originalStatus) != nil || originalStatus["incarnation"] != req.Incarnation || originalStatus["session"] != req.SessionID || originalStatus["environment"] != e.Spec.Environment {
+	if !preboot && (json.Unmarshal(statusBytes, &originalStatus) != nil || originalStatus["incarnation"] != req.Incarnation || originalStatus["session"] != req.SessionID || originalStatus["environment"] != e.Spec.Environment) {
 		failure(w, errors.New("original VM receipt identity mismatch"))
 		return
 	}
 	receipt := &Reconciliation{Request: req, InputSHA256: hash, HistoricalExecution: "unknown", CurrentScope: "unknown", OriginalConfigSHA256: digest(configBytes), OriginalStatusSHA256: digest(statusBytes), Issues: []string{}}
+	container := filepath.Join(original.Store, "containers", "agent-"+original.Environment+"-"+original.Incarnation)
+	if preboot {
+		// Exit 2 is the trusted native helper's reserved refusal before VM/disk
+		// effects. Missing files or process absence alone never enter this path.
+		if original.Rootfs != filepath.Join(original.Directory, "workspace.ext4") || original.Store == "" || !filepath.IsAbs(original.Store) {
+			failure(w, errors.New("preboot workspace/container binding incomplete"))
+			return
+		}
+		for _, path := range []string{original.Rootfs, container} {
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				failure(w, errors.New("preboot workspace/container absence unconfirmed"))
+				return
+			}
+		}
+		exitBytes, _ := json.Marshal(e.HelperExit)
+		receipt.OriginalHelperExitSHA256 = digest(exitBytes)
+		receipt.OriginalStatusSHA256 = ""
+		receipt.HistoricalExecution = "preboot_refused"
+	}
 	e.Phase = "reconciling"
 	e.LaunchRevoked = append(e.LaunchRevoked, req.Incarnation)
 	e.Actions[req.OperationID] = Action{Kind: "reconcile", Expected: req.Incarnation, State: "dispatching", Reconciliation: receipt}
@@ -252,7 +277,7 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 	// request can acquire launch authority during this observation interval.
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	evidence, probeErr := h.machineProbe(ctx, FenceProbeRequest{Environment: e.Spec.Environment, Session: req.SessionID, Incarnation: req.Incarnation, Operation: req.OperationID, Rootfs: e.Spec.Rootfs, Helper: original.Helper, PID: e.Process.PID, UID: e.Process.UID, Birth: uint64(birth.Unix())})
+	evidence, probeErr := h.machineProbe(ctx, FenceProbeRequest{Environment: e.Spec.Environment, Session: req.SessionID, Incarnation: req.Incarnation, Operation: req.OperationID, Rootfs: e.Spec.Rootfs, Helper: original.Helper, PID: e.Process.PID, UID: e.Process.UID, Birth: uint64(birth.Unix()), WorkspaceAbsent: preboot, Container: container})
 	if probeErr != nil {
 		receipt.Issues = append(receipt.Issues, probeErr.Error())
 	}
@@ -262,7 +287,13 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 	if statErr == nil {
 		disk, _ = stat.Sys().(*syscall.Stat_t)
 	}
-	if probeErr == nil && (evidence.Environment != e.Spec.Environment || evidence.Session != req.SessionID || evidence.Incarnation != req.Incarnation || evidence.Operation != req.OperationID || evidence.Coverage != "direct-vz-private-disk/v1" || evidence.ObserverUID != os.Getuid() || evidence.ProcessCount == 0 || evidence.OwnProcessesChecked == 0 || evidence.ObservedAt == "" || disk == nil || uint32(disk.Dev) != evidence.RootfsDevice || disk.Ino != evidence.RootfsInode) {
+	coverageOK := evidence.Coverage == "direct-vz-private-disk/v1" && disk != nil && uint32(disk.Dev) == evidence.RootfsDevice && disk.Ino == evidence.RootfsInode
+	if preboot {
+		_, containerErr := os.Lstat(container)
+		_, statusErr := readVMStatus(e)
+		coverageOK = evidence.Coverage == "direct-vz-preboot-refusal/v1" && evidence.WorkspaceAbsent && evidence.ContainerAbsent && errors.Is(statErr, os.ErrNotExist) && errors.Is(containerErr, os.ErrNotExist) && errors.Is(statusErr, os.ErrNotExist)
+	}
+	if probeErr == nil && (evidence.Environment != e.Spec.Environment || evidence.Session != req.SessionID || evidence.Incarnation != req.Incarnation || evidence.Operation != req.OperationID || !coverageOK || evidence.ObserverUID != os.Getuid() || evidence.ProcessCount == 0 || evidence.OwnProcessesChecked == 0 || evidence.ObservedAt == "") {
 		receipt.Issues = append(receipt.Issues, "native probe identity or coverage incomplete")
 	}
 	receipt.ObservedAt = time.Now().UTC().Format(time.RFC3339Nano)
@@ -300,4 +331,13 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	// The old stop Action.Fence and vm-status bytes were never mutated.
 	respond(w, 200, map[string]any{"operation_id": req.OperationID, "action": a})
+}
+
+func observedPrebootRefusal(e *Environment, birth time.Time) bool {
+	x := e.HelperExit
+	if x == nil || x.Incarnation != e.Spec.Incarnation || x.PID != e.Process.PID || x.ExitCode != 2 || x.Signal != 0 {
+		return false
+	}
+	observed, err := time.Parse(time.RFC3339Nano, x.ObservedAt)
+	return err == nil && !observed.Before(birth) && !observed.After(time.Now())
 }

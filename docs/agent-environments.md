@@ -1,5 +1,33 @@
 # Agent environments
 
+## Reconciling a pre-boot refusal
+
+The trusted native helper reserves exit code 2 for refusal before VM or
+workspace effects. The owner can reconcile this outcome without a VM receipt
+that was never created. This requires its retained wait receipt (normal exit
+2, matching original helper PID/incarnation and observation after the retained
+process birth), the original launch/config/session binding, and a retained
+network/adapter revocation. A missing PID, missing receipt, missing workspace,
+signal or other exit code does not establish non-start.
+
+The read-only native probe additionally requires the original workspace and
+exact container path to remain absent in the owner's private directory. It
+checks the kernel process inventory twice, helper/executor ownership, open
+descriptors, fileports and mapped regions. Possible VM ownership, inaccessible
+coverage or an unlinked inode retains the hold; it cannot be cleared by
+deleting a pathname. Both absences and missing VM status are checked again
+before the durable fence is committed under the existing owner/operation
+locks. The client cannot supply an exit receipt or a probe result.
+
+Successful reconciliation records `historical_execution: preboot_refused`
+and a new current fence. It retains the original failed launch/stop records
+and binds the supervisor exit bytes by digest, without synthesising a VM
+receipt. The environment leaves the held reservation through the existing
+`fenced` phase; an identical operation retry returns the original result
+without another probe or resource release. A new launch remains a distinct
+owner action. If any required evidence is unavailable, execution uncertainty
+and its reservation remain unchanged.
+
 Lifecycle event exports retain validated thread/turn identity, completion status and numeric provider error codes. Raw provider diagnostic messages, nested error data and extra lifecycle metadata are omitted; `params_sha256` binds their original bytes without storing them. This applies before durable journaling, so reopening, session snapshots and event reads share the same projection. Supported device-login responses are returned only to the requesting owner and are not journaled. Item/tool text, approval inputs, controller data and ordinary result files remain untrusted content; this projection does not establish arbitrary secret containment or filter guest egress.
 
 Experimental development interface, `pomar.agent/v1`. Agent environments are separate from the
