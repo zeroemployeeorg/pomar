@@ -132,13 +132,16 @@ func run() error {
 			return err
 		}
 		// Not --bare: it never reads OAuth credentials (claude --help, 2.1.280).
-		// Only the environment's own user settings load; a task repository's
-		// project or local settings cannot add hooks or permission rules.
+		// --restricted ignores user, project and local settings files, so
+		// neither a task repository nor the agent itself (its own user settings
+		// are writable by it) can add hooks or permission rules. Its tools are
+		// the ones Pomar names, and its permission policy is Pomar's own,
+		// through --settings (adviser note r42 §6; TestLiveBashRules).
 		// The only MCP server is Pomar's bridge. The controller request tool,
 		// when configured, is the controlled exchange itself, so it is allowed
 		// rather than put to the permission tool. The owner's adapter selection
-		// binds these arguments, so it covers the controller tool too.
-		args := []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName}
+		// binds these arguments, so it covers the tools and rules too.
+		args := []string{"--restricted", "--tools", claudeactor.GuestTools, "--settings", claudeactor.BashRules, "--strict-mcp-config", "--mcp-config", mcpConfig, "--permission-prompt-tool", claudeactor.PermissionToolName}
 		if len(names) > 0 {
 			args = append(args, "--allowedTools", claudeactor.ControllerToolName)
 		}

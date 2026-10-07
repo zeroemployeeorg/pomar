@@ -40,7 +40,7 @@ type liveProc struct {
 
 func startLive(t *testing.T, binary, dir string, args ...string) *liveProc {
 	t.Helper()
-	full := append([]string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--setting-sources", "user", "--strict-mcp-config", "--model", "haiku", "--tools", ""}, args...)
+	full := append([]string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--restricted", "--settings", BashRules, "--strict-mcp-config", "--model", "haiku", "--tools", ""}, args...)
 	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_TELEMETRY=1", "DISABLE_ERROR_REPORTING=1", "DISABLE_AUTOUPDATER=1"}
 	p, err := Exec{Binary: binary, Dir: dir, Env: env, UID: -1, GID: -1}.Start(full)
 	if err != nil {
@@ -188,7 +188,7 @@ func TestLivePermissionBridge(t *testing.T) {
 			env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1", "DISABLE_TELEMETRY=1", "DISABLE_ERROR_REPORTING=1", "DISABLE_AUTOUPDATER=1"}
 			actor := New(Config{
 				Version:       "2.1.280",
-				Args:          []string{"--setting-sources", "user", "--strict-mcp-config", "--mcp-config", string(mcp), "--permission-prompt-tool", PermissionToolName, "--model", "haiku", "--tools", "Bash"},
+				Args:          []string{"--restricted", "--settings", BashRules, "--strict-mcp-config", "--mcp-config", string(mcp), "--permission-prompt-tool", PermissionToolName, "--model", "haiku", "--tools", "Bash"},
 				Start:         Exec{Binary: binary, Dir: work, Env: env, UID: -1, GID: -1}.Start,
 				Authenticated: func() bool { return true },
 			}, broker.Observe)

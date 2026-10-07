@@ -299,6 +299,20 @@ owner-selected executable pinned in the qualification policy: Claude Code
 2.1.280 on darwin/arm64 (`TestLiveControllerTool`); its linux/arm64 executable
 is pinned only after an in-guest qualification.
 
+Claude Code runs under `--restricted`, so user, project and local settings
+files are ignored. Neither a task repository nor the agent itself can add
+hooks or permission rules. Its built-in tools are the ones Pomar names
+(`GuestTools`: Bash, Read, Edit, Write, Glob, Grep, NotebookEdit), and its
+permission policy is Pomar's own (`BashRules`, through `--settings`):
+- read-only listing, reading and git-inspection commands run unasked;
+- network tools are refused outright;
+- git operations that reach a remote are always asked about.
+
+Anything else follows Claude Code's default; an unlisted read such as `echo`
+runs unasked on 2.1.280. `TestLiveBashRules` records this and must be re-run
+on every pin change. Prefix rules are a policy layer; the egress allowlist and
+fence remain the containment.
+
 ## First assignment and acceptance
 
 The initial assignment uses an isolated Pomar checkout: accept only ASCII
