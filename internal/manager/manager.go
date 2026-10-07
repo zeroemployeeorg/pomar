@@ -72,6 +72,17 @@ type JobClass struct {
 	// is package-lock.json at its root. It is the class's, never a start's:
 	// a starter cannot choose which lock widens the registry.
 	NPMLock string
+	// SourceMirrors restricts this class before a mirror is synced. Empty
+	// retains single-class development behavior. Multi-class control servers
+	// with sources require explicit lists for every class.
+	SourceMirrors []string
+	// SourceRef, when set, requires this ref and an explicit full source SHA.
+	SourceRef string
+	// Command, when nonempty, is the exact argv this fixed workload admits.
+	Command []string
+	// DisableGoProxy prevents this class from receiving the general module
+	// proxy even when the manager serves it to another class.
+	DisableGoProxy bool
 }
 
 // Config is what a manager needs.
@@ -221,6 +232,9 @@ func Open(cfg Config) (*Manager, error) {
 	}
 	cfg.Class, cfg.Guest, cfg.Base = cfg.Classes[0].Class, cfg.Classes[0].Guest, cfg.Classes[0].Base
 	if err := checkClassAllow(cfg); err != nil {
+		return nil, err
+	}
+	if err := checkClassSources(cfg); err != nil {
 		return nil, err
 	}
 	if cfg.Host == (capacity.Host{}) {
@@ -464,6 +478,9 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 	if len(command) == 0 {
 		return Entry{}, errors.New("manager: empty command")
 	}
+	if err := jc.checkWorkload(command, src); err != nil {
+		return Entry{}, err
+	}
 	if src != nil && m.cfg.Mirrors == nil {
 		return Entry{}, errors.New("manager: sources are not configured")
 	}
@@ -633,7 +650,7 @@ func (m *Manager) startBy(by *uint32, className, id string, command []string, sr
 		args = append(args, "--pins", pinsPath)
 	}
 	args = append(args, accessArgs(src, jc)...)
-	withProxy := src != nil && m.proxyEnabled()
+	withProxy := src != nil && !jc.DisableGoProxy && m.proxyEnabled()
 	if withProxy {
 		// Its own socket, relayed into its guest only; the shim serves it on
 		// the guest's loopback as GOPROXY.

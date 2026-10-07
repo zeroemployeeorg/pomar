@@ -24,12 +24,7 @@ import (
 // can be too long on macOS.
 func shortTemp(t *testing.T) string {
 	t.Helper()
-	d, err := os.MkdirTemp("/tmp", "pm")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.RemoveAll(d) })
-	return d
+	return shortDir(t)
 }
 
 func openProxy(t *testing.T, upstream string) (*Manager, *venue.Venue) {
@@ -97,11 +92,15 @@ func TestProxySocketServesThenCloses(t *testing.T) {
 
 func TestProxySocketPathTooLongIsRefused(t *testing.T) {
 	m, _ := openProxy(t, "http://unused.invalid")
-	long := strings.Repeat("x", 40)
+	room := 103 - len(filepath.Join(m.cfg.Venue.Root(), attemptsDir, "goproxy.sock")) - 1
+	if room < 1 {
+		t.Fatal("TMPDIR leaves no room for an attempt's proxy socket")
+	}
+	long := strings.Repeat("x", min(40, room))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	// A 40-character id under a short root still fits; the check is
-	// against the platform limit, exercised with a deep root below.
+	// An id budgeted against the selected physical TMPDIR fits; the same
+	// id under the deeper root below exceeds the platform limit.
 	if err := os.MkdirAll(filepath.Join(m.cfg.Venue.Root(), attemptsDir, long), 0o700); err != nil {
 		t.Fatal(err)
 	}
