@@ -124,7 +124,9 @@ import Foundation
         #expect(!AgentEnvironment.valid(o))
     }
     o.agentVersion = "2.1.280"; o.controllerCapabilities = ["inbox"]
-    #expect(!AgentEnvironment.valid(o))  // the controller bridge is Codex-only
+    #expect(AgentEnvironment.valid(o))  // the guest broker gates it by the executable pin
+    o.controllerCapabilities = ["not a name"]
+    #expect(!AgentEnvironment.valid(o))
     var codex = agentOptions(); codex.agentVersion = "1.0.0"
     #expect(!AgentEnvironment.valid(codex))
     var other = agentOptions(); other.agent = "other"

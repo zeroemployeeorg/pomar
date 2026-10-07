@@ -93,16 +93,17 @@ const qualifiedCodexDarwin = "112fae7a5a1223e673c8a1791d32338f37df8b527ff1159bb8
 
 // Claude Code 2.1.280's controller request tool (internal/claudeactor),
 // qualified natively against this darwin/arm64 executable by
-// TestLiveControllerTool. Its linux/arm64 executable is pinned only after its
-// own in-guest qualification.
+// TestLiveControllerTool, and against the linux/arm64 executable in the guest
+// package (Anthropic's release manifest sha256) by an in-guest run.
 const qualifiedClaudeDarwin = "387a5c5dcdbb815085edf0baf79591f9d8894efe922bceaf3d75b1b08055229d"
+const qualifiedClaudeLinux = "92f2b4fd05d0bdcf7b9a0d4e0ecef4a1e4b368b290cd8fd07cff9a50013f45a2"
 
 func qualifiedController(selection *AdapterSelection) bool {
 	if selection == nil {
 		return false
 	}
 	if selection.Provider == "anthropic" && selection.Name == "claude-code" && selection.Version == "2.1.280" {
-		return selection.Platform == "darwin/arm64" && selection.ExecutableSHA256 == qualifiedClaudeDarwin
+		return (selection.Platform == "darwin/arm64" && selection.ExecutableSHA256 == qualifiedClaudeDarwin) || (selection.Platform == "linux/arm64" && selection.ExecutableSHA256 == qualifiedClaudeLinux)
 	}
 	if selection.Provider != "openai" || selection.Name != "codex-app-server" || selection.Version != "0.160.0" {
 		return false

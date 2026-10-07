@@ -43,11 +43,13 @@ public enum AgentEnvironment {
         case "codex":
             return o.agentVersion == nil
         case "claude":
-            // A dotted numeric version only; the controller bridge is
-            // qualified for Codex alone, so no capabilities with Claude Code.
+            // A dotted numeric version only. Controller capabilities pass
+            // through: the guest broker enables them only for an
+            // owner-selected Claude Code executable pinned as qualified
+            // (agentenv qualifiedController), and refuses to start otherwise.
             guard let v = o.agentVersion, !v.isEmpty, v.count <= 32,
                   v.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }), !v.hasPrefix("."), !v.hasSuffix(".") else { return false }
-            return (o.controllerCapabilities ?? []).isEmpty
+            return true
         default:
             return false
         }
