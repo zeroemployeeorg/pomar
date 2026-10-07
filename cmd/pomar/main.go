@@ -49,6 +49,7 @@ const usage = `usage:
                 [-class-name NAME -class-vcpu N -class-memory-mib M -class-disk-peak-gib G -class-concurrency N]
                 [-class-time-limit D] [-budget-vcpu N -budget-memory-gib G]
                 [-ctl-socket PATH] [-sign-results] [-mirror-url NAME=URL]... [-class-job-user] [-class-npm [-class-npm-lock PATH]] [-class-image NAME]
+                [-classes-file PATH] (replaces the class-* flags; explicit callers and source mirrors per class)
                 [-class-allow NAME=USER[,USER...]]...
                                     with -shim-bin, attempts with a source get the Go module proxy
                                     supervise helpers; reconcile on start; serve the socket
@@ -322,6 +323,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	concurrency := fs.Int("class-concurrency", 0, "the CI class's measured concurrency limit on this host (0: not measured here; slots only)")
 	kernelSum := fs.String("kernel-sha256", "", "pinned sha256 of the extracted kernel")
 	ctlSocket := fs.String("ctl-socket", "", "a second socket for the stream: start, stop and reads only (mode 0660; its directory must not be open to others)")
+	classesFile := fs.String("classes-file", "", "owner-supplied pomar.manager-classes/v1 JSON; replaces all class-* flags with explicit class callers, source mirrors, images and limits")
 	var mirrorURLs map[string]string
 	fs.Func("mirror-url", "NAME=URL: a mirror attempts may name, synced by the manager from URL at each start (repeatable; with none, mirrors are synced by hand)", func(s string) error {
 		name, url, ok := strings.Cut(s, "=")
@@ -362,6 +364,25 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 	signResults := fs.Bool("sign-results", false, "sign each result with the key in the data root's keys/ (created on first use); refused unless the manager runs as a role user")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	var profiles []classProfile
+	if *classesFile != "" {
+		conflict := false
+		fs.Visit(func(f *flag.Flag) {
+			if strings.HasPrefix(f.Name, "class-") {
+				conflict = true
+			}
+		})
+		if conflict {
+			fmt.Fprintln(stderr, "manager: -classes-file cannot be combined with class-* flags")
+			return 2
+		}
+		var err error
+		profiles, classAllow, err = readClassProfiles(*classesFile, lookupUID)
+		if err != nil {
+			fmt.Fprintln(stderr, "manager: -classes-file:", err)
+			return 2
+		}
 	}
 	if *hostBin == "" || *kernelSum == "" {
 		fmt.Fprint(stderr, usage)
@@ -450,7 +471,7 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		host = h
 		fmt.Fprintf(stdout, "manager: CI budget %d vCPU, %d GiB (Pomar's reserve: %d CPUs, %d GiB)\n", h.CPUSlots, *budgetGiB, capacity.ReservedCPUs, capacity.ReservedMemory/capacity.GiB)
 	}
-	m, err := manager.Open(manager.Config{
+	cfg := manager.Config{
 		Signer:     signer,
 		MirrorURLs: mirrorURLs,
 		JobUser:    *jobUser,
@@ -498,7 +519,11 @@ func managerCmd(args []string, stdout, stderr io.Writer) int {
 		UID:       os.Getuid(),
 		Log:       stdout,
 		CtlSocket: *ctlSocket,
-	})
+	}
+	if len(profiles) != 0 {
+		cfg.Classes, cfg.Pinned = configuredClasses(profiles, e, bin, *kernelSum)
+	}
+	m, err := manager.Open(cfg)
 	if err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
