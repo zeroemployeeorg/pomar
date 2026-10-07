@@ -144,6 +144,7 @@ type Action struct {
 	State                string          `json:"state"`
 	Fence                *Fence          `json:"fence,omitempty"`
 	Reconciliation       *Reconciliation `json:"reconciliation,omitempty"`
+	Retirement           *Retirement     `json:"retirement,omitempty"`
 	ResultingIncarnation string          `json:"resulting_incarnation,omitempty"`
 }
 type Fence struct {
@@ -437,7 +438,7 @@ func (h *Host) start(e *Environment) error {
 	}
 	live := 0
 	for _, other := range h.envs {
-		if other.Phase != "stopped" && other.Phase != "created" && other.Phase != "fenced" {
+		if other.Phase != "stopped" && other.Phase != "created" && other.Phase != "fenced" && other.Phase != "retired" {
 			live++
 		}
 	}
@@ -529,7 +530,7 @@ func (h *Host) start(e *Environment) error {
 // The caller holds h.mu and this environment's operationMu. Release the shared
 // lock while waiting so inspection and unrelated environments remain available.
 func (h *Host) stop(e *Environment) error {
-	if e.Phase == "stopped" || e.Phase == "fenced" {
+	if e.Phase == "stopped" || e.Phase == "fenced" || e.Phase == "retired" {
 		return nil
 	}
 	if g := h.gates[e.Spec.Environment]; g != nil {
@@ -580,6 +581,7 @@ func (h *Host) stop(e *Environment) error {
 
 func (h *Host) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST /v1/environments/{id}/retire", h.retireHandler)
 	mux.HandleFunc("POST /v1/environments/{id}/reconcile", h.reconcileHandler)
 	mux.HandleFunc("POST /v1/environments/{id}/continuations", h.continuationHandler)
 	mux.HandleFunc("POST /v1/environments", func(w http.ResponseWriter, r *http.Request) {

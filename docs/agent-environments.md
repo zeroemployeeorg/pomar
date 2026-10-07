@@ -435,3 +435,38 @@ dispatch, permission responses and turn interruption are refused while resume
 is unconfirmed. Actor departure also leaves durable inspection available;
 neither a failed resume nor a missing rollout authorizes replay or a fresh
 thread. Host execution fencing remains a separate lifecycle fact.
+
+### Owner retirement and retained guest data
+
+`POST /v1/environments/{id}/retire` is separate from `stop`. Its request binds
+`operation_id`, `session_id`, `expected_incarnation`, the original complete
+`fence_operation`, `mode`, and an owner `retention_reference`. A stopped or
+fenced scope with all four confirmed fences is required; running or uncertain
+ownership is refused. Retirement permanently removes launch eligibility for
+that environment. The metadata, immutable launch/stop/probe evidence and
+original operations remain inspectable.
+
+Mode `retain` leaves the guest disk intact. Mode `delete-workspace-and-auth`
+explicitly selects deletion of the private `workspace.ext4`, which contains
+both unique workspace and guest provider authentication state. The retention
+reference records the owner's preservation or retention decision; it does not
+claim the service independently verified a backup. No credentials are extracted.
+Shared bases, source bundles, native container caches and service records are
+not deleted. Filesystem reclamation is not cryptographic secure erasure.
+
+Deletion requires a fresh trusted native executor/descriptor/fileport/mmap
+probe covering the exact private singly linked disk device/inode. Inaccessible
+process coverage, possible unrelated executors, writers, inode substitution,
+symlinks, hard links and journal failures refuse deletion. The existing
+conservative native attribution limits still apply. Retirement does not clear
+cc-3's held reservation or permit stopping another owner to obtain coverage.
+
+The host retains its root and environment locks and persists the terminal
+compute/launch tombstone before unlinking the disk. An interrupted cleanup
+remains `cleanup_pending`; new starts cannot resume partially removed state.
+Inspect the original operation, then explicitly continue the same bound
+request with `resume_cleanup:true`. If the original disk remains, its identity
+must still match and it is probed again. Absence completes only a previously
+fenced, durably tombstoned cleanup; it never proves an uncertain VM stopped.
+The directory and final journal are synced. Completed retries are inspection,
+not a second deletion. Host journal uncertainty holds further mutations.
