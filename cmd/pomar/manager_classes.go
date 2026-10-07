@@ -19,22 +19,23 @@ import (
 const classesSchema = "pomar.manager-classes/v1"
 
 type classProfile struct {
-	Name          string   `json:"name"`
-	Image         string   `json:"image"`
-	VCPU          int      `json:"vcpu"`
-	MemoryMiB     int64    `json:"memory_mib"`
-	DiskPeakGiB   int64    `json:"disk_peak_gib"`
-	Concurrency   int      `json:"concurrency"`
-	TimeLimitS    int64    `json:"time_limit_s"`
-	LogCapBytes   int64    `json:"log_cap_bytes"`
-	Callers       []string `json:"callers"`
-	SourceMirrors []string `json:"source_mirrors"`
-	SourceRef     string   `json:"source_ref,omitempty"`
-	Command       []string `json:"command,omitempty"`
-	JobUser       bool     `json:"job_user"`
-	GoProxy       bool     `json:"go_proxy"`
-	NPM           bool     `json:"npm"`
-	NPMLock       string   `json:"npm_lock,omitempty"`
+	Name           string   `json:"name"`
+	Image          string   `json:"image"`
+	VCPU           int      `json:"vcpu"`
+	MemoryMiB      int64    `json:"memory_mib"`
+	DiskPeakGiB    int64    `json:"disk_peak_gib"`
+	Concurrency    int      `json:"concurrency"`
+	TimeLimitS     int64    `json:"time_limit_s"`
+	LogCapBytes    int64    `json:"log_cap_bytes"`
+	OutputCapBytes int64    `json:"output_cap_bytes"`
+	Callers        []string `json:"callers"`
+	SourceMirrors  []string `json:"source_mirrors"`
+	SourceRef      string   `json:"source_ref,omitempty"`
+	Command        []string `json:"command,omitempty"`
+	JobUser        bool     `json:"job_user"`
+	GoProxy        bool     `json:"go_proxy"`
+	NPM            bool     `json:"npm"`
+	NPMLock        string   `json:"npm_lock,omitempty"`
 }
 
 // Read this owner-supplied configuration before opening a venue or creating a
@@ -80,7 +81,8 @@ func readClassProfiles(file string, lookup func(string) (uint32, error)) ([]clas
 	}
 	namePattern := regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
 	allow := map[string][]uint32{}
-	for _, c := range doc.Classes {
+	for i := range doc.Classes {
+		c := &doc.Classes[i]
 		if !namePattern.MatchString(c.Name) || allow[c.Name] != nil {
 			return nil, nil, fmt.Errorf("classes file has an invalid or repeated class name")
 		}
@@ -91,6 +93,18 @@ func readClassProfiles(file string, lookup func(string) (uint32, error)) ([]clas
 			c.DiskPeakGiB < 0 || c.DiskPeakGiB > (math.MaxInt64-capacity.HeadroomBytes)>>30 || c.Concurrency <= 0 ||
 			c.TimeLimitS <= 0 || c.TimeLimitS > math.MaxInt64/int64(time.Second) || c.LogCapBytes < 0 || c.LogCapBytes > 64<<20 {
 			return nil, nil, fmt.Errorf("class %q has invalid resource limits", c.Name)
+		}
+		// Profile-driven classes share a 64 MiB transport budget between
+		// the output log and named files. Materialise defaults before admission
+		// so the result records the limits actually enforced.
+		if c.LogCapBytes == 0 {
+			c.LogCapBytes = manager.DefaultLogCapBytes
+		}
+		if c.OutputCapBytes == 0 {
+			c.OutputCapBytes = manager.MaxOutputsBytes - c.LogCapBytes
+		}
+		if c.OutputCapBytes <= 0 || c.OutputCapBytes > manager.MaxOutputsBytes-c.LogCapBytes {
+			return nil, nil, fmt.Errorf("class %q output and log caps must fit within 64 MiB", c.Name)
 		}
 		if len(c.Callers) == 0 || len(c.SourceMirrors) == 0 {
 			return nil, nil, fmt.Errorf("class %q requires explicit callers and source mirrors", c.Name)
@@ -122,6 +136,7 @@ func configuredClasses(profiles []classProfile, e *smoke.Env, hostBin, kernelSHA
 		pinned = append(pinned, basePath)
 		c := ciClass(p.Name, p.VCPU, p.MemoryMiB, p.DiskPeakGiB, p.Concurrency, time.Duration(p.TimeLimitS)*time.Second)
 		c.LogCapBytes = p.LogCapBytes
+		c.OutputCapBytes = p.OutputCapBytes
 		classes = append(classes, manager.JobClass{
 			Class: c, Guest: manager.Guest{Kernel: e.KernelPath(), KernelSHA256: kernelSHA,
 				InitRef: smoke.InitRepo + "@" + smoke.InitDigest, InitDigest: smoke.InitDigest,

@@ -62,6 +62,9 @@ func TestProfilesKeepPerClassImagesSourcesCallersAndLimits(t *testing.T) {
 	if classes[1].Class.TimeLimitSeconds != 10800 || classes[1].Class.MemoryBytes != 8192<<20 || classes[1].Class.Concurrency != 1 || classes[1].Class.Measured {
 		t.Fatalf("site limits: %+v", classes[1].Class)
 	}
+	if classes[1].Class.LogCapBytes != 16<<20 || classes[1].Class.OutputCapBytes != 48<<20 {
+		t.Fatalf("default transport caps: %+v", classes[1].Class)
+	}
 	if classes[0].DisableGoProxy || !classes[1].DisableGoProxy || !classes[1].NPM || !classes[1].JobUser || classes[1].SourceMirrors[0] != "site" {
 		t.Fatal("class policy lost")
 	}
@@ -85,16 +88,19 @@ func TestProfilesKeepPerClassImagesSourcesCallersAndLimits(t *testing.T) {
 
 func TestProfilesRefuseUnresolvedOrAmbiguousAuthority(t *testing.T) {
 	for name, change := range map[string]func([]classProfile){
-		"unknown account":      func(p []classProfile) { p[1].Callers = []string{"missing"} },
-		"no callers":           func(p []classProfile) { p[1].Callers = nil },
-		"no source list":       func(p []classProfile) { p[1].SourceMirrors = nil },
-		"duplicate caller":     func(p []classProfile) { p[1].Callers = []string{"build", "build"} },
-		"duplicate class":      func(p []classProfile) { p[1].Name = "ci" },
-		"unreviewed image":     func(p []classProfile) { p[1].Image = "custom-url" },
-		"no time bound":        func(p []classProfile) { p[1].TimeLimitS = 0 },
-		"overflow memory":      func(p []classProfile) { p[1].MemoryMiB = 1 << 50 },
-		"negative disk":        func(p []classProfile) { p[1].DiskPeakGiB = -1 },
-		"no concurrency bound": func(p []classProfile) { p[1].Concurrency = 0 },
+		"unknown account":               func(p []classProfile) { p[1].Callers = []string{"missing"} },
+		"no callers":                    func(p []classProfile) { p[1].Callers = nil },
+		"no source list":                func(p []classProfile) { p[1].SourceMirrors = nil },
+		"duplicate caller":              func(p []classProfile) { p[1].Callers = []string{"build", "build"} },
+		"duplicate class":               func(p []classProfile) { p[1].Name = "ci" },
+		"unreviewed image":              func(p []classProfile) { p[1].Image = "custom-url" },
+		"no time bound":                 func(p []classProfile) { p[1].TimeLimitS = 0 },
+		"overflow memory":               func(p []classProfile) { p[1].MemoryMiB = 1 << 50 },
+		"negative disk":                 func(p []classProfile) { p[1].DiskPeakGiB = -1 },
+		"no concurrency bound":          func(p []classProfile) { p[1].Concurrency = 0 },
+		"negative output cap":           func(p []classProfile) { p[1].OutputCapBytes = -1 },
+		"output and log over budget":    func(p []classProfile) { p[1].OutputCapBytes = 49 << 20 },
+		"log leaves no output headroom": func(p []classProfile) { p[1].LogCapBytes = 64 << 20 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			p := profileFixture()
@@ -134,6 +140,18 @@ func TestProfilesRefuseUnresolvedOrAmbiguousAuthority(t *testing.T) {
 	}
 	if _, _, err := readClassProfiles(link, fixtureUID); err == nil {
 		t.Fatal("symlink profile accepted")
+	}
+}
+
+func TestProfilesMaterialiseExplicitTransportCaps(t *testing.T) {
+	p := profileFixture()
+	p[1].LogCapBytes, p[1].OutputCapBytes = 8<<20, 56<<20
+	profiles, _, err := readClassProfiles(writeProfiles(t, p), fixtureUID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if profiles[1].LogCapBytes != 8<<20 || profiles[1].OutputCapBytes != 56<<20 {
+		t.Fatalf("explicit caps changed: %+v", profiles[1])
 	}
 }
 

@@ -60,20 +60,32 @@ func checkOutputs(names []string) error {
 }
 
 // outputArgs are the helper's flags for an attempt's outputs.
-func outputArgs(rec string, names []string) []string {
+func outputArgs(rec string, names []string, capBytes int64) []string {
 	if len(names) == 0 {
 		return nil
 	}
 	return []string{"--outputs", strings.Join(names, ","), "--outputs-dir", filepath.Join(rec, outputsDir),
-		"--outputs-max", strconv.Itoa(MaxOutputsBytes)}
+		"--outputs-max", strconv.FormatInt(outputLimit(capBytes), 10)}
+}
+
+func outputLimit(capBytes int64) int64 {
+	if capBytes == 0 {
+		return MaxOutputsBytes
+	}
+	// Invalid values must never expand transport or disable its bound.
+	if capBytes < 0 || capBytes > MaxOutputsBytes {
+		return 0
+	}
+	return capBytes
 }
 
 // collectOutputs checks what the helper copied into the record against the
 // declared names and the cap, whatever the guest did: anything that is not a
 // regular file, or that would take the total over the cap, is removed. What
 // is kept is made read-only.
-func collectOutputs(rec string, names []string) []OutputRecord {
+func collectOutputs(rec string, names []string, capBytes int64) []OutputRecord {
 	dir := filepath.Join(rec, outputsDir)
+	limit := outputLimit(capBytes)
 	var out []OutputRecord
 	var total int64
 	for _, n := range names {
@@ -87,7 +99,7 @@ func collectOutputs(rec string, names []string) []OutputRecord {
 			os.RemoveAll(p)
 			out = append(out, OutputRecord{Name: n, Status: OutputNotRegular})
 			continue
-		case total+fi.Size() > MaxOutputsBytes:
+		case fi.Size() > limit-total:
 			os.Remove(p)
 			out = append(out, OutputRecord{Name: n, Status: OutputOverCap})
 			continue

@@ -20,6 +20,7 @@ classes or caller UIDs are refused. Accounts must already exist.
       "concurrency": 1,
       "time_limit_s": 10800,
       "log_cap_bytes": 16777216,
+      "output_cap_bytes": 50331648,
       "callers": ["example-build"],
       "source_mirrors": ["example"],
       "source_ref": "main",
@@ -54,6 +55,16 @@ cannot be separated by a seat name. The owner's socket remains unscoped and
 must stay private. Source and output verification still belong to the consumer;
 configuration does not make an unqualified image or provisional resource
 figures measured, and does not install or upgrade a permanent daemon.
+
+Profile-driven classes limit the combined output log and named output files
+to 64 MiB. An omitted `log_cap_bytes` becomes 16 MiB; an omitted
+`output_cap_bytes` becomes the remainder, normally 48 MiB. Explicit values
+must leave positive output capacity within that combined bound. Both values
+are recorded with the admitted class and signed result. The guest copy and
+host verification enforce the same output limit; an oversized output is
+refused rather than truncated. Completing a retained attempt uses its admitted
+limit even when the current configuration has changed. The legacy single-class
+interface retains its separate 64 MiB output limit.
 
 Each class verifies its own base at manager startup. All selected bases and
 the shared kernel remain pinned against eviction. Aggregate CPU/memory/disk

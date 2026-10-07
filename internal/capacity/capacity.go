@@ -60,6 +60,10 @@ type Class struct {
 	// output log; a longer log is marked truncated. Zero means the manager's
 	// default (the elders' ruling of 2026-09-27 §2.2: a per-class cap).
 	LogCapBytes int64 `json:"log_cap_bytes,omitempty"`
+	// OutputCapBytes caps the total named files copied out of an attempt.
+	// Zero preserves the manager's historical 64 MiB limit. The admitted
+	// value is retained with the attempt, including across manager restarts.
+	OutputCapBytes int64 `json:"output_cap_bytes,omitempty"`
 }
 
 // VMOverhead is the per-guest memory the host pays above the cap: measured
@@ -81,7 +85,7 @@ func (c Class) MemoryClaim() int64 { return c.MemoryBytes + c.VMOverheadBytes }
 func (c Class) Claim() int64 { return c.DiskPeakBytes + HeadroomBytes }
 
 func (c Class) validate() error {
-	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 {
+	if c.Name == "" || c.VCPU < 1 || c.MemoryBytes < 1 || c.DiskPeakBytes < 0 || c.TimeLimitSeconds < 0 || c.LogCapBytes < 0 || c.OutputCapBytes < 0 || c.OutputCapBytes > 64<<20 {
 		return fmt.Errorf("capacity: invalid class %+v", c)
 	}
 	return nil
