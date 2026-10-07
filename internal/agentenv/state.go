@@ -479,6 +479,13 @@ func (m *Store) Accepted(incarnation, operation, turn string) error {
 		return ErrConflict
 	}
 	op.TurnID = turn
+	// A turn is accepted on the session's current thread. Only the operation
+	// that starts a thread learns it from thread/start; later operations on
+	// the same thread, and every operation after a resume, are bound here, so
+	// their turns' controller requests can be bound to them.
+	if op.ThreadID == "" {
+		op.ThreadID = m.s.ThreadID
+	}
 	if op.Completion == "" {
 		op.State = "accepted"
 	}
@@ -557,6 +564,11 @@ func (m *Store) Observe(incarnation, method string, requestID, params json.RawMe
 			op.TurnID = turn
 			op.State = "accepted"
 			op.ActorAcknowledged = true
+			// turn/started can precede the turn/start reply; its thread is
+			// the session's, checked above.
+			if op.ThreadID == "" {
+				op.ThreadID = p.ThreadID
+			}
 		}
 		if method == "turn/completed" && turn != "" {
 			switch p.Turn.Status {
