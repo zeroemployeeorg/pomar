@@ -28,10 +28,24 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 	layout := fs.String("layout", "", "an OCI image layout directory")
 	pin := fs.String("digest", "", "the pinned digest of the image's linux/arm64 manifest")
 	name := fs.String("name", "", "the image's reference, as the layout's index.json names it (load)")
+	catalogue := fs.String("catalogue", "", "a reviewed local-layout catalogue image (load; derives name and digest)")
 	filesManifest := fs.String("files", "", "a sha256sum-format manifest of files the image must hold, byte for byte, in its final filesystem")
 	filesRoot := fs.String("files-root", "", "the absolute directory in the image that the manifest's relative paths are under")
 	if err := fs.Parse(args); err != nil {
 		return 2
+	}
+	var local *smoke.GuestImage
+	if *catalogue != "" {
+		g, err := smoke.GuestImageByName(*catalogue)
+		if err != nil || step != "load" || !g.LocalLayout {
+			fmt.Fprintln(stderr, "image load: -catalogue requires a reviewed local-layout image")
+			return 2
+		}
+		if (*name != "" && *name != g.Ref()) || (*pin != "" && *pin != g.Arm64) {
+			fmt.Fprintln(stderr, "image load: name or digest differs from the catalogue")
+			return 2
+		}
+		*name, *pin, local = g.Ref(), g.Arm64, &g
 	}
 	if *layout == "" || *pin == "" || (step == "load" && (*hostBin == "" || *name == "")) {
 		fmt.Fprint(stderr, usage)
@@ -59,7 +73,7 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 		r, err := ocilayout.CheckFiles(*layout, *pin, files)
 		return imageReport(r, err, stdout, stderr)
 	}
-	if err := checkImageName(*name); err != nil {
+	if err := checkImageName(*name); err != nil && local == nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
@@ -91,6 +105,12 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 		v.Failed(venue.KindDownload, id, "staging refused")
 		return imageReport(r, err, stdout, stderr)
 	}
+	if local != nil {
+		if err := checkCatalogueLayout(*local, r); err != nil {
+			fmt.Fprintln(stderr, err)
+			return 1
+		}
+	}
 	if err := v.Created(venue.KindDownload, id); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
@@ -114,6 +134,13 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 	imageReport(r, nil, stdout, stderr)
 	fmt.Fprint(stdout, string(out))
 	return 0
+}
+
+func checkCatalogueLayout(g smoke.GuestImage, r *ocilayout.Report) error {
+	if !g.LocalLayout || r == nil || r.Reference != g.Ref() || r.Root != g.Digest || r.Manifest != g.Arm64 {
+		return fmt.Errorf("image load: staged local layout differs from the reviewed catalogue pins")
+	}
+	return nil
 }
 
 // imageReport prints a check's report as JSON, and the refusal if there is

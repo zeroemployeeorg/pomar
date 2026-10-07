@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+
+	"github.com/zeroemployeeorg/pomar/internal/ocilayout"
+	"github.com/zeroemployeeorg/pomar/internal/smoke"
 )
 
 func TestImageNameMustBeTaggedAndNotPomarsOwn(t *testing.T) {
@@ -16,6 +19,55 @@ func TestImageNameMustBeTaggedAndNotPomarsOwn(t *testing.T) {
 		"docker.io/library/golang:any", "ghcr.io/apple/containerization/vminit:0.45.0", "docker.io/library/node:24-bookworm-slim"} {
 		if err := checkImageName(bad); err == nil {
 			t.Errorf("checkImageName(%q) was accepted", bad)
+		}
+	}
+}
+
+func TestCatalogueLoadRequiresExactReviewedLayout(t *testing.T) {
+	g, err := smoke.GuestImageByName("node24-python314-chromium")
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := ocilayout.Report{Reference: g.Ref(), Root: g.Digest, Manifest: g.Arm64}
+	if err := checkCatalogueLayout(g, &good); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"reference", "root", "manifest"} {
+		bad := good
+		switch field {
+		case "reference":
+			bad.Reference = "localhost/pomar/runner-tools:other"
+		case "root":
+			bad.Root = "sha256:" + strings.Repeat("0", 64)
+		case "manifest":
+			bad.Manifest = "sha256:" + strings.Repeat("0", 64)
+		}
+		if err := checkCatalogueLayout(g, &bad); err == nil {
+			t.Fatalf("changed %s accepted", field)
+		}
+	}
+	if err := checkCatalogueLayout(g, nil); err == nil {
+		t.Fatal("missing report accepted")
+	}
+	remote, _ := smoke.GuestImageByName("node24-full")
+	if err := checkCatalogueLayout(remote, &good); err == nil {
+		t.Fatal("remote catalogue image accepted as local")
+	}
+	if err := checkImageName(g.Ref()); err == nil {
+		t.Fatal("ordinary load can retag catalogue image")
+	}
+}
+
+func TestCatalogueFlagsRefuseOverridesBeforeOpeningAnything(t *testing.T) {
+	for _, args := range [][]string{
+		{"image", "check", "-catalogue", "node24-python314-chromium"},
+		{"image", "load", "-catalogue", "node24-full"},
+		{"image", "load", "-catalogue", "node24-python314-chromium", "-name", "localhost/pomar/runner-tools:other"},
+		{"image", "load", "-catalogue", "node24-python314-chromium", "-digest", "sha256:" + strings.Repeat("0", 64)},
+	} {
+		var out, errb bytes.Buffer
+		if got := run(args, &out, &errb); got != 2 || !strings.Contains(errb.String(), "catalogue") {
+			t.Fatalf("%v: %d %s", args, got, errb.String())
 		}
 	}
 }
