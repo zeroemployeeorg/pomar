@@ -108,6 +108,7 @@ type Event struct {
 	Method       string          `json:"method"`
 	RequestID    json.RawMessage `json:"request_id,omitempty"`
 	Params       json.RawMessage `json:"params"`
+	ParamsSHA256 string          `json:"params_sha256,omitempty"`
 	PermissionID string          `json:"permission_id,omitempty"`
 }
 
@@ -539,6 +540,7 @@ func (m *Store) Observe(incarnation, method string, requestID, params json.RawMe
 	if method == "turn/completed" && p.Turn.Status != "completed" && p.Turn.Status != "failed" && p.Turn.Status != "interrupted" {
 		return errors.New("unknown completion status")
 	}
+	event.Params, event.ParamsSHA256 = projectLifecycleEvidence(method, params)
 	m.s.Events = append(m.s.Events, event)
 	turn := p.TurnID
 	if turn == "" {
