@@ -291,6 +291,9 @@ func TestOneTurnAtATime(t *testing.T) {
 	if _, err := h.broker.Submit(agentenv.Task{OperationID: "op-1", Incarnation: "inc-1", Text: "x"}); err != nil {
 		t.Fatal(err)
 	}
+	// turn/started is journaled by the actor's reader; the held turn writes
+	// nothing after it, so the journal is quiet when the test ends.
+	h.waitOp("op-1", func(op agentenv.Operation) bool { return op.ActorAcknowledged })
 	thread := h.store.Snapshot().ThreadID
 	if _, err := h.actor.Call(context.Background(), "turn/start", map[string]any{"threadId": thread, "input": []map[string]string{{"type": "text", "text": "y"}}}); !errors.Is(err, ErrBusy) {
 		t.Fatalf("a second turn: %v", err)
