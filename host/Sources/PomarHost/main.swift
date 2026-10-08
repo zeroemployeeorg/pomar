@@ -106,6 +106,14 @@ case "helper":
             readonlySource: readonlySource, jobUser: jobUser, pins: f["pins"], npmSocket: f["npm-socket"],
             cpus: caps.cpus, memoryBytes: caps.memoryBytes))
     exit(code)
+case "agent-environment-holder-diagnostic":
+    guard let f = flags(args.dropFirst()), let path = f["config"], getuid() == 0, geteuid() == 0 else { fail("holder diagnostic requires root and --config FILE", code: 2) }
+    do {
+        let request = try AgentFenceDiagnostic.readRequest(path)
+        let evidence = try AgentFenceDiagnostic.run(request)
+        FileHandle.standardOutput.write(try JSONEncoder().encode(evidence))
+        FileHandle.standardOutput.write(Data("\n".utf8))
+    } catch { fail("agent-environment-holder-diagnostic: observation failed") }
 case "agent-environment-fence-probe":
     guard let f = flags(args.dropFirst()), let path = f["config"] else { fail("fence probe requires --config FILE", code: 2) }
     do {

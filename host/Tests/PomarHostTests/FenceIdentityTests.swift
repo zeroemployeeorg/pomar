@@ -259,3 +259,62 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
         #expect(evidence.issues.contains { $0.contains("pid \(getpid()): executable path unavailable") })
     }
 }
+
+@Test func vanishedOrNegativeResourceReadCannotClearMissingPathHold() throws {
+    try withFenceIdentityFixture { request, _, _ in
+        for failure in [ESRCH, Int32(0)] {
+            var access = missingOwnExecutable()
+            let native = access.info
+            access.info = { pid, flavor, arg, buffer, size in
+                let result = native(pid, flavor, arg, buffer, size)
+                if pid == getpid() {
+                    if flavor == PROC_PIDT_SHORTBSDINFO { buffer?.assumingMemoryBound(to: proc_bsdshortinfo.self).pointee.pbsi_uid = getuid() + 1000 }
+                    if flavor == PROC_PIDTBSDINFO { buffer?.assumingMemoryBound(to: proc_bsdinfo.self).pointee.pbi_uid = getuid() + 1000 }
+                    if flavor == PROC_PIDLISTFDS { errno = failure; return -1 }
+                }
+                return result
+            }
+            let evidence = try AgentFenceProbe.run(request, access: access)
+            #expect(!evidence.confirmed)
+            #expect(evidence.issues.contains { $0.contains("pid \(getpid()): executable path unavailable") })
+            #expect(evidence.issues.contains { $0.contains("pid \(getpid()): descriptor inventory unavailable") })
+        }
+    }
+}
+
+@Test func launchReceiptFullFlushFailureIsRetainedAndBlocksReplay() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        for failOn in [1, 2] {
+            let incarnation = "flush-\(failOn)"
+            var calls = 0
+            #expect(throws: AgentLaunchCustody.Failure.self) {
+                try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                    environment: request.environment, session: request.session, incarnation: incarnation,
+                    sourceSHA: String(repeating: "a", count: 40), fullSync: { fd in
+                        calls += 1
+                        if calls == failOn { errno = EIO; return -1 }
+                        return fcntl(fd, F_FULLFSYNC)
+                    })
+            }
+            let receipt = directory.appendingPathComponent("launch-custody-" + incarnation + ".json")
+            #expect(FileManager.default.fileExists(atPath: receipt.path))
+            #expect(throws: AgentLaunchCustody.Failure.self) {
+                try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                    environment: request.environment, session: request.session, incarnation: incarnation,
+                    sourceSHA: String(repeating: "a", count: 40))
+            }
+        }
+    }
+}
+
+@Test func privilegedHolderDiagnosticRefusesOrdinaryOwnerWithoutElevation() throws {
+    try withFenceIdentityFixture { target, _, _ in
+        var disk = stat()
+        #expect(lstat(target.rootfs, &disk) == 0)
+        let request = AgentFenceDiagnostic.Request(target: target,
+            expectedDevice: UInt32(bitPattern: disk.st_dev), expectedInode: disk.st_ino)
+        #expect(getuid() != 0)
+        #expect(throws: (any Error).self) { try AgentFenceDiagnostic.run(request) }
+        #expect(throws: (any Error).self) { try AgentFenceDiagnostic.readRequest(target.rootfs) }
+    }
+}
