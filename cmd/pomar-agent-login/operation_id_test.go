@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // callLog reads the fake sign-in's call log: how often the actor really
@@ -65,8 +67,9 @@ func TestStartOperationIDIsKeptOnRetry(t *testing.T) {
 	}
 }
 
-// A completion under an explicit operation ID is kept on retry: the original
-// outcome is reported and the actor never completes twice. The same ID bound
+// A completion under an explicit operation ID is kept on retry: the retained
+// record is never reported as success, and the actor never completes twice.
+// The same ID bound
 // to another login is refused.
 func TestCompleteOperationIDIsKeptOnRetry(t *testing.T) {
 	root, _, calls := hostWith(t)
@@ -79,7 +82,7 @@ func TestCompleteOperationIDIsKeptOnRetry(t *testing.T) {
 		t.Fatalf("complete: %q %v", out, err)
 	}
 	out, err = completeWith(t, root, started["login_id"], "complete-op-2")
-	if err != nil || !strings.Contains(out, "already recorded; not repeated") {
+	if err == nil || !strings.Contains(err.Error(), "already recorded") || strings.Contains(out, "signed in") {
 		t.Fatalf("a retried completion: %q %v", out, err)
 	}
 	if _, c := callLog(t, calls); c != 1 {
@@ -114,13 +117,18 @@ func TestOperationIDForTheOtherActionIsRefused(t *testing.T) {
 func TestOperationIDIsValidatedBeforeAnyRequest(t *testing.T) {
 	root, _, calls := hostWith(t)
 	for name, args := range map[string][]string{
-		"with neither":        {"-operation-id", "op-1"},
-		"with both":           {"-start", "-complete", "x", "-operation-id", "op-1"},
-		"with -status":        {"-status", "-operation-id", "op-1"},
-		"an invalid ID":       {"-start", "-operation-id", "../op"},
-		"an ID with a space":  {"-start", "-operation-id", "op 1"},
-		"an ID starting a -":  {"-start", "-operation-id", "-op"},
-		"an ID over 128 long": {"-start", "-operation-id", strings.Repeat("a", 129)},
+		"with neither":           {"-operation-id", "op-1"},
+		"with both":              {"-start", "-complete", "x", "-operation-id", "op-1"},
+		"with -status":           {"-status", "-operation-id", "op-1"},
+		"-status with -start":    {"-status", "-start", "-operation-id", "op-1"},
+		"-status with -complete": {"-status", "-complete", "x", "-operation-id", "op-1"},
+		"-status and -start":     {"-status", "-start"},
+		"-start with no ID":      {"-start"},
+		"-complete with no ID":   {"-complete", "x"},
+		"an invalid ID":          {"-start", "-operation-id", "../op"},
+		"an ID with a space":     {"-start", "-operation-id", "op 1"},
+		"an ID starting a -":     {"-start", "-operation-id", "-op"},
+		"an ID over 128 long":    {"-start", "-operation-id", strings.Repeat("a", 129)},
 	} {
 		var out, errb bytes.Buffer
 		if err := run(append([]string{"-root", root, "-environment", "env-1"}, args...), stdinWith(t, ""), &out, &errb); err == nil {
@@ -129,5 +137,39 @@ func TestOperationIDIsValidatedBeforeAnyRequest(t *testing.T) {
 	}
 	if s, c := callLog(t, calls); s != 0 || c != 0 {
 		t.Fatalf("a refused flag reached the actor (%d starts, %d completions)", s, c)
+	}
+}
+
+// A retained completion still dispatching is not success, even when the
+// account is already authenticated by an earlier sign-in: nothing is claimed
+// and the actor isn't called again.
+func TestRetainedDispatchingCompletionIsNotSuccess(t *testing.T) {
+	gate := filepath.Join(t.TempDir(), "gate")
+	root, config, calls := hostGated(t, gate)
+	os.WriteFile(filepath.Join(config, ".credentials.json"), []byte("earlier-sign-in"), 0o600)
+	started, err := startWith(t, root, "held-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan error, 1)
+	go func() { _, err := completeWith(t, root, started["login_id"], "held-complete"); first <- err }()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if data, _ := os.ReadFile(calls); strings.Contains(string(data), "waiting") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first completion never reached the actor")
+		}
+	}
+	out, err := completeWith(t, root, started["login_id"], "held-complete")
+	if err == nil || !strings.Contains(err.Error(), "still dispatching") || strings.Contains(out, "signed in") {
+		t.Fatalf("a retained dispatching completion: %q %v", out, err)
+	}
+	os.WriteFile(gate, nil, 0o600)
+	if err := <-first; err != nil {
+		t.Fatalf("the first completion: %v", err)
+	}
+	if _, c := callLog(t, calls); c != 1 {
+		t.Fatalf("the actor completed %d sign-ins", c)
 	}
 }
