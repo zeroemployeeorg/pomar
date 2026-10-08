@@ -286,3 +286,37 @@ func TestRetainedReplySurvivesALaterReconciliation(t *testing.T) {
 		t.Fatalf("the actor started %d sign-ins", s)
 	}
 }
+
+// The client dies after the broker accepted the start and its one-time reply
+// arrived, but before that reply was retained: the journal holds the sealed
+// intent and the dispatch, and nothing else. The URL is lost, and that is
+// reported, not resolved: a restart is uncertain, a fresh reconciliation
+// sees only that the start was sent, a retry is refused because nothing
+// proves non-acceptance, and the actor never starts a second sign-in.
+func TestReplyLostBeforeRetentionIsReportedNotReplayed(t *testing.T) {
+	root, config, calls := hostWith(t)
+	os.WriteFile(filepath.Join(config, ".credentials.json"), []byte("earlier-sign-in"), 0o600)
+	first, _, err := startWith(t, root, records(root), "died-start")
+	if err != nil || !first.Succeeded {
+		t.Fatalf("start: %+v %v", first, err)
+	}
+	// The state a death between receipt and retention leaves behind.
+	if err := os.Remove(filepath.Join(records(root), "died-start", first.EventID+".json")); err != nil {
+		t.Fatal(err)
+	}
+	restart, out, err := startWith(t, root, records(root), "died-start")
+	if err == nil || restart.Succeeded || restart.AuthURL != "" || restart.Transport != "lost-or-unrecorded" {
+		t.Fatalf("a restart: %+v %q %v", restart, out, err)
+	}
+	seen, out, err := startWith(t, root, records(root), "died-start", "-reconcile")
+	if err == nil || seen.Succeeded || seen.AuthURL != "" || seen.OperationState != "sent" || seen.RetainedResponseAvailable || seen.SessionState != "authenticated" {
+		t.Fatalf("a fresh reconciliation: %+v %q %v", seen, out, err)
+	}
+	retry, out, err := startWith(t, root, records(root), "died-start", "-reconcile", "-retry-known-unaccepted")
+	if err == nil || retry.Succeeded || retry.AuthURL != "" {
+		t.Fatalf("a retry without proof of non-acceptance: %+v %q %v", retry, out, err)
+	}
+	if s, _ := callLog(t, calls); s != 1 {
+		t.Fatalf("the actor started %d sign-ins", s)
+	}
+}
