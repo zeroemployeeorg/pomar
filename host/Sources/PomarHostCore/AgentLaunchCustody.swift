@@ -57,6 +57,7 @@ enum AgentLaunchCustody {
         let exeFD = open(executable, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
         guard exeFD >= 0 else { throw Failure.executable }
         let exeHandle = FileHandle(fileDescriptor: exeFD, closeOnDealloc: true)
+        defer { try? exeHandle.close() }
         var openedExe = stat(), afterExe = stat()
         guard fstat(exeFD, &openedExe) == 0, openedExe.st_dev == exe.st_dev, openedExe.st_ino == exe.st_ino,
               openedExe.st_uid == getuid() || openedExe.st_uid == 0,
