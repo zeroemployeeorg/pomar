@@ -24,22 +24,37 @@ accepts `login_id` and `code`. Sensitive values never belong in argv.
 
 The records directory is 0700. Each ID is locked and bound to action,
 environment, socket, session/incarnation and the exact request digest before
-dispatch. It retains no login request bytes. The bounded HTTP response is in
-an exclusive, durable 0600 `response.json` envelope (`Body` is base64); ordinary
-stdout contains only action/ID, EUID, source/binary/PID metadata and outcome.
-Do not publish the response envelope or private provider challenges.
+dispatch. Login request bytes are not journaled. Every dispatch, HTTP response,
+transport failure and reconciliation has a separate immutable event ID and UTC
+time. Sensitive bounded response bytes remain in private 0600 event envelopes;
+stdout reports only metadata. Files and directories receive a full drive flush
+on Darwin before acknowledgement. A crash during publication can complete only
+an intact staged event whose identity matches the sealed request; partial or
+conflicting evidence is retained and blocks progress.
 
-A repeated identical call recovers its recorded response without networking.
-Changed bytes or action under that ID conflict. After uncertain transport,
-the client refuses blind mutation retry. `-reconcile` queries the original
-host/agent operation with its session and incarnation, never a new ID. A
-successful observation is explicitly `original-operation-observed`, not a
-claim that dispatch/fencing/authentication completed. HTTP 5xx similarly needs
-reconciliation; it is not non-acceptance. An explicit
-`-retry-known-unaccepted` permits the identical original POST only after a
-fresh `durable_non_acceptance` inspection. An unknown/refused inspection holds.
-Neither observation nor retry invents an authentication response lost by the
-server: inspect account/session state and the retained control evidence.
+Machine receipts separate `transport_outcome`, `operation_state`,
+`session_state`, `response_available`, and `outcome`. HTTP200 carrying
+`dispatching`, `acceptance_unknown` or an unknown original state is non-success.
+A retained login control, including `sent`, cannot recreate its one-time login
+response or establish the original completion result from current authentication.
+Only a durably retained actual login response is reported as `response-available`;
+completion additionally requires that response's explicit success boolean.
+Session inspection remains a snapshot, not proof that another operation completed.
+
+Repeated identical calls can recover an original response without networking;
+`cached`, event identity and observation time identify historical data. Changed
+bytes or action conflict. `-reconcile` always makes and appends a fresh original
+operation inspection, including after HTTP409/5xx or a nonterminal observation.
+Only fresh documented `durable_non_acceptance` plus explicit
+`-retry-known-unaccepted` permits the same original ID and bytes to be dispatched.
+No cached observation, missing local response or HTTP409 permits retry.
+
+For a login completion, `-consume-request` removes the private request after a
+successful completion response is durable. To recover that response later, omit
+`-request`; the sealed hash still binds the original operation. A retry still
+requires the exact original bytes. Without this explicit option, the owner
+retains responsibility for removing the 0600 code file when it is no longer
+needed. No provider credential store is read, copied or cleaned by this client.
 
 Read-only inspection IDs are snapshots; use a fresh explicit ID for a fresh
 session/inspect observation. A standalone operation inspection uses a separate
@@ -70,14 +85,23 @@ mirror/ref/SHA, input bytes plus digests, and output set. There is no arbitrary
 path, shell command, class switch, stop/delete/drain/cache route or account
 switch. Inputs remain within the existing 32MiB aggregate bound.
 
-Before start, the caller locks and durably seals the attempt ID and canonical
-request digest in its private records. It inspects that ID before submission;
-existing attempts are observations, not new jobs. A repeat recovers the original
-response or reconciles the same ID. Only explicit `retry_known_unaccepted`
-plus a fresh 404 permits resubmission of those exact bytes. The server's own
-unique attempt record remains authoritative. Responses are JSON envelopes with
-HTTP status, caller UID, sealed digest and base64 body (including binary output).
-Keep them in private files and inspect status; a CLI exit alone is not job success.
+Before start, the caller locks and durably seals the attempt ID, exact original
+request and canonical digest privately. Every inspection and dispatch/response
+is appended under its own event identity. The caller compares an existing
+attempt's class, source/ref/SHA/base/materialization, command, outputs, every
+input size/digest and kernel-recorded submitting UID against its seal. A
+collision is not this caller's admission. Nonterminal/uncertain observations are
+freshly inspected on each call; historical201 admission responses are explicitly
+cached. Admission is not successful job execution or signed-result verification.
+
+Manager GET's documented404 means absence from its retained attempt table.
+Only that fresh observation and explicit `retry_known_unaccepted` allow the
+identical original request to be resubmitted; a409/503, cached404 or missing
+response does not. Return envelopes include machine outcome, original attempt
+state, transport state, caller UID, digest, observation identity/time and bounded
+base64 body. HTTP refusals and uncertainty exit nonzero while still emitting the
+machine envelope. Retain these envelopes privately. Result verification and
+actual artifact acceptance are separate from admission/CLI success.
 
 An administrator may install one fixed, digest-pinned, no-argument delegation
 to this root-owned executable **as the dedicated caller**, never as root or

@@ -28,6 +28,7 @@ func main() {
 	flag.StringVar(&c.Incarnation, "incarnation", "", "original incarnation")
 	flag.BoolVar(&c.Reconcile, "reconcile", false, "inspect an uncertain original operation without repeating it")
 	flag.BoolVar(&c.RetryKnownUnaccepted, "retry-known-unaccepted", false, "permit same-byte same-ID retry only after fresh durable non-acceptance")
+	flag.BoolVar(&c.ConsumeRequest, "consume-request", false, "remove private login-completion request only after its response is durably retained")
 	flag.Parse()
 	if flag.NArg() != 0 {
 		fmt.Fprintln(os.Stderr, "unexpected positional arguments")
