@@ -115,6 +115,12 @@ func TestOneTimeLoginReplySurvivesPermittedRetry(t *testing.T) {
 	if !errors.Is(e, ErrUncertain) || observed.ResponseAvailable || !observed.RetainedResponseAvailable || observed.RetainedResponseEventID != a.EventID || observed.EventID == a.EventID || posts.Load() != 2 {
 		t.Fatal("fresh control observation hid retained one-time reply", observed, e)
 	}
+	if status, body, e := RetainedResponse(c.Records, c.OperationID); e != nil || status != 200 || !bytes.Contains(body, []byte("ONCE")) || posts.Load() != 2 {
+		t.Fatal("retained one-time reply not readable after a fresh observation", status, e)
+	}
+	if _, _, e := RetainedResponse(c.Records, "never-dispatched"); e == nil {
+		t.Fatal("a response was invented for an operation never dispatched")
+	}
 	dir := filepath.Join(c.Records, c.OperationID)
 	old, _ := os.ReadFile(filepath.Join(dir, "event-00000000002.json"))
 	if !bytes.Contains(old, []byte(`"Status":502`)) {

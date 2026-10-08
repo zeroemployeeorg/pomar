@@ -51,6 +51,8 @@ func hostGated(t *testing.T, gate string) (root string, config string, calls str
 	t.Helper()
 	dir := t.TempDir()
 	root, _ = os.MkdirTemp("/tmp", "pal")
+	root, _ = filepath.EvalSymlinks(root)
+	os.Mkdir(filepath.Join(root, "records"), 0o700)
 	t.Cleanup(func() { os.RemoveAll(root) })
 	config = filepath.Join(dir, "cfg")
 	os.Mkdir(config, 0o700)
@@ -76,6 +78,7 @@ func hostGated(t *testing.T, gate string) (root string, config string, calls str
 		t.Fatal(err)
 	}
 	ln, err := net.Listen("unix", filepath.Join(root, "host.sock"))
+	os.Chmod(filepath.Join(root, "host.sock"), 0o600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +134,7 @@ func TestScriptedSignInAndRenewal(t *testing.T) {
 	root, config := host(t)
 	for round := 0; round < 2; round++ {
 		var out, errb bytes.Buffer
-		if err := run([]string{"-root", root, "-environment", "env-1", "-start", "-operation-id", fmt.Sprintf("renew-start.%d", round)}, stdinWith(t, ""), &out, &errb); err != nil {
+		if err := run([]string{"-root", root, "-environment", "env-1", "-start", "-operation-id", fmt.Sprintf("renew-start.%d", round), "-records", filepath.Join(root, "records")}, stdinWith(t, ""), &out, &errb); err != nil {
 			t.Fatalf("start: %v; %s", err, errb.String())
 		}
 		var started struct {
@@ -143,10 +146,10 @@ func TestScriptedSignInAndRenewal(t *testing.T) {
 		}
 		os.Remove(filepath.Join(config, ".credentials.json"))
 		out.Reset()
-		if err := run([]string{"-root", root, "-environment", "env-1", "-complete", started.LoginID, "-operation-id", fmt.Sprintf("renew-complete.%d", round)}, stdinWith(t, code+"\n"), &out, &errb); err != nil {
+		if err := run([]string{"-root", root, "-environment", "env-1", "-complete", started.LoginID, "-operation-id", fmt.Sprintf("renew-complete.%d", round), "-records", filepath.Join(root, "records")}, stdinWith(t, code+"\n"), &out, &errb); err != nil {
 			t.Fatalf("complete (round %d): %v; %s", round, err, errb.String())
 		}
-		if !strings.Contains(out.String(), "authenticated: true") {
+		if !strings.Contains(out.String(), `"session_state":"authenticated"`) || !strings.Contains(out.String(), `"succeeded":true`) {
 			t.Fatalf("complete output %q", out.String())
 		}
 	}

@@ -443,3 +443,28 @@ func operationState(body []byte, op string) string {
 	}
 	return "unknown"
 }
+
+// RetainedResponse returns the HTTP status and body of an operation's latest
+// durably retained response, after Run has reported one available. It reads
+// only: a reply that was never retained can't be recovered, and none is ever
+// recreated.
+func RetainedResponse(records, operationID string) (int, []byte, error) {
+	if !id.MatchString(operationID) {
+		return 0, nil, errors.New("bounded operation identifier required")
+	}
+	if err := localclient.PrivateDir(records); err != nil {
+		return 0, nil, err
+	}
+	ev, found, err := calljournal.LatestKind(filepath.Join(records, operationID), "response")
+	if err != nil {
+		return 0, nil, err
+	}
+	if !found {
+		return 0, nil, errors.New("no retained response")
+	}
+	var saved response
+	if json.Unmarshal(ev.Value, &saved) != nil || saved.Intent.OperationID != operationID {
+		return 0, nil, ErrConflict
+	}
+	return saved.Status, saved.Body, nil
+}
