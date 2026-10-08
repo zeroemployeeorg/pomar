@@ -320,3 +320,85 @@ func TestReplyLostBeforeRetentionIsReportedNotReplayed(t *testing.T) {
 		t.Fatalf("the actor started %d sign-ins", s)
 	}
 }
+
+// The POMAR Codex's counterexample (PR87 review, B1): after a completion's
+// code is consumed, the same operation ID under another login ID is refused,
+// because the sealed binding, not the consumed request, carries the login.
+func TestReviewConsumedCompletionRejectsChangedLogin(t *testing.T) {
+	root, _, _ := hostWith(t)
+	first, _, err := startWith(t, root, records(root), "review-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, _, err := completeWith(t, root, records(root), first.LoginID, "review-complete", code+"\n")
+	if err != nil || !done.Succeeded {
+		t.Fatal(err)
+	}
+	r, out, err := completeWith(t, root, records(root), "DIFFERENT-LOGIN", "review-complete", "")
+	if err == nil || r.Succeeded {
+		t.Fatalf("changed login accepted: %s", out)
+	}
+	if r, out, err := startWith(t, root, records(root), "review-complete"); err == nil || r.Succeeded {
+		t.Fatalf("a completion's ID accepted for a start: %s", out)
+	}
+}
+
+// The POMAR Codex's counterexample (PR87 review, B2): a durable start reply is
+// recovered when the owner can't be reached now; the current session is
+// reported as unavailable, nothing is dispatched, and nothing is invented.
+func TestReviewDurableStartRecoverableWithOwnerUnavailable(t *testing.T) {
+	root, _, _ := hostWith(t)
+	first, _, err := startWith(t, root, records(root), "review-offline-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "host.sock")); err != nil {
+		t.Fatal(err)
+	}
+	r, out, _ := startWith(t, root, records(root), "review-offline-start")
+	if !r.RetainedResponseAvailable || r.AuthURL != first.AuthURL || r.SessionState != "unavailable" || !r.Succeeded || !r.Cached {
+		t.Fatalf("durable reply hidden: %s", out)
+	}
+}
+
+// The same for a completion: its retained success is still reported, the
+// current session separately as unavailable, and the exit is nonzero because
+// the environment's authentication can't be confirmed now.
+func TestDurableCompletionRecoverableWithOwnerUnavailable(t *testing.T) {
+	root, _, calls := hostWith(t)
+	first, _, err := startWith(t, root, records(root), "offline-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done, _, err := completeWith(t, root, records(root), first.LoginID, "offline-complete", code+"\n"); err != nil || !done.Succeeded {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(root, "host.sock"))
+	r, out, err := completeWith(t, root, records(root), first.LoginID, "offline-complete", "")
+	if err == nil || !r.Succeeded || !r.RetainedResponseAvailable || r.SessionState != "unavailable" {
+		t.Fatalf("a retained completion with the owner unavailable: %+v %q %v", r, out, err)
+	}
+	if _, c := callLog(t, calls); c != 1 {
+		t.Fatalf("the actor completed %d sign-ins", c)
+	}
+}
+
+// With the owner unavailable, an operation with no record dispatches
+// nothing; and an operation recorded without its binding is refused rather
+// than rebound.
+func TestNoBindingNoDispatch(t *testing.T) {
+	root, _, calls := hostWith(t)
+	if err := os.Mkdir(filepath.Join(records(root), "legacy-op"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if r, out, err := startWith(t, root, records(root), "legacy-op"); err == nil || r.Succeeded {
+		t.Fatalf("an operation recorded without its binding: %q", out)
+	}
+	os.Remove(filepath.Join(root, "host.sock"))
+	if r, out, err := startWith(t, root, records(root), "fresh-op"); err == nil || r.Succeeded {
+		t.Fatalf("a fresh operation with the owner unavailable: %q", out)
+	}
+	if s, _ := callLog(t, calls); s != 0 {
+		t.Fatalf("the actor started %d sign-ins", s)
+	}
+}
