@@ -16,13 +16,14 @@ import (
 	"regexp"
 	"syscall"
 
+	"github.com/zeroemployeeorg/pomar/internal/calljournal"
 	"github.com/zeroemployeeorg/pomar/internal/localclient"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 )
 
 const maxWire = 48 << 20
 
-var attemptID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+var attemptID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var sha = regexp.MustCompile(`^[a-f0-9]{40}$`)
 
 type Policy struct {
@@ -49,11 +50,21 @@ type Request struct {
 	RetryKnownUnaccepted bool                  `json:"retry_known_unaccepted,omitempty"`
 }
 type Reply struct {
-	CallerUID     int    `json:"caller_uid"`
-	Status        int    `json:"http_status"`
-	RequestSHA256 string `json:"request_sha256"`
-	Observation   bool   `json:"observation"`
-	Body          []byte `json:"body"`
+	CallerUID                 int    `json:"caller_uid"`
+	Status                    int    `json:"http_status"`
+	RequestSHA256             string `json:"request_sha256"`
+	Observation               bool   `json:"observation"`
+	Body                      []byte `json:"body"`
+	Outcome                   string `json:"outcome"`
+	OperationState            string `json:"operation_state"`
+	Transport                 string `json:"transport_outcome"`
+	SessionState              string `json:"session_state"`
+	ResponseAvailable         bool   `json:"response_available"`
+	RetainedResponseAvailable bool   `json:"retained_response_available"`
+	RetainedResponseEventID   string `json:"retained_response_event_id,omitempty"`
+	Cached                    bool   `json:"cached"`
+	EventID                   string `json:"event_id,omitempty"`
+	ObservedAt                string `json:"observed_at,omitempty"`
 }
 
 // ReadPolicy reads only root-owned, non-writable, non-symlink public
@@ -160,33 +171,14 @@ func requestRoute(p Policy, r Request) (string, string, []byte, error) {
 }
 
 func privateRecord(path string, data []byte) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		return err
-	}
-	if _, err = f.Write(data); err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return calljournal.Save(path, json.RawMessage(data))
 }
 
 // Run seals a start ID/digest before its one submission. Repeated same-byte
 // calls recover the cached response or inspect that ID; they never mint an ID.
 // A retry after a failed transport requires an explicit flag and fresh 404.
 func Run(p Policy, reader io.Reader) (Reply, error) {
-	reply := Reply{CallerUID: os.Geteuid()}
+	reply := Reply{CallerUID: os.Geteuid(), Outcome: "local-refusal", Transport: "not-contacted", OperationState: "unknown", SessionState: "not-applicable"}
 	if p.CallerUID != os.Geteuid() || p.CallerUID == 0 || p.Class == "" || p.Socket == "" {
 		return reply, errors.New("effective caller identity/policy refused")
 	}
@@ -225,95 +217,253 @@ func Run(p Policy, reader io.Reader) (Reply, error) {
 		}
 		return resp.StatusCode, data, nil
 	}
-	var record string
-	if method == "POST" {
-		if err = localclient.PrivateDir(p.Records); err != nil {
+	reply.SessionState = "not-applicable"
+	if method != "POST" {
+		reply.Status, reply.Body, err = call(method, path, body)
+		reply.Transport = "response"
+		reply.ResponseAvailable = err == nil
+		if err != nil {
+			reply.Transport = "lost-or-unrecorded"
+			reply.Outcome = "uncertain"
 			return reply, err
 		}
-		dir := filepath.Join(p.Records, r.Start.ID)
-		existing := false
-		if err = os.Mkdir(dir, 0700); os.IsExist(err) {
-			existing = true
-		} else if err != nil {
-			return reply, err
+		if reply.Status < 200 || reply.Status >= 300 {
+			reply.Outcome = "refused"
+			return reply, errors.New("caller HTTP refusal")
 		}
-		if err = localclient.PrivateDir(dir); err != nil {
-			return reply, err
-		}
-		fd, e := syscall.Open(filepath.Join(dir, "lock"), syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
-		if e != nil {
-			return reply, errors.New("attempt lock unavailable")
-		}
-		f := os.NewFile(uintptr(fd), "lock")
-		defer f.Close()
-		if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil {
-			return reply, errors.New("original attempt has an active caller")
-		}
-		defer syscall.Flock(fd, syscall.LOCK_UN)
-		intent := filepath.Join(dir, "intent.json")
-		sealed, _ := json.Marshal(struct {
-			ID     string `json:"attempt_id"`
-			Digest string `json:"request_sha256"`
-		}{r.Start.ID, reply.RequestSHA256})
-		if old, e := localclient.ReadPrivate(intent, 16<<10); e == nil {
-			if !bytes.Equal(old, sealed) {
-				return reply, errors.New("attempt ID already binds another request")
-			}
-		} else if existing {
-			return reply, errors.New("attempt intent incomplete; preserve and inspect")
-		} else if err = privateRecord(intent, sealed); err != nil {
-			return reply, err
-		}
-		record = filepath.Join(dir, "response.json")
-		for _, name := range []string{"reconciliation.json", "response.json"} {
-			cachedPath := filepath.Join(dir, name)
-			if saved, e := localclient.ReadPrivate(cachedPath, 12<<20); e == nil {
-				var old Reply
-				if json.Unmarshal(saved, &old) != nil || old.RequestSHA256 != reply.RequestSHA256 || old.CallerUID != p.CallerUID {
-					return reply, errors.New("cached caller response identity invalid")
-				}
-				if old.Status >= 500 {
-					record = filepath.Join(dir, "reconciliation.json")
-					continue
-				}
-				return old, nil
-			} else if _, e := os.Lstat(cachedPath); !os.IsNotExist(e) {
-				return reply, errors.New("recorded start response unreadable; preserve and inspect")
-			}
-		}
-		status, data, e := call("GET", "/v1/attempts/"+r.Start.ID, nil)
-		if e != nil {
-			return reply, e
-		}
-		if status == 200 {
-			reply.Status = status
-			reply.Body = data
-			reply.Observation = true
-			encoded, _ := json.Marshal(reply)
-			if len(data) > 8<<20 || privateRecord(filepath.Join(dir, "reconciliation.json"), encoded) != nil {
-				return reply, errors.New("original-attempt observation retention uncertain")
-			}
-			return reply, nil
-		}
-		if status != 404 {
-			return reply, errors.New("original attempt inspection unresolved")
-		}
-		if existing && !r.RetryKnownUnaccepted {
-			return reply, errors.New("original attempt currently absent; explicit same-ID retry required")
-		}
+		reply.Outcome = "snapshot"
+		return reply, nil
 	}
-	reply.Status, reply.Body, err = call(method, path, body)
-	if err != nil {
+	if err = localclient.PrivateDir(p.Records); err != nil {
 		return reply, err
 	}
-	if record != "" {
-		if len(reply.Body) > 8<<20 {
-			return reply, errors.New("start response exceeds retention bound; inspect original attempt")
+	dir := filepath.Join(p.Records, r.Start.ID)
+	if err = os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+		return reply, err
+	}
+	if err = localclient.PrivateDir(dir); err != nil {
+		return reply, err
+	}
+	fd, e := syscall.Open(filepath.Join(dir, "lock"), syscall.O_CREAT|syscall.O_RDWR|syscall.O_NOFOLLOW|syscall.O_CLOEXEC, 0600)
+	if e != nil {
+		return reply, errors.New("attempt lock unavailable")
+	}
+	f := os.NewFile(uintptr(fd), "lock")
+	defer f.Close()
+	if syscall.Flock(fd, syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+		return reply, errors.New("original attempt has an active caller")
+	}
+	defer syscall.Flock(fd, syscall.LOCK_UN)
+	intent := filepath.Join(dir, "intent.json")
+	sealed, _ := json.Marshal(struct {
+		ID     string `json:"attempt_id"`
+		Digest string `json:"request_sha256"`
+	}{r.Start.ID, reply.RequestSHA256})
+	if e := calljournal.Complete(intent, sealed); e != nil {
+		return reply, e
+	}
+	existing := false
+	if old, e := localclient.ReadPrivate(intent, 16<<10); e == nil {
+		existing = true
+		if !bytes.Equal(old, sealed) {
+			reply.Outcome = "conflict"
+			return reply, errors.New("attempt ID already binds another request")
 		}
-		data, _ := json.Marshal(reply)
-		if err = privateRecord(record, data); err != nil {
-			return reply, errors.New("start response retention uncertain; inspect original attempt")
+	} else {
+		if _, e := os.Lstat(intent); !os.IsNotExist(e) {
+			return reply, errors.New("attempt intent unreadable; preserve and inspect")
+		}
+		if err = privateRecord(intent, sealed); err != nil {
+			return reply, err
 		}
 	}
-	return reply, nil
+	original := filepath.Join(dir, "original-request.json")
+	if !existing {
+		if e := calljournal.SaveBytes(original, body, maxWire); e != nil {
+			return reply, e
+		}
+	} else {
+		if e := calljournal.Complete(original, body); e != nil {
+			return reply, e
+		}
+		originalBytes, e := localclient.ReadPrivate(original, maxWire)
+		if e != nil || !bytes.Equal(originalBytes, body) {
+			reply.Outcome = "uncertain"
+			return reply, errors.New("sealed original request unavailable or changed; preserve and inspect")
+		}
+	}
+	retainedResponse := func(out *Reply) error {
+		ev, found, e := calljournal.LatestKind(dir, "response")
+		if e != nil {
+			return e
+		}
+		out.RetainedResponseAvailable = found
+		out.RetainedResponseEventID = ev.ID
+		if found {
+			var saved Reply
+			if json.Unmarshal(ev.Value, &saved) != nil || saved.RequestSHA256 != reply.RequestSHA256 || saved.CallerUID != p.CallerUID {
+				return errors.New("retained response binding invalid")
+			}
+		}
+		return nil
+	}
+	finish := func(saved Reply, cached bool) (Reply, error) {
+		if e := retainedResponse(&saved); e != nil {
+			saved.Outcome = "uncertain"
+			return saved, e
+		}
+		saved.Cached = cached
+		if saved.Status >= 500 || saved.Status == 409 {
+			saved.Outcome = "uncertain"
+			return saved, errors.New("original attempt unresolved; fresh inspection required")
+		}
+		if saved.Status < 200 || saved.Status >= 300 {
+			saved.Outcome = "refused"
+			return saved, errors.New("caller HTTP refusal; retained privately")
+		}
+		if !matchesAttempt(saved.Body, r.Start, p.CallerUID) {
+			saved.Outcome = "conflict"
+			return saved, errors.New("existing attempt does not match sealed source/command/inputs/caller")
+		}
+		var entry manager.Entry
+		json.Unmarshal(saved.Body, &entry)
+		saved.OperationState = string(entry.State)
+		switch entry.State {
+		case manager.StateStarting, manager.StateRunning, manager.StateStopping, manager.StateExited, manager.StateStopped, manager.StateFailed, manager.StateTimedOut:
+			saved.Outcome = "admitted"
+			if saved.Observation {
+				saved.Outcome = "original-attempt-observed"
+			}
+			return saved, nil
+		default:
+			saved.Outcome = "uncertain"
+			return saved, errors.New("original attempt execution unresolved")
+		}
+	}
+	if e := calljournal.Recover(dir, func(ev calljournal.Event) bool {
+		switch ev.Kind {
+		case "response", "reconciliation":
+			var old Reply
+			return json.Unmarshal(ev.Value, &old) == nil && old.RequestSHA256 == reply.RequestSHA256 && old.CallerUID == p.CallerUID
+		case "dispatch", "transport-uncertain":
+			var value struct{ Digest string }
+			return json.Unmarshal(ev.Value, &value) == nil && value.Digest == reply.RequestSHA256
+		}
+		return false
+	}); e != nil {
+		reply.Outcome = "uncertain"
+		return reply, e
+	}
+	if e := retainedResponse(&reply); e != nil {
+		reply.Outcome = "uncertain"
+		return reply, e
+	}
+	latest, found, e := calljournal.Latest(dir)
+	if e != nil {
+		return reply, e
+	}
+	if found && latest.Kind == "response" {
+		var old Reply
+		if json.Unmarshal(latest.Value, &old) != nil || old.RequestSHA256 != reply.RequestSHA256 || old.CallerUID != p.CallerUID {
+			return reply, errors.New("cached response binding invalid")
+		}
+		if old.Status == 201 {
+			old.EventID = latest.ID
+			old.ObservedAt = latest.At
+			return finish(old, true)
+		}
+	}
+	// Any nonterminal result or historical reconciliation gets a fresh GET.
+	exchange := func(kind, verb, target string, payload []byte) (Reply, error) {
+		out := reply
+		out.Observation = kind == "reconciliation"
+		if _, e := calljournal.Append(dir, "dispatch", struct{ Digest, Method, Path string }{reply.RequestSHA256, verb, target}); e != nil {
+			return out, e
+		}
+		status, data, e := call(verb, target, payload)
+		out.Status = status
+		out.Body = data
+		out.Transport = "response"
+		out.ResponseAvailable = kind == "response" && e == nil
+		if e != nil {
+			out.Transport = "lost-or-unrecorded"
+			out.Outcome = "uncertain"
+			calljournal.Append(dir, "transport-uncertain", struct{ Digest string }{reply.RequestSHA256})
+			return out, e
+		}
+		if len(data) > 8<<20 {
+			out.Body = nil
+			out.Outcome = "uncertain"
+			return out, errors.New("response exceeds retention bound; inspect original attempt")
+		}
+		ev, e := calljournal.Append(dir, kind, out)
+		out.EventID = ev.ID
+		out.ObservedAt = ev.At
+		if e != nil {
+			out.Transport = "response-not-durable"
+			out.Outcome = "uncertain"
+			out.ResponseAvailable = false
+			return out, errors.New("response retention uncertain; inspect original attempt")
+		}
+		if e := retainedResponse(&out); e != nil {
+			out.Outcome = "uncertain"
+			return out, e
+		}
+		return out, nil
+	}
+	observation, e := exchange("reconciliation", "GET", "/v1/attempts/"+r.Start.ID, nil)
+	if e != nil {
+		return observation, e
+	}
+	if observation.Status == 200 {
+		return finish(observation, false)
+	}
+	if observation.Status != 404 {
+		observation.Outcome = "uncertain"
+		return observation, errors.New("original attempt inspection unresolved")
+	}
+	// Manager GET's documented 404 is authoritative absence in its retained
+	// attempt table. No 409/503, local missing file or cached GET permits retry.
+	if existing && !r.RetryKnownUnaccepted {
+		observation.Outcome = "not-accepted"
+		observation.OperationState = "not-accepted"
+		return observation, errors.New("fresh original-attempt absence; explicit same-ID retry required")
+	}
+	answer, e := exchange("response", method, path, body)
+	if e != nil {
+		return answer, e
+	}
+	return finish(answer, false)
+}
+
+func matchesAttempt(data []byte, s *manager.StartRequest, uid int) bool {
+	var e manager.Entry
+	if json.Unmarshal(data, &e) != nil || e.Attempt != s.ID || e.Class.Name != s.Class || !reflect.DeepEqual(e.Command, s.Command) || !reflect.DeepEqual(e.OutputNames, s.Outputs) || e.Source == nil || e.StartedByUID == nil || int(*e.StartedByUID) != uid {
+		return false
+	}
+	a, b := e.Source, s.Source
+	base := ""
+	if b.Git && b.BaseSHA == "" {
+		base = b.Base
+		if base == "" {
+			base = "main"
+		}
+	}
+	if a.Mirror != b.Mirror || a.Ref != b.Ref || a.SHA != b.SHA || a.Git != b.Git || a.BaseSHA != b.BaseSHA || a.Base != base || a.ReadOnly != b.ReadOnly || len(e.Inputs) != len(s.Inputs) {
+		return false
+	}
+	inputs := map[string]manager.InputRecord{}
+	for _, in := range e.Inputs {
+		if _, ok := inputs[in.Name]; ok {
+			return false
+		}
+		inputs[in.Name] = in
+	}
+	for _, in := range s.Inputs {
+		old, ok := inputs[in.Name]
+		if !ok || old.SHA256 != in.SHA256 || old.Bytes != len(in.Data) {
+			return false
+		}
+	}
+	return true
 }

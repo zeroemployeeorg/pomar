@@ -20,8 +20,8 @@ func main() {
 	if err == nil {
 		var r cicaller.Reply
 		r, err = cicaller.Run(p, os.Stdin)
-		if err == nil {
-			err = json.NewEncoder(os.Stdout).Encode(r)
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(r); encodeErr != nil && err == nil {
+			err = encodeErr
 		}
 	}
 	if err != nil {

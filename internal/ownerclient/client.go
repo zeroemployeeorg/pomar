@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"github.com/zeroemployeeorg/pomar/internal/calljournal"
 	"io"
 	"net/http"
 	"net/url"
@@ -21,13 +22,13 @@ import (
 
 const responseLimit = 8 << 20
 
-var id = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+var id = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
 var ErrUncertain = errors.New("acceptance unknown; reconcile this original operation before retrying")
 var ErrConflict = errors.New("operation identity already binds different input or action")
 
 type Config struct {
 	Root, Records, Environment, Action, OperationID, Request, Session, Incarnation string
-	Reconcile, RetryKnownUnaccepted                                                bool
+	Reconcile, RetryKnownUnaccepted, ConsumeRequest                                bool
 }
 
 type Intent struct {
@@ -37,12 +38,20 @@ type Intent struct {
 // Receipt is ordinary diagnostic metadata. Response/request/provider bytes are
 // kept only in the separately protected files, never in this structure.
 type Receipt struct {
-	Action      string `json:"action"`
-	OperationID string `json:"operation_id"`
-	UID         int    `json:"euid"`
-	HTTPStatus  int    `json:"http_status"`
-	Outcome     string `json:"outcome"`
-	Cached      bool   `json:"cached"`
+	Action                    string `json:"action"`
+	OperationID               string `json:"operation_id"`
+	UID                       int    `json:"euid"`
+	HTTPStatus                int    `json:"http_status"`
+	Outcome                   string `json:"outcome"`
+	Cached                    bool   `json:"cached"`
+	Transport                 string `json:"transport_outcome"`
+	OperationState            string `json:"operation_state"`
+	SessionState              string `json:"session_state"`
+	ResponseAvailable         bool   `json:"response_available"`
+	RetainedResponseAvailable bool   `json:"retained_response_available"`
+	RetainedResponseEventID   string `json:"retained_response_event_id,omitempty"`
+	EventID                   string `json:"event_id,omitempty"`
+	ObservedAt                string `json:"observed_at,omitempty"`
 }
 
 type response struct {
@@ -82,39 +91,7 @@ func route(c Config) (string, string, error) {
 	}
 }
 
-func saveRecord(path string, value any) error {
-	b, err := json.Marshal(value)
-	if err != nil {
-		return errors.New("cannot encode private record")
-	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".pending-")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(b); err == nil {
-		err = f.Sync()
-	}
-	closeErr := f.Close()
-	if err != nil {
-		return err
-	}
-	if closeErr != nil {
-		return closeErr
-	}
-	if err = os.Link(f.Name(), path); err != nil {
-		return err
-	}
-	if err = os.Remove(f.Name()); err != nil {
-		return err
-	}
-	d, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
+func saveRecord(path string, value any) error { return calljournal.Save(path, value) }
 
 func call(client *http.Client, method, path string, body []byte) (int, []byte, error) {
 	req, err := http.NewRequest(method, "http://owner"+path, bytes.NewReader(body))
@@ -139,7 +116,7 @@ func call(client *http.Client, method, path string, body []byte) (int, []byte, e
 // durable_non_acceptance observation and explicit retry flag permit resubmission
 // of the exact same original ID and bytes. No login input is journaled.
 func Run(c Config) (Receipt, error) {
-	meta := Receipt{Action: c.Action, OperationID: c.OperationID, UID: os.Geteuid()}
+	meta := Receipt{Action: c.Action, OperationID: c.OperationID, UID: os.Geteuid(), Outcome: "local-refusal", Transport: "not-contacted", OperationState: "unknown", SessionState: "not-inspected"}
 	method, path, err := route(c)
 	if err != nil {
 		return meta, err
@@ -151,7 +128,7 @@ func Run(c Config) (Receipt, error) {
 		return meta, err
 	}
 	var body []byte
-	if method == "POST" {
+	if method == "POST" && c.Request != "" {
 		body, err = localclient.ReadPrivate(c.Request, 64<<10)
 		if err != nil {
 			return meta, err
@@ -174,11 +151,20 @@ func Run(c Config) (Receipt, error) {
 		if json.Unmarshal(fields["operation_id"], &op) != nil || json.Unmarshal(fields["expected_incarnation"], &inc) != nil || op != c.OperationID || !id.MatchString(inc) || inc != c.Incarnation || !id.MatchString(c.Session) {
 			return meta, errors.New("private request must bind the original operation, session and incarnation")
 		}
-	} else if c.Request != "" {
+	} else if method != "POST" && c.Request != "" {
 		return meta, errors.New("read-only actions do not take a request body")
 	}
 	sum := sha256.Sum256(body)
-	intent := Intent{Action: c.Action, Environment: c.Environment, OperationID: c.OperationID, RequestSHA256: hex.EncodeToString(sum[:]), Socket: filepath.Join(c.Root, "host.sock"), Session: c.Session, Incarnation: c.Incarnation}
+	requestHash := hex.EncodeToString(sum[:])
+	if method == "POST" && c.Request == "" {
+		prior, e := localclient.ReadPrivate(filepath.Join(c.Records, c.OperationID, "intent.json"), 64<<10)
+		var old Intent
+		if e != nil || json.Unmarshal(prior, &old) != nil || len(old.RequestSHA256) != 64 {
+			return meta, errors.New("original private request required for first dispatch")
+		}
+		requestHash = old.RequestSHA256
+	}
+	intent := Intent{Action: c.Action, Environment: c.Environment, OperationID: c.OperationID, RequestSHA256: requestHash, Socket: filepath.Join(c.Root, "host.sock"), Session: c.Session, Incarnation: c.Incarnation}
 	dir := filepath.Join(c.Records, c.OperationID)
 	if err = os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
 		return meta, err
@@ -196,6 +182,10 @@ func Run(c Config) (Receipt, error) {
 		return meta, errors.New("original operation already has an active client")
 	}
 	defer syscall.Flock(fd, syscall.LOCK_UN)
+	expectedIntent, _ := json.Marshal(intent)
+	if err = calljournal.Complete(filepath.Join(dir, "intent.json"), expectedIntent); err != nil {
+		return meta, err
+	}
 	prior, err := localclient.ReadPrivate(filepath.Join(dir, "intent.json"), 64<<10)
 	existing := err == nil
 	if existing {
@@ -211,33 +201,174 @@ func Run(c Config) (Receipt, error) {
 			return meta, err
 		}
 	}
-	finish := func(saved response, cached bool) (Receipt, error) {
+	retainedResponse := func() error {
+		ev, found, e := calljournal.LatestKind(dir, "response")
+		if e != nil {
+			return e
+		}
+		meta.RetainedResponseAvailable = found
+		meta.RetainedResponseEventID = ev.ID
+		if found {
+			var saved response
+			if json.Unmarshal(ev.Value, &saved) != nil || saved.Intent != intent {
+				return ErrConflict
+			}
+		}
+		return nil
+	}
+	finish := func(saved response, cached bool, ev calljournal.Event) (Receipt, error) {
+		if e := retainedResponse(); e != nil {
+			meta.Outcome = "uncertain"
+			return meta, e
+		}
 		meta.HTTPStatus = saved.Status
-		meta.Outcome = saved.Kind
 		meta.Cached = cached
-		if saved.Status < 200 || saved.Status >= 300 {
+		meta.EventID = ev.ID
+		meta.ObservedAt = ev.At
+		meta.SessionState = "not-inspected"
+		meta.Transport = "response"
+		meta.ResponseAvailable = saved.Kind == "response"
+		meta.OperationState = operationState(saved.Body, c.OperationID)
+		if method == "GET" {
+			if saved.Status >= 200 && saved.Status < 300 {
+				meta.Outcome = "snapshot"
+				return meta, nil
+			}
+			meta.Outcome = "refused"
 			return meta, errors.New("owner HTTP refusal; response retained privately")
 		}
-		return meta, nil
+		if saved.Status >= 500 || saved.Status == 409 || meta.OperationState == "dispatching" || meta.OperationState == "acceptance_unknown" {
+			meta.Outcome = "uncertain"
+			return meta, ErrUncertain
+		}
+		if saved.Status < 200 || saved.Status >= 300 {
+			meta.Outcome = "refused"
+			return meta, errors.New("owner HTTP refusal; response retained privately")
+		}
+		if c.Action == "login" || c.Action == "login-complete" {
+			var out struct {
+				Login json.RawMessage `json:"login"`
+			}
+			json.Unmarshal(saved.Body, &out)
+			// A retained control only proves dispatch, not the missing one-time result.
+			if saved.Kind == "response" && len(out.Login) > 0 && string(out.Login) != "null" {
+				if c.Action == "login-complete" {
+					var result struct {
+						Success *bool `json:"success"`
+					}
+					if json.Unmarshal(out.Login, &result) != nil || result.Success == nil {
+						meta.Outcome = "uncertain"
+						return meta, ErrUncertain
+					}
+					if !*result.Success {
+						meta.Outcome = "refused"
+						return meta, errors.New("original login completion refused")
+					}
+				}
+				meta.Outcome = "response-available"
+				if c.ConsumeRequest && c.Action == "login-complete" && c.Request != "" {
+					if err := os.Remove(c.Request); err != nil {
+						return meta, errors.New("response retained; private request cleanup failed")
+					}
+				}
+				return meta, nil
+			}
+			meta.Outcome = "original-operation-observed"
+			return meta, ErrUncertain
+		}
+		if meta.OperationState == "completed" {
+			meta.Outcome = "completed"
+			return meta, nil
+		}
+		meta.Outcome = "uncertain"
+		return meta, ErrUncertain
 	}
-	for _, name := range []string{"reconciliation.json", "response.json"} {
-		if data, e := localclient.ReadPrivate(filepath.Join(dir, name), 12<<20); e == nil {
+	if e := calljournal.Recover(dir, func(ev calljournal.Event) bool {
+		switch ev.Kind {
+		case "response", "reconciliation", "dispatch", "transport-uncertain":
+			var value struct{ Intent Intent }
+			return json.Unmarshal(ev.Value, &value) == nil && value.Intent == intent
+		}
+		return false
+	}); e != nil {
+		meta.Outcome = "uncertain"
+		return meta, e
+	}
+	if e := retainedResponse(); e != nil {
+		meta.Outcome = "uncertain"
+		return meta, e
+	}
+	latest, found, e := calljournal.Latest(dir)
+	if e != nil {
+		meta.Outcome = "uncertain"
+		meta.OperationState = "acceptance_unknown"
+		return meta, e
+	}
+	if found && !c.Reconcile {
+		if latest.Kind == "response" || latest.Kind == "reconciliation" {
 			var saved response
-			if json.Unmarshal(data, &saved) != nil || saved.Intent != intent || len(saved.Body) > responseLimit {
-				return meta, errors.New("recorded response identity invalid")
+			if json.Unmarshal(latest.Value, &saved) != nil || saved.Intent != intent {
+				return meta, ErrConflict
 			}
-			if c.Reconcile && method == "POST" && name == "response.json" && saved.Status >= 500 {
-				continue
+			return finish(saved, true, latest)
+		}
+		meta.Transport = "lost-or-unrecorded"
+		meta.OperationState = "acceptance_unknown"
+		meta.Outcome = "uncertain"
+		return meta, ErrUncertain
+	}
+	// Read legacy evidence without changing it. Explicit reconciliation always
+	// bypasses historical observations and obtains a fresh server observation.
+	if !found && !c.Reconcile {
+		for _, name := range []string{"reconciliation.json", "response.json"} {
+			data, e := localclient.ReadPrivate(filepath.Join(dir, name), calljournal.Limit)
+			if e == nil {
+				var saved response
+				if json.Unmarshal(data, &saved) != nil || saved.Intent != intent {
+					return meta, ErrConflict
+				}
+				saved.Kind = "response"
+				if name == "reconciliation.json" {
+					saved.Kind = "reconciliation"
+				}
+				return finish(saved, true, calljournal.Event{})
 			}
-			return finish(saved, true)
-		} else if _, e := os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(e) {
-			return meta, errors.New("recorded response unreadable; preserve and inspect")
+			if _, e = os.Lstat(filepath.Join(dir, name)); !os.IsNotExist(e) {
+				return meta, errors.New("legacy response unreadable; preserve and inspect")
+			}
 		}
 	}
 	client := localclient.New(intent.Socket, os.Geteuid())
 	defer client.CloseIdleConnections()
+	exchange := func(kind, verb, target string, payload []byte) (response, calljournal.Event, error) {
+		if _, err := calljournal.Append(dir, "dispatch", struct {
+			Intent       Intent
+			Method, Path string
+		}{intent, verb, target}); err != nil {
+			return response{}, calljournal.Event{}, err
+		}
+		status, b, e := call(client, verb, target, payload)
+		saved := response{Intent: intent, Status: status, Body: b, Kind: kind}
+		if e != nil {
+			meta.Transport = "lost-or-unrecorded"
+			meta.OperationState = "acceptance_unknown"
+			meta.Outcome = "uncertain"
+			calljournal.Append(dir, "transport-uncertain", struct{ Intent Intent }{intent})
+			return saved, calljournal.Event{}, ErrUncertain
+		}
+		ev, e := calljournal.Append(dir, kind, saved)
+		if e != nil {
+			meta.Transport = "response-not-durable"
+			meta.HTTPStatus = status
+			meta.Outcome = "uncertain"
+			meta.OperationState = "acceptance_unknown"
+			return saved, ev, ErrUncertain
+		}
+		return saved, ev, nil
+	}
 	if existing && method == "POST" {
 		if !c.Reconcile {
+			meta.Outcome = "uncertain"
 			return meta, ErrUncertain
 		}
 		inspect := c
@@ -246,35 +377,69 @@ func Run(c Config) (Receipt, error) {
 			inspect.Action = "agent-operation"
 		}
 		_, p, _ := route(inspect)
-		status, b, e := call(client, "GET", p, nil)
+		saved, ev, e := exchange("reconciliation", "GET", p, nil)
 		if e != nil {
-			return meta, ErrUncertain
+			return meta, e
 		}
 		var evidence struct {
 			Evidence string `json:"evidence"`
 		}
-		if status == 404 && json.Unmarshal(b, &evidence) == nil && evidence.Evidence == "durable_non_acceptance" {
+		json.Unmarshal(saved.Body, &evidence)
+		if saved.Status == 404 && evidence.Evidence == "durable_non_acceptance" {
+			meta.HTTPStatus = 404
+			meta.OperationState = "not-accepted"
+			meta.Outcome = "durable-non-acceptance"
+			meta.EventID = ev.ID
+			meta.ObservedAt = ev.At
+			meta.Transport = "response"
+			meta.SessionState = "not-inspected"
 			if !c.RetryKnownUnaccepted {
-				return meta, errors.New("durable non-acceptance observed; explicit same-operation retry required")
+				return meta, errors.New("fresh durable non-acceptance; explicit same-operation retry required")
 			}
 		} else {
-			if status != 200 {
-				return meta, ErrUncertain
-			}
-			saved := response{Intent: intent, Status: status, Body: b, Kind: "original-operation-observed"}
-			if err = saveRecord(filepath.Join(dir, "reconciliation.json"), saved); err != nil {
-				return meta, ErrUncertain
-			}
-			return finish(saved, false)
+			return finish(saved, false, ev)
 		}
 	}
-	status, b, err := call(client, method, path, body)
-	if err != nil {
-		return meta, ErrUncertain
+	if method == "POST" && len(body) == 0 {
+		meta.Outcome = "uncertain"
+		return meta, errors.New("same-byte original request required for retry; no replacement minted")
 	}
-	saved := response{Intent: intent, Status: status, Body: b, Kind: "response-recorded"}
-	if err = saveRecord(filepath.Join(dir, "response.json"), saved); err != nil {
-		return meta, ErrUncertain
+	saved, ev, e := exchange("response", method, path, body)
+	if e != nil {
+		return meta, e
 	}
-	return finish(saved, false)
+	return finish(saved, false, ev)
+}
+
+// Extract only the original action/control state, never the environment phase
+// or current authentication. Unknown shapes remain unresolved.
+func operationState(body []byte, op string) string {
+	var v struct {
+		State  string `json:"state"`
+		Action struct {
+			State string `json:"state"`
+		} `json:"action"`
+		Operation struct {
+			State string `json:"state"`
+		} `json:"operation"`
+		Actions map[string]struct {
+			State string `json:"state"`
+		} `json:"actions"`
+	}
+	if json.Unmarshal(body, &v) != nil {
+		return "unknown"
+	}
+	if v.Action.State != "" {
+		return v.Action.State
+	}
+	if v.Operation.State != "" {
+		return v.Operation.State
+	}
+	if a, ok := v.Actions[op]; ok {
+		return a.State
+	}
+	if v.State != "" {
+		return v.State
+	}
+	return "unknown"
 }

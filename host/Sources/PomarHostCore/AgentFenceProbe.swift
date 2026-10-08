@@ -54,11 +54,6 @@ public enum AgentFenceProbe {
         }
         throw NSError(domain: "AgentFenceProbe.inventoryIncomplete", code: 1)
     }
-    private static func vanished(_ pid: Int32) -> Bool {
-        // ESRCH alone is not interpreted as departure.
-        guard let live = try? pids() else { return false }
-        return !live.contains(pid)
-    }
     private static func zombie(_ pid: Int32) -> Bool {
         // proc_listallpids includes zombies while libproc excludes them. A
         // positive kernel zombie record proves no remaining task/file table;
@@ -85,8 +80,8 @@ public enum AgentFenceProbe {
     public static func run(_ r: Request) throws -> Evidence {
         try run(r, access: ProcessAccess())
     }
-    static func run(_ r: Request, access: ProcessAccess) throws -> Evidence {
-        guard r.uid == getuid(), r.pid > 0, r.birth > 0,
+    static func run(_ r: Request, access: ProcessAccess, privilegedObserver: Bool = false) throws -> Evidence {
+        guard (r.uid == getuid() || (privilegedObserver && getuid() == 0 && geteuid() == 0)), r.pid > 0, r.birth > 0,
               r.rootfs.hasPrefix("/"), r.helper.hasPrefix("/") else {
             throw NSError(domain: "AgentFenceProbe.invalidBinding", code: 1)
         }
@@ -144,7 +139,7 @@ public enum AgentFenceProbe {
                 let n = access.info(pid, PROC_PIDT_SHORTBSDINFO, 0, &short, Int32(MemoryLayout<proc_bsdshortinfo>.size))
                 if n != MemoryLayout<proc_bsdshortinfo>.size {
                     if zombie(pid) { out.kernelZombiesChecked.append(pid) }
-                    else if !vanished(pid) { out.issues.append("pid \(pid): kernel identity unavailable errno \(errno)") }
+                    else { out.issues.append("pid \(pid): kernel identity unavailable errno \(errno)") }
                     continue
                 }
                 // Executable identification does not determine disk custody.
@@ -155,19 +150,24 @@ public enum AgentFenceProbe {
                 let foreignMissing = short.pbsi_uid != r.uid && executable == nil
                 var identity = proc_bsdinfo()
                 var identityValid = false
-                if short.pbsi_uid == r.uid || foreignMissing {
+                // The separate actual-root diagnostic inspects target inode
+                // custody for every process, including foreign processes whose
+                // executable path is available. Ordinary owner coverage keeps
+                // its existing privilege boundary and conservative holds.
+                if privilegedObserver || short.pbsi_uid == r.uid || foreignMissing {
                     errno = 0
                     identityValid = access.info(pid, PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size
                         && identity.pbi_pid == UInt32(pid) && identity.pbi_uid == short.pbsi_uid
                         && identity.pbi_start_tvsec > 0
                     let identityError = errno
-                    if !identityValid && !vanished(pid) {
+                    if !identityValid {
                         let scope = short.pbsi_uid == r.uid ? "owned" : "foreign"
                         out.issues.append("pid \(pid): \(scope) process birth/identity unavailable errno \(identityError)")
                     }
                 }
                 let pathIssue = "pid \(pid): executable path unavailable errno \(executableError)"
-                if executable == nil && !vanished(pid) { out.issues.append(pathIssue) }
+                let pathIssueIndex = out.issues.count
+                if executable == nil { out.issues.append(pathIssue) }
                 if let executable, executable.hasPrefix("/System/Library/Frameworks/Virtualization.framework/") {
                     out.issues.append("pid \(pid) uid \(short.pbsi_uid): live Virtualization executor \(executable), ownership unresolved")
                 }
@@ -203,15 +203,15 @@ public enum AgentFenceProbe {
                 }
                 errno = 0
                 let size = access.info(pid, PROC_PIDLISTFDS, 0, nil, 0)
-                if size <= 0 && errno != 0 {
-                    if !vanished(pid) { out.issues.append("pid \(pid): descriptor inventory unavailable") }
+                if size < 0 || (size == 0 && errno != 0) {
+                    do { out.issues.append("pid \(pid): descriptor inventory unavailable") }
                     continue
                 }
                 var descriptors = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / MemoryLayout<proc_fdinfo>.size + 256)
                 errno = 0
                 let bytes = access.info(pid, PROC_PIDLISTFDS, 0, &descriptors, Int32(descriptors.count * MemoryLayout<proc_fdinfo>.size))
                 if bytes < 0 || (bytes == 0 && errno != 0) || bytes % Int32(MemoryLayout<proc_fdinfo>.size) != 0 || bytes >= descriptors.count * MemoryLayout<proc_fdinfo>.size {
-                    if !vanished(pid) { out.issues.append("pid \(pid): descriptor inventory incomplete") }
+                    do { out.issues.append("pid \(pid): descriptor inventory incomplete") }
                     continue
                 }
                 for fd in descriptors.prefix(Int(bytes) / MemoryLayout<proc_fdinfo>.size) where fd.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
@@ -221,7 +221,7 @@ public enum AgentFenceProbe {
                         // it again; an inaccessible live descriptor is unknown.
                         var check = vnode_fdinfowithpath()
                         if proc_pidfdinfo(pid, fd.proc_fd, PROC_PIDFDVNODEPATHINFO, &check, Int32(MemoryLayout<vnode_fdinfowithpath>.size)) != MemoryLayout<vnode_fdinfowithpath>.size && errno == EBADF { continue }
-                        if !vanished(pid) { out.issues.append("pid \(pid) fd \(fd.proc_fd): vnode lookup incomplete") }
+                        do { out.issues.append("pid \(pid) fd \(fd.proc_fd): vnode lookup incomplete") }
                         continue
                     }
                     out.vnodeDescriptorsChecked += 1
@@ -229,8 +229,8 @@ public enum AgentFenceProbe {
                 }
                 errno = 0
                 let portSize = access.info(pid, PROC_PIDLISTFILEPORTS, 0, nil, 0)
-                if portSize <= 0 && errno != 0 {
-                    if !vanished(pid) { out.issues.append("pid \(pid): fileport inventory unavailable") }
+                if portSize < 0 || (portSize == 0 && errno != 0) {
+                    do { out.issues.append("pid \(pid): fileport inventory unavailable") }
                 } else if portSize > 0 {
                     var ports = [proc_fileportinfo](repeating: proc_fileportinfo(), count: Int(portSize) / MemoryLayout<proc_fileportinfo>.size + 256)
                     errno = 0
@@ -241,7 +241,7 @@ public enum AgentFenceProbe {
                         for port in ports.prefix(Int(read) / MemoryLayout<proc_fileportinfo>.size) where port.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
                             var v = vnode_fdinfowithpath()
                             if proc_pidfileportinfo(pid, port.proc_fileport, PROC_PIDFDVNODEPATHINFO, &v, Int32(MemoryLayout<vnode_fdinfowithpath>.size)) != MemoryLayout<vnode_fdinfowithpath>.size {
-                                if !vanished(pid) { out.issues.append("pid \(pid) fileport \(port.proc_fileport): vnode lookup incomplete") }
+                                do { out.issues.append("pid \(pid) fileport \(port.proc_fileport): vnode lookup incomplete") }
                             } else {
                                 out.fileportsChecked += 1
                                 if sameDisk(v.pvip.vip_vi.vi_stat) { out.issues.append("pid \(pid): workspace inode retained by fileport") }
@@ -257,7 +257,7 @@ public enum AgentFenceProbe {
                     let read = access.info(pid, PROC_PIDREGIONPATHINFO, address, &region, Int32(MemoryLayout<proc_regionwithpathinfo>.size))
                     if read != MemoryLayout<proc_regionwithpathinfo>.size {
                         // EINVAL indicates no VM region at or above address.
-                        if errno == EINVAL || vanished(pid) { finished = true; break }
+                        if errno == EINVAL { finished = true; break }
                         out.issues.append("pid \(pid): mapped-region lookup unavailable at \(address), errno \(errno)")
                         finished = true; break
                     }
@@ -273,7 +273,7 @@ public enum AgentFenceProbe {
                 // across the resource scan even when no path was available.
                 var after = proc_bsdinfo()
                 if access.info(pid, PROC_PIDTBSDINFO, 0, &after, Int32(MemoryLayout<proc_bsdinfo>.size)) != MemoryLayout<proc_bsdinfo>.size {
-                    if !vanished(pid) { out.issues.append("pid \(pid): resource observation identity recheck unavailable") }
+                    do { out.issues.append("pid \(pid): resource observation identity recheck unavailable") }
                 } else if after.pbi_pid != identity.pbi_pid || after.pbi_uid != identity.pbi_uid
                     || after.pbi_start_tvsec != identity.pbi_start_tvsec || after.pbi_start_tvusec != identity.pbi_start_tvusec {
                     out.issues.append("pid \(pid): process identity changed during resource observation")
@@ -282,7 +282,9 @@ public enum AgentFenceProbe {
                 // foreign missing-path hold. Own helper classification and
                 // preboot unlinked-inode cases keep their conservative holds.
                 if foreignMissing && !absent && out.issues.count == beforeResources {
-                    out.issues.removeAll { $0 == pathIssue }
+                    if pathIssueIndex < out.issues.count, out.issues[pathIssueIndex] == pathIssue {
+                        out.issues.remove(at: pathIssueIndex)
+                    }
                 }
             }
         }

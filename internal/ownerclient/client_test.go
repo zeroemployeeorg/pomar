@@ -66,12 +66,13 @@ func TestLostResponseReconcilesWithoutRepeatingEffect(t *testing.T) {
 	}
 	c.Reconcile = true
 	r, err := Run(c)
-	if err != nil || r.Outcome != "original-operation-observed" {
+	if err != nil || r.Outcome != "completed" {
 		t.Fatalf("reconcile: %+v %v", r, err)
 	}
 	if posts.Load() != 1 || gets.Load() != 1 {
 		t.Fatal("effect repeated during reconciliation")
 	}
+	c.Reconcile = false
 	r, err = Run(c)
 	if err != nil || !r.Cached || posts.Load() != 1 || gets.Load() != 1 {
 		t.Fatal("recorded response was not recovered locally")
@@ -80,7 +81,10 @@ func TestLostResponseReconcilesWithoutRepeatingEffect(t *testing.T) {
 
 func TestChangedInputConflictsBeforeDispatch(t *testing.T) {
 	var calls atomic.Int32
-	c := fixture(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1); w.Write([]byte(`{}`)) })
+	c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Write([]byte(`{"action":{"state":"completed"}}`))
+	})
 	if _, err := Run(c); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +110,7 @@ func TestRetryNeedsFreshDurableNonAcceptance(t *testing.T) {
 				conn.Close()
 				return
 			}
-			w.Write([]byte(`{}`))
+			w.Write([]byte(`{"action":{"state":"completed"}}`))
 			return
 		}
 		gets.Add(1)
@@ -151,7 +155,7 @@ func TestProxyFailureDoesNotMeanNonAcceptance(t *testing.T) {
 	}
 	c.Reconcile = true
 	r, err = Run(c)
-	if err != nil || r.Outcome != "original-operation-observed" || posts.Load() != 1 {
+	if !errors.Is(err, ErrUncertain) || r.OperationState != "acceptance_unknown" || posts.Load() != 1 {
 		t.Fatal("502 incorrectly established non-acceptance")
 	}
 }
@@ -183,7 +187,7 @@ func TestPrivateInputAndSocketRefusals(t *testing.T) {
 
 func TestLoginResponseAndInputRemainPrivate(t *testing.T) {
 	c := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"login":{"authUrl":"https://fixture.invalid/PRIVATE-CHALLENGE"}}`))
+		w.Write([]byte(`{"login":{"success":true,"authUrl":"https://fixture.invalid/PRIVATE-CHALLENGE"}}`))
 	})
 	c.Action = "login-complete"
 	os.WriteFile(c.Request, []byte(`{"operation_id":"original-stop","expected_incarnation":"inc-original","login_id":"fixture-login","code":"PRIVATE-CODE"}`), 0600)
@@ -199,7 +203,7 @@ func TestLoginResponseAndInputRemainPrivate(t *testing.T) {
 	if strings.Contains(string(intent), "PRIVATE") {
 		t.Fatal("login content journaled")
 	}
-	response, _ := os.Stat(filepath.Join(c.Records, c.OperationID, "response.json"))
+	response, _ := os.Stat(filepath.Join(c.Records, c.OperationID, "event-00000000002.json"))
 	if response.Mode().Perm() != 0600 {
 		t.Fatal("login response not private")
 	}

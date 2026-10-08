@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/manager"
 )
 
@@ -56,7 +57,9 @@ func TestFixedPolicyRefusesPrivilegeExpansionBeforeAPI(t *testing.T) {
 	for _, which := range []string{"class", "command", "mirror", "ref", "source", "source-git", "source-base", "source-readonly", "outputs", "input-name", "input-hash", "missing-input", "arbitrary-action"} {
 		t.Run(which, func(t *testing.T) {
 			var calls atomic.Int32
-			p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) { calls.Add(1) })
+			var p Policy
+			var r Request
+			p, r = fixture(t, func(w http.ResponseWriter, req *http.Request) { calls.Add(1) })
 			switch which {
 			case "class":
 				r.Start.Class = "another-class"
@@ -97,15 +100,17 @@ func TestFixedPolicyRefusesPrivilegeExpansionBeforeAPI(t *testing.T) {
 
 func TestSealedAttemptIsRecoveredWithoutDuplicateAdmission(t *testing.T) {
 	var posts, gets atomic.Int32
-	p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
+	var p Policy
+	var r Request
+	p, r = fixture(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "GET" {
 			gets.Add(1)
 			w.WriteHeader(404)
 			return
 		}
 		posts.Add(1)
 		w.WriteHeader(201)
-		w.Write([]byte(`{"id":"original-attempt"}`))
+		json.NewEncoder(w).Encode(attemptEntry(p, r))
 	})
 	a, err := runRequest(p, r)
 	if err != nil || a.Status != 201 {
@@ -127,8 +132,10 @@ func TestSealedAttemptIsRecoveredWithoutDuplicateAdmission(t *testing.T) {
 
 func TestLostAdmissionResponseInspectsOriginalID(t *testing.T) {
 	var posts atomic.Int32
-	p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
+	var p Policy
+	var r Request
+	p, r = fixture(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "POST" {
 			posts.Add(1)
 			conn, _, _ := w.(http.Hijacker).Hijack()
 			conn.Close()
@@ -137,7 +144,7 @@ func TestLostAdmissionResponseInspectsOriginalID(t *testing.T) {
 		if posts.Load() == 0 {
 			w.WriteHeader(404)
 		} else {
-			w.Write([]byte(`{"id":"original-attempt","phase":"running"}`))
+			json.NewEncoder(w).Encode(attemptEntry(p, r))
 		}
 	})
 	if _, err := runRequest(p, r); err == nil {
@@ -151,8 +158,10 @@ func TestLostAdmissionResponseInspectsOriginalID(t *testing.T) {
 
 func TestUnacceptedRetryNeedsExplicitConsentAndSameDigest(t *testing.T) {
 	var posts atomic.Int32
-	p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "GET" {
+	var p Policy
+	var r Request
+	p, r = fixture(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "GET" {
 			w.WriteHeader(404)
 			return
 		}
@@ -172,7 +181,7 @@ func TestUnacceptedRetryNeedsExplicitConsentAndSameDigest(t *testing.T) {
 }
 
 func TestReadRoutesAndActualPeerCustody(t *testing.T) {
-	p, _ := fixture(t, func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`[]`)) })
+	p, _ := fixture(t, func(w http.ResponseWriter, req *http.Request) { w.Write([]byte(`[]`)) })
 	if r, err := runRequest(p, Request{Action: "list"}); err != nil || r.CallerUID != os.Geteuid() || r.Status != 200 {
 		t.Fatal("native fixture caller route failed", err)
 	}
@@ -184,8 +193,10 @@ func TestReadRoutesAndActualPeerCustody(t *testing.T) {
 
 func TestServerFailureReconcilesAndRetainsObservation(t *testing.T) {
 	var posts, gets atomic.Int32
-	p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "POST" {
+	var p Policy
+	var r Request
+	p, r = fixture(t, func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == "POST" {
 			posts.Add(1)
 			w.WriteHeader(502)
 			return
@@ -194,11 +205,11 @@ func TestServerFailureReconcilesAndRetainsObservation(t *testing.T) {
 		if posts.Load() == 0 {
 			w.WriteHeader(404)
 		} else {
-			w.Write([]byte(`{"id":"original-attempt"}`))
+			json.NewEncoder(w).Encode(attemptEntry(p, r))
 		}
 	})
 	a, err := runRequest(p, r)
-	if err != nil || a.Status != 502 {
+	if err == nil || a.Status != 502 {
 		t.Fatal("server refusal not retained")
 	}
 	a, err = runRequest(p, r)
@@ -207,13 +218,15 @@ func TestServerFailureReconcilesAndRetainsObservation(t *testing.T) {
 	}
 	count := gets.Load()
 	a, err = runRequest(p, r)
-	if err != nil || !a.Observation || gets.Load() != count || posts.Load() != 1 {
+	if err != nil || !a.Observation || gets.Load() != count+1 || posts.Load() != 1 {
 		t.Fatal("observation was not recovered locally")
 	}
 }
 
 func TestSelfBaseBindsTheIdenticalPinnedGitCommit(t *testing.T) {
-	p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
+	var p Policy
+	var r Request
+	p, r = fixture(t, func(w http.ResponseWriter, req *http.Request) { w.WriteHeader(404) })
 	p.Ref = "refs/heads/main"
 	p.SourceGit = true
 	p.SourceSelfBase = true
@@ -234,4 +247,20 @@ func TestSelfBaseBindsTheIdenticalPinnedGitCommit(t *testing.T) {
 	if _, _, _, e := requestRoute(p, r); e == nil {
 		t.Fatal("self base without Git accepted")
 	}
+}
+
+func attemptEntry(p Policy, r Request) manager.Entry {
+	uid := uint32(p.CallerUID)
+	s := r.Start.Source
+	e := manager.Entry{Attempt: r.Start.ID, Command: r.Start.Command, Class: capacity.Class{Name: p.Class}, State: manager.StateRunning, StartedByUID: &uid, OutputNames: r.Start.Outputs, Source: &manager.PinnedSource{Mirror: s.Mirror, Ref: s.Ref, SHA: s.SHA, Git: s.Git, BaseSHA: s.BaseSHA, ReadOnly: s.ReadOnly}}
+	if s.Git && s.BaseSHA == "" {
+		e.Source.Base = s.Base
+		if e.Source.Base == "" {
+			e.Source.Base = "main"
+		}
+	}
+	for _, in := range r.Start.Inputs {
+		e.Inputs = append(e.Inputs, manager.InputRecord{Name: in.Name, Bytes: len(in.Data), SHA256: in.SHA256})
+	}
+	return e
 }
