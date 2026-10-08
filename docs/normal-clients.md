@@ -56,7 +56,10 @@ single-link and not a symlink. No environment variable selects policy or socket.
 The policy names `caller_uid`, `manager_uid`, the restricted control `socket`,
 private caller `records`, exactly one `class`, `mirror`, `ref`, fixed `command`,
 exact `inputs` and exact `outputs`. `source_git`, `source_readonly` and
-`source_base` fix the source materialization mode; callers cannot change it. The manager still applies its own kernel
+`source_base` fix the source materialization mode; callers cannot change it. `source_self_base`
+requires Git and binds `base_sha` to the identical explicit source SHA. This
+uses the existing head-and-base exporter with fully qualified branch policy;
+it grants no independently selectable base or review-diff claim. The manager still applies its own kernel
 peer/class checks. This does not expose its private owner socket/data/signing key.
 
 One bounded JSON request arrives on stdin. Actions: `list`, `capacity`,

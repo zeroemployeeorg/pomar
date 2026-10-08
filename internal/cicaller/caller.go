@@ -36,6 +36,7 @@ type Policy struct {
 	SourceGit      bool     `json:"source_git"`
 	SourceReadOnly bool     `json:"source_readonly"`
 	SourceBase     string   `json:"source_base"`
+	SourceSelfBase bool     `json:"source_self_base"`
 	Command        []string `json:"command"`
 	Inputs         []string `json:"inputs"`
 	Outputs        []string `json:"outputs"`
@@ -109,7 +110,7 @@ func requestRoute(p Policy, r Request) (string, string, []byte, error) {
 		return "GET", "/v1/signing-key", nil, nil
 	case "start":
 		s := r.Start
-		if s == nil || !attemptID.MatchString(s.ID) || s.Class != p.Class || !reflect.DeepEqual(s.Command, p.Command) || !reflect.DeepEqual(s.Outputs, p.Outputs) || s.Source == nil || s.Source.Mirror != p.Mirror || s.Source.Ref != p.Ref || !sha.MatchString(s.Source.SHA) || s.Source.BaseSHA != "" || s.Source.Git != p.SourceGit || s.Source.ReadOnly != p.SourceReadOnly || s.Source.Base != p.SourceBase {
+		if s == nil || !attemptID.MatchString(s.ID) || s.Class != p.Class || !reflect.DeepEqual(s.Command, p.Command) || !reflect.DeepEqual(s.Outputs, p.Outputs) || s.Source == nil || s.Source.Mirror != p.Mirror || s.Source.Ref != p.Ref || !sha.MatchString(s.Source.SHA) || (p.SourceSelfBase && (!p.SourceGit || s.Source.BaseSHA != s.Source.SHA)) || (!p.SourceSelfBase && s.Source.BaseSHA != "") || s.Source.Git != p.SourceGit || s.Source.ReadOnly != p.SourceReadOnly || s.Source.Base != p.SourceBase {
 			return "", "", nil, errors.New("start outside fixed class/source/command/output policy")
 		}
 		if len(s.Inputs) != len(p.Inputs) {

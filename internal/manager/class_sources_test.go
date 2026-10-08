@@ -90,3 +90,51 @@ func TestMultiClassSourceConfigurationFailsClosed(t *testing.T) {
 		}
 	}
 }
+
+// The installed manager already supports this source route. A fully qualified
+// required ref uses head-and-base export with the same main-reachable commit;
+// no alternate base, helper spawn, service upgrade or live fetch is needed.
+func TestQualifiedClassRefExportsSelfBaseWithoutChangingMirror(t *testing.T) {
+	env, up := gitEnv(t), t.TempDir()
+	git(t, env, up, "init", "--quiet", "--initial-branch=main")
+	sha := commit(t, env, up, "source")
+	v, err := venue.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ms := &mirror.Mirrors{Venue: v, Env: env}
+	if err := ms.Sync(context.Background(), "site", up); err != nil {
+		t.Fatal(err)
+	}
+	jc := JobClass{Class: capacity.CI, SourceMirrors: []string{"site"}, SourceRef: "refs/heads/main", Command: []string{"make", "verify"}}
+	m := &Manager{cfg: Config{Venue: v, Mirrors: ms}}
+	src := &Source{Mirror: "site", Ref: "refs/heads/main", SHA: sha, BaseSHA: sha, Git: true}
+	if err := checkExactSource(src); err != nil {
+		t.Fatal(err)
+	}
+	if err := jc.checkWorkload([]string{"make", "verify"}, src); err != nil {
+		t.Fatal(err)
+	}
+	before := git(t, env, ms.Path("site"), "for-each-ref", "--format=%(refname) %(objectname)")
+	got, reach, err := m.settleSource("self-base-fixture", src)
+	if err != nil || got != sha || reach.BaseRef != "refs/heads/main "+sha {
+		t.Fatalf("pinned main reachability: %s %+v %v", got, reach, err)
+	}
+	rec := t.TempDir()
+	if err := m.writeSource(context.Background(), src, sha, rec); err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	git(t, env, work, "init", "--quiet")
+	git(t, env, work, "fetch", "--quiet", rec+"/source.bundle", "refs/heads/*:refs/remotes/origin/*")
+	git(t, env, work, "checkout", "--quiet", "--detach", sha)
+	if git(t, env, work, "rev-parse", "HEAD") != sha {
+		t.Fatal("exported another commit")
+	}
+	if git(t, env, work, "remote") != "" {
+		t.Fatal("guest received a remote")
+	}
+	if git(t, env, ms.Path("site"), "for-each-ref", "--format=%(refname) %(objectname)") != before {
+		t.Fatal("export altered owner mirror")
+	}
+}

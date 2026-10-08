@@ -211,3 +211,27 @@ func TestServerFailureReconcilesAndRetainsObservation(t *testing.T) {
 		t.Fatal("observation was not recovered locally")
 	}
 }
+
+func TestSelfBaseBindsTheIdenticalPinnedGitCommit(t *testing.T) {
+	p, r := fixture(t, func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) })
+	p.Ref = "refs/heads/main"
+	p.SourceGit = true
+	p.SourceSelfBase = true
+	r.Start.Source.Ref = p.Ref
+	r.Start.Source.Git = true
+	if _, _, _, e := requestRoute(p, r); e == nil {
+		t.Fatal("missing self base accepted")
+	}
+	r.Start.Source.BaseSHA = strings.Repeat("b", 40)
+	if _, _, _, e := requestRoute(p, r); e == nil {
+		t.Fatal("independently selected base accepted")
+	}
+	r.Start.Source.BaseSHA = r.Start.Source.SHA
+	if _, _, _, e := requestRoute(p, r); e != nil {
+		t.Fatal(e)
+	}
+	r.Start.Source.Git = false
+	if _, _, _, e := requestRoute(p, r); e == nil {
+		t.Fatal("self base without Git accepted")
+	}
+}
