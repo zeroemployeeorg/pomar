@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?
 printf 'Paste code here if prompted > '
 read c
 [ "$c" = "` + code + `" ] || exit 1
+[ -n "$GATE" ] && { echo waiting >> "$CALLS"; while [ ! -e "$GATE" ]; do sleep 0.05; done; }
 printf 'synthetic-credential' > "$CRED"
 [ -n "$CALLS" ] && echo complete >> "$CALLS"
 `
@@ -40,6 +42,12 @@ func host(t *testing.T) (root string, config string) {
 // each time the actor starts a sign-in, a "complete" line each time one
 // completes.
 func hostWith(t *testing.T) (root string, config string, calls string) {
+	return hostGated(t, "")
+}
+
+// hostGated is hostWith, with a sign-in completion that, after reading a
+// right code, logs "waiting" and blocks until the file gate exists.
+func hostGated(t *testing.T, gate string) (root string, config string, calls string) {
 	t.Helper()
 	dir := t.TempDir()
 	root, _ = os.MkdirTemp("/tmp", "pal")
@@ -55,7 +63,7 @@ func hostWith(t *testing.T) (root string, config string, calls string) {
 	t.Cleanup(func() { store.Close() })
 	broker := agentenv.NewBroker(store, dir)
 	calls = filepath.Join(dir, "calls")
-	env := []string{"PATH=/usr/bin:/bin", "CRED=" + filepath.Join(config, ".credentials.json"), "CALLS=" + calls}
+	env := []string{"PATH=/usr/bin:/bin", "CRED=" + filepath.Join(config, ".credentials.json"), "CALLS=" + calls, "GATE=" + gate}
 	actor := claudeactor.New(claudeactor.Config{
 		Version:       "2.1.280",
 		Start:         claudeactor.Exec{Binary: script, Dir: dir, Env: env, UID: -1, GID: -1}.Start,
@@ -123,7 +131,7 @@ func TestScriptedSignInAndRenewal(t *testing.T) {
 	root, config := host(t)
 	for round := 0; round < 2; round++ {
 		var out, errb bytes.Buffer
-		if err := run([]string{"-root", root, "-environment", "env-1", "-start"}, stdinWith(t, ""), &out, &errb); err != nil {
+		if err := run([]string{"-root", root, "-environment", "env-1", "-start", "-operation-id", fmt.Sprintf("renew-start.%d", round)}, stdinWith(t, ""), &out, &errb); err != nil {
 			t.Fatalf("start: %v; %s", err, errb.String())
 		}
 		var started struct {
@@ -135,7 +143,7 @@ func TestScriptedSignInAndRenewal(t *testing.T) {
 		}
 		os.Remove(filepath.Join(config, ".credentials.json"))
 		out.Reset()
-		if err := run([]string{"-root", root, "-environment", "env-1", "-complete", started.LoginID}, stdinWith(t, code+"\n"), &out, &errb); err != nil {
+		if err := run([]string{"-root", root, "-environment", "env-1", "-complete", started.LoginID, "-operation-id", fmt.Sprintf("renew-complete.%d", round)}, stdinWith(t, code+"\n"), &out, &errb); err != nil {
 			t.Fatalf("complete (round %d): %v; %s", round, err, errb.String())
 		}
 		if !strings.Contains(out.String(), "authenticated: true") {

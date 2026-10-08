@@ -4,22 +4,25 @@
 //	pomar-agent-login -root DIR -environment ID
 //	    prints the authorization URL, reads the code (not echoed), completes
 //	    the sign-in and reports whether the environment is authenticated
-//	pomar-agent-login -root DIR -environment ID -start [-operation-id OP]
+//	pomar-agent-login -root DIR -environment ID -start -operation-id OP
 //	    prints {"operation_id","login_id","auth_url"} as JSON and leaves the
 //	    sign-in waiting
-//	pomar-agent-login -root DIR -environment ID -complete LOGIN_ID [-operation-id OP]
+//	pomar-agent-login -root DIR -environment ID -complete LOGIN_ID -operation-id OP
 //	    reads the code from stdin and completes that waiting sign-in
 //	pomar-agent-login -root DIR -environment ID -status
 //	    prints whether the environment is authenticated
 //
-// With -start or -complete, -operation-id gives the request its own operation
-// identity instead of a fresh one, and the operation ID used is always
-// printed, so a retry can carry it. Retrying with the same ID and input
-// returns the retained outcome and never signs in again; the same ID with
-// other input, or for the other action, is refused by the broker. A retained
-// start's authorization URL is not journaled, so it is never returned again.
-// An uncertain original is reported as uncertain, to be inspected, not to be
-// reissued under a new identity.
+// -start and -complete are for automation, so they require -operation-id: the
+// caller supplies the operation ID and keeps it before the request, and a
+// retry carries the same ID. Retrying with the same ID and input returns the
+// broker's retained record and never signs in again; the same ID with other
+// input, or for the other action, is refused by the broker. A retained record
+// is never reported as success, whatever its state: the broker keeps whether
+// the request was sent, not whether the sign-in succeeded, and the account
+// may be authenticated by another sign-in. A retained start's authorization
+// URL is not journaled, so it is never returned again. An uncertain original
+// is to be inspected, not reissued under a new operation ID. The interactive
+// form makes its own operation IDs, and never recovers an existing operation.
 //
 // The code goes only to the environment's actor: it is never printed,
 // logged or journaled, and no credential ever leaves the environment.
@@ -128,11 +131,15 @@ type retained struct {
 	State       string `json:"state"`
 }
 
+// Error is the only way a retained record is reported: never as success.
 func (r retained) Error() string {
-	if r.State == "acceptance_unknown" {
+	switch r.State {
+	case "acceptance_unknown":
 		return fmt.Sprintf("operation %s is already recorded and its acceptance is uncertain: inspect -status, and do not reissue it under a new operation ID", r.OperationID)
+	case "dispatching":
+		return fmt.Sprintf("operation %s is already recorded and still dispatching; it was not repeated and its outcome is not known yet", r.OperationID)
 	}
-	return fmt.Sprintf("operation %s is already recorded (state %s) and was not repeated", r.OperationID, r.State)
+	return fmt.Sprintf("operation %s is already recorded (state %s) and was not repeated; its outcome is not retained, so this is not a success: inspect -status", r.OperationID, r.State)
 }
 
 // reply is the broker's login reply: a new dispatch carries "login", and a
@@ -200,16 +207,28 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 	startOnly := fs.Bool("start", false, "print the operation ID, login ID and authorization URL as JSON, and leave the sign-in waiting")
 	complete := fs.String("complete", "", "complete the waiting sign-in with this login ID, reading the code from stdin")
 	status := fs.Bool("status", false, "print whether the environment is authenticated")
-	opID := fs.String("operation-id", "", "with -start or -complete: the request's own operation ID, kept on retries")
+	opID := fs.String("operation-id", "", "required with -start or -complete: the request's operation ID, supplied and kept by the caller and reused on retries")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *root == "" || *environment == "" {
 		return errors.New("-root and -environment are required")
 	}
+	modes := 0
+	for _, on := range []bool{*startOnly, *complete != "", *status} {
+		if on {
+			modes++
+		}
+	}
+	if modes > 1 {
+		return errors.New("-start, -complete and -status are exclusive")
+	}
+	if (*startOnly || *complete != "") && *opID == "" {
+		return errors.New("-start and -complete require -operation-id: supply the operation ID and keep it before the request, so a retry can carry it")
+	}
 	if *opID != "" {
-		if *startOnly == (*complete != "") {
-			return errors.New("-operation-id applies to exactly one of -start or -complete")
+		if !*startOnly && *complete == "" {
+			return errors.New("-operation-id applies only to -start or -complete")
 		}
 		if !validOperation.MatchString(*opID) {
 			return fmt.Errorf("-operation-id %q is not a valid operation ID (1-128 letters, digits, '.', '_' or '-', starting with a letter or digit)", *opID)
@@ -259,18 +278,10 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 
 func finish(c *client, incarnation, op, id, code string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stderr, "operation: %s\n", op)
+	// A retained record comes back as the error: the original completion's
+	// result isn't retained, and an authenticated account doesn't prove it,
+	// so it is never reported as signed in.
 	ok, err := c.complete(incarnation, op, id, code)
-	var kept retained
-	if errors.As(err, &kept) {
-		// The original completion is the outcome: report the account's
-		// state, and never complete again under this identity.
-		s, serr := c.session()
-		if serr == nil && s.Authenticated && kept.State != "acceptance_unknown" {
-			fmt.Fprintf(stdout, "signed in: authenticated: true (operation %s already recorded; not repeated)\n", op)
-			return nil
-		}
-		return err
-	}
 	if err != nil {
 		return err
 	}
