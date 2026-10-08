@@ -32,16 +32,30 @@ type permissionWait struct {
 }
 
 // ServeBridge accepts tool calls from the MCP server on ln until ln closes.
-// The listener's socket must be reachable by the coding user only.
+// The listener's socket must be reachable by the coding user only. At most
+// maxBridgeConns connections are served at once. A slot is taken before
+// Accept, so connections beyond the bound wait in the listener's backlog,
+// unread and costing no goroutine, and silent ones are dropped after the
+// actor's read wait.
 func (a *Actor) ServeBridge(ln net.Listener) error {
+	slots := make(chan struct{}, maxBridgeConns)
 	for {
+		slots <- struct{}{}
 		c, err := ln.Accept()
 		if err != nil {
+			<-slots
 			return err
 		}
-		go a.serveBridgeConn(c)
+		go func() {
+			defer func() { <-slots }()
+			a.serveBridgeConn(c)
+		}()
 	}
 }
+
+// maxBridgeConns bounds connections served at once: the outstanding requests
+// the bridge can hold, plus as many again being read or refused.
+const maxBridgeConns = 2 * maxBridgeWaiting
 
 func (a *Actor) serveBridgeConn(c net.Conn) {
 	defer c.Close()
