@@ -144,3 +144,118 @@ private func missingOwnExecutable() -> AgentFenceProbe.ProcessAccess {
         #expect(evidence.issues.contains { $0.contains("original helper binding still live") })
     }
 }
+
+@Test func foreignMissingPathNamesEveryDeniedResourceBoundary() throws {
+    try withFenceIdentityFixture { request, _, _ in
+        var access = missingOwnExecutable()
+        let native = access.info
+        access.info = { pid, flavor, arg, buffer, size in
+            guard pid == getpid() else { return native(pid, flavor, arg, buffer, size) }
+            if flavor == PROC_PIDT_SHORTBSDINFO {
+                let result = native(pid, flavor, arg, buffer, size)
+                buffer?.assumingMemoryBound(to: proc_bsdshortinfo.self).pointee.pbsi_uid = getuid() + 1000
+                return result
+            }
+            if [PROC_PIDTBSDINFO, PROC_PIDLISTFDS, PROC_PIDLISTFILEPORTS, PROC_PIDREGIONPATHINFO].contains(flavor) {
+                errno = EPERM; return 0
+            }
+            return native(pid, flavor, arg, buffer, size)
+        }
+        let evidence = try AgentFenceProbe.run(request, access: access)
+        #expect(!evidence.confirmed)
+        for text in ["foreign process birth/identity unavailable errno 1", "descriptor inventory target exclusion unproven, errno 1", "fileport inventory target exclusion unproven, errno 1", "mapped-region target exclusion unproven, errno 1"] {
+            #expect(evidence.issues.contains { $0.contains("pid \(getpid())") && $0.contains(text) })
+        }
+    }
+}
+
+@Test func stableForeignResourceCoverageCanExcludeOnlyTheTargetInode() throws {
+    try withFenceIdentityFixture { request, _, _ in
+        var access = missingOwnExecutable()
+        let native = access.info
+        access.info = { pid, flavor, arg, buffer, size in
+            guard pid == getpid() else { return native(pid, flavor, arg, buffer, size) }
+            if flavor == PROC_PIDT_SHORTBSDINFO || flavor == PROC_PIDTBSDINFO {
+                let result = native(pid, flavor, arg, buffer, size)
+                if flavor == PROC_PIDT_SHORTBSDINFO { buffer?.assumingMemoryBound(to: proc_bsdshortinfo.self).pointee.pbsi_uid = getuid() + 1000 }
+                else { buffer?.assumingMemoryBound(to: proc_bsdinfo.self).pointee.pbi_uid = getuid() + 1000 }
+                return result
+            }
+            if flavor == PROC_PIDLISTFDS || flavor == PROC_PIDLISTFILEPORTS { errno = 0; return 0 }
+            if flavor == PROC_PIDREGIONPATHINFO { errno = EINVAL; return 0 }
+            return native(pid, flavor, arg, buffer, size)
+        }
+        let evidence = try AgentFenceProbe.run(request, access: access)
+        // This deliberately synthetic empty target inventory checks the fallback
+        // decision, never the actual account's permissions or global clearance.
+        #expect(!evidence.issues.contains { $0.contains("pid \(getpid()): executable path unavailable") })
+        #expect(!evidence.issues.contains { $0.contains("pid \(getpid())") && $0.contains("original helper binding") })
+    }
+}
+
+@Test func launchCustodyIsPrivateExactAndNeverReplacesAnIncarnation() throws {
+    try withFenceIdentityFixture { request, identity, directory in
+        try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+            environment: request.environment, session: request.session, incarnation: request.incarnation,
+            sourceSHA: String(repeating: "a", count: 40))
+        let receipt = directory.appendingPathComponent("launch-custody-actor.json")
+        let bytes = try Data(contentsOf: receipt)
+        let object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+        #expect(object["stage"] as? String == "before-virtualization-create")
+        #expect((object["helperBirthSeconds"] as? NSNumber)?.uint64Value == identity.pbi_start_tvsec)
+        #expect((object["helperBirthMicroseconds"] as? NSNumber)?.uint64Value == identity.pbi_start_tvusec)
+        var disk = stat(), record = stat()
+        #expect(lstat(request.rootfs, &disk) == 0)
+        #expect(lstat(receipt.path, &record) == 0)
+        #expect(record.st_mode & 0o777 == 0o600)
+        #expect((object["rootfsInode"] as? NSNumber)?.uint64Value == disk.st_ino)
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                environment: "changed", session: request.session, incarnation: request.incarnation,
+                sourceSHA: String(repeating: "b", count: 40))
+        }
+        #expect(try Data(contentsOf: receipt) == bytes)
+    }
+}
+
+@Test func launchCustodyRefusesPublicOrLinkedWorkspaceBeforeReceipt() throws {
+    try withFenceIdentityFixture { request, _, directory in
+        chmod(request.rootfs, 0o644)
+        defer { chmod(request.rootfs, 0o600) }
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "public",
+                sourceSHA: String(repeating: "a", count: 40))
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-public.json").path))
+        chmod(request.rootfs, 0o600)
+        let link = directory.appendingPathComponent("alias.ext4")
+        #expect(Darwin.link(request.rootfs, link.path) == 0)
+        defer { unlink(link.path) }
+        #expect(throws: AgentLaunchCustody.Failure.self) {
+            try AgentLaunchCustody.write(directory: directory.path, rootfs: request.rootfs,
+                environment: request.environment, session: request.session, incarnation: "linked",
+                sourceSHA: String(repeating: "a", count: 40))
+        }
+        #expect(!FileManager.default.fileExists(atPath: directory.appendingPathComponent("launch-custody-linked.json").path))
+    }
+}
+
+@Test func foreignFallbackCannotHideAnActualTargetDescriptor() throws {
+    try withFenceIdentityFixture { request, _, _ in
+        var access = missingOwnExecutable()
+        let native = access.info
+        access.info = { pid, flavor, arg, buffer, size in
+            let result = native(pid, flavor, arg, buffer, size)
+            if pid == getpid() {
+                if flavor == PROC_PIDT_SHORTBSDINFO { buffer?.assumingMemoryBound(to: proc_bsdshortinfo.self).pointee.pbsi_uid = getuid() + 1000 }
+                if flavor == PROC_PIDTBSDINFO { buffer?.assumingMemoryBound(to: proc_bsdinfo.self).pointee.pbi_uid = getuid() + 1000 }
+            }
+            return result
+        }
+        let evidence = try AgentFenceProbe.run(request, access: access)
+        #expect(!evidence.confirmed)
+        #expect(evidence.issues.contains { $0.contains("pid \(getpid()) fd") && $0.contains("workspace inode remains open") })
+        #expect(evidence.issues.contains { $0.contains("pid \(getpid()): executable path unavailable") })
+    }
+}

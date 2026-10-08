@@ -218,6 +218,9 @@ public enum AgentEnvironment {
             let image = try await manager.imageStore.get(reference: o.imageRef)
             guard initImage.digest == o.initDigest, image.digest == o.imageDigest else { throw CocoaError(.fileReadCorruptFile) }
             if !FileManager.default.fileExists(atPath: o.rootfs) { _ = try Rootfs.clone(base: o.base, to: o.rootfs) }
+            stage = "record-launch-custody"
+            try AgentLaunchCustody.write(directory: o.directory, rootfs: o.rootfs,
+                environment: o.environment, session: o.session, incarnation: o.incarnation, sourceSHA: o.sourceSHA)
             // The external rootfs does not create the container's boot-log
             // directory, unlike the CI clone located within that directory.
             stage = "prepare-container"

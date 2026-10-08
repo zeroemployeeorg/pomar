@@ -147,32 +147,51 @@ public enum AgentFenceProbe {
                     else if !vanished(pid) { out.issues.append("pid \(pid): kernel identity unavailable errno \(errno)") }
                     continue
                 }
-                // Kernel ownership/birth and executable classification are
-                // separate observations. A missing executable pathname must
-                // neither clear the hold nor skip this owner's resource reads.
-                var identity = proc_bsdinfo()
-                var ownedIdentity = false
-                if short.pbsi_uid == r.uid {
-                    ownedIdentity = access.info(pid, PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size
-                        && identity.pbi_pid == UInt32(pid) && identity.pbi_uid == r.uid
-                        && identity.pbi_start_tvsec > 0
-                    if !ownedIdentity && !vanished(pid) {
-                        out.issues.append("pid \(pid): owned process birth/identity unavailable")
-                    }
-                }
+                // Executable identification does not determine disk custody.
+                // A foreign process with no path must receive target resource
+                // inspection too; permission failures remain explicit holds.
                 let executable = access.executable(pid)
                 let executableError = errno
-                if executable == nil && !vanished(pid) {
-                    out.issues.append("pid \(pid): executable path unavailable errno \(executableError)")
+                let foreignMissing = short.pbsi_uid != r.uid && executable == nil
+                var identity = proc_bsdinfo()
+                var identityValid = false
+                if short.pbsi_uid == r.uid || foreignMissing {
+                    errno = 0
+                    identityValid = access.info(pid, PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size
+                        && identity.pbi_pid == UInt32(pid) && identity.pbi_uid == short.pbsi_uid
+                        && identity.pbi_start_tvsec > 0
+                    let identityError = errno
+                    if !identityValid && !vanished(pid) {
+                        let scope = short.pbsi_uid == r.uid ? "owned" : "foreign"
+                        out.issues.append("pid \(pid): \(scope) process birth/identity unavailable errno \(identityError)")
+                    }
                 }
-                // Missing paths stay UNKNOWN for foreign executors; neither
-                // names nor another account's UID can exclude their ownership.
+                let pathIssue = "pid \(pid): executable path unavailable errno \(executableError)"
+                if executable == nil && !vanished(pid) { out.issues.append(pathIssue) }
                 if let executable, executable.hasPrefix("/System/Library/Frameworks/Virtualization.framework/") {
                     out.issues.append("pid \(pid) uid \(short.pbsi_uid): live Virtualization executor \(executable), ownership unresolved")
                 }
-                guard ownedIdentity else { continue }
-                out.ownProcessesChecked += 1
-                if pid == r.pid && identity.pbi_start_tvsec == r.birth {
+                if foreignMissing && !identityValid {
+                    // Diagnose each native boundary even when full birth is
+                    // denied. These are availability probes, not empty resource
+                    // tables or authority to exclude the target inode.
+                    for (flavor, label) in [(PROC_PIDLISTFDS, "descriptor inventory"),
+                                            (PROC_PIDLISTFILEPORTS, "fileport inventory")] {
+                        errno = 0
+                        _ = access.info(pid, flavor, 0, nil, 0)
+                        let failure = errno
+                        out.issues.append("pid \(pid) uid \(short.pbsi_uid): \(label) target exclusion unproven, errno \(failure)")
+                    }
+                    var region = proc_regionwithpathinfo()
+                    errno = 0
+                    _ = access.info(pid, PROC_PIDREGIONPATHINFO, 0, &region, Int32(MemoryLayout<proc_regionwithpathinfo>.size))
+                    let failure = errno
+                    out.issues.append("pid \(pid) uid \(short.pbsi_uid): mapped-region target exclusion unproven, errno \(failure)")
+                }
+                guard identityValid else { continue }
+                let beforeResources = out.issues.count
+                if short.pbsi_uid == r.uid { out.ownProcessesChecked += 1 }
+                if pid == r.pid && identity.pbi_uid == r.uid && identity.pbi_start_tvsec == r.birth {
                     out.issues.append("pid \(pid) uid \(r.uid) birth \(r.birth): original helper binding still live at \(executable ?? "unavailable executable path")")
                 }
                 // The original helper could have forked before departure; any
@@ -191,7 +210,7 @@ public enum AgentFenceProbe {
                 var descriptors = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(size) / MemoryLayout<proc_fdinfo>.size + 256)
                 errno = 0
                 let bytes = access.info(pid, PROC_PIDLISTFDS, 0, &descriptors, Int32(descriptors.count * MemoryLayout<proc_fdinfo>.size))
-                if (bytes <= 0 && errno != 0) || bytes >= descriptors.count * MemoryLayout<proc_fdinfo>.size {
+                if bytes < 0 || (bytes == 0 && errno != 0) || bytes % Int32(MemoryLayout<proc_fdinfo>.size) != 0 || bytes >= descriptors.count * MemoryLayout<proc_fdinfo>.size {
                     if !vanished(pid) { out.issues.append("pid \(pid): descriptor inventory incomplete") }
                     continue
                 }
@@ -216,7 +235,7 @@ public enum AgentFenceProbe {
                     var ports = [proc_fileportinfo](repeating: proc_fileportinfo(), count: Int(portSize) / MemoryLayout<proc_fileportinfo>.size + 256)
                     errno = 0
                     let read = access.info(pid, PROC_PIDLISTFILEPORTS, 0, &ports, Int32(ports.count * MemoryLayout<proc_fileportinfo>.size))
-                    if (read <= 0 && errno != 0) || read >= ports.count * MemoryLayout<proc_fileportinfo>.size {
+                    if read < 0 || (read == 0 && errno != 0) || read % Int32(MemoryLayout<proc_fileportinfo>.size) != 0 || read >= ports.count * MemoryLayout<proc_fileportinfo>.size {
                         out.issues.append("pid \(pid): fileport inventory incomplete")
                     } else {
                         for port in ports.prefix(Int(read) / MemoryLayout<proc_fileportinfo>.size) where port.proc_fdtype == UInt32(PROX_FDTYPE_VNODE) {
@@ -258,6 +277,12 @@ public enum AgentFenceProbe {
                 } else if after.pbi_pid != identity.pbi_pid || after.pbi_uid != identity.pbi_uid
                     || after.pbi_start_tvsec != identity.pbi_start_tvsec || after.pbi_start_tvusec != identity.pbi_start_tvusec {
                     out.issues.append("pid \(pid): process identity changed during resource observation")
+                }
+                // Only complete, stable target-inode coverage can replace a
+                // foreign missing-path hold. Own helper classification and
+                // preboot unlinked-inode cases keep their conservative holds.
+                if foreignMissing && !absent && out.issues.count == beforeResources {
+                    out.issues.removeAll { $0 == pathIssue }
                 }
             }
         }
