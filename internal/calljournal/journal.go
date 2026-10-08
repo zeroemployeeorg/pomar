@@ -101,26 +101,34 @@ func names(dir string) ([]string, error) {
 	return out, nil
 }
 func Latest(dir string) (Event, bool, error) {
+	return LatestKind(dir, "")
+}
+
+// LatestKind identifies retained evidence independently of the latest
+// observation. An empty kind selects the latest event of any kind.
+func LatestKind(dir, kind string) (Event, bool, error) {
 	ns, err := names(dir)
 	if err != nil {
 		return Event{}, false, err
 	}
-	if len(ns) == 0 {
-		return Event{}, false, nil
+	for i := len(ns) - 1; i >= 0; i-- {
+		b, err := localclient.ReadPrivate(filepath.Join(dir, ns[i]), Limit)
+		if err != nil {
+			return Event{}, false, err
+		}
+		var e Event
+		if json.Unmarshal(b, &e) != nil || e.ID != strings.TrimSuffix(ns[i], ".json") {
+			return Event{}, false, errors.New("invalid journal identity")
+		}
+		if kind != "" && e.Kind != kind {
+			continue
+		}
+		if err = Sync(dir); err != nil {
+			return Event{}, false, err
+		}
+		return e, true, nil
 	}
-	b, err := localclient.ReadPrivate(filepath.Join(dir, ns[len(ns)-1]), Limit)
-	if err != nil {
-		return Event{}, false, err
-	}
-	var e Event
-	err = json.Unmarshal(b, &e)
-	if err != nil || e.ID != strings.TrimSuffix(ns[len(ns)-1], ".json") {
-		return Event{}, false, errors.New("invalid journal identity")
-	}
-	if err = Sync(dir); err != nil {
-		return Event{}, false, err
-	}
-	return e, true, nil
+	return Event{}, false, nil
 }
 func Append(dir, kind string, value any) (Event, error) {
 	ns, err := names(dir)

@@ -38,18 +38,20 @@ type Intent struct {
 // Receipt is ordinary diagnostic metadata. Response/request/provider bytes are
 // kept only in the separately protected files, never in this structure.
 type Receipt struct {
-	Action            string `json:"action"`
-	OperationID       string `json:"operation_id"`
-	UID               int    `json:"euid"`
-	HTTPStatus        int    `json:"http_status"`
-	Outcome           string `json:"outcome"`
-	Cached            bool   `json:"cached"`
-	Transport         string `json:"transport_outcome"`
-	OperationState    string `json:"operation_state"`
-	SessionState      string `json:"session_state"`
-	ResponseAvailable bool   `json:"response_available"`
-	EventID           string `json:"event_id,omitempty"`
-	ObservedAt        string `json:"observed_at,omitempty"`
+	Action                    string `json:"action"`
+	OperationID               string `json:"operation_id"`
+	UID                       int    `json:"euid"`
+	HTTPStatus                int    `json:"http_status"`
+	Outcome                   string `json:"outcome"`
+	Cached                    bool   `json:"cached"`
+	Transport                 string `json:"transport_outcome"`
+	OperationState            string `json:"operation_state"`
+	SessionState              string `json:"session_state"`
+	ResponseAvailable         bool   `json:"response_available"`
+	RetainedResponseAvailable bool   `json:"retained_response_available"`
+	RetainedResponseEventID   string `json:"retained_response_event_id,omitempty"`
+	EventID                   string `json:"event_id,omitempty"`
+	ObservedAt                string `json:"observed_at,omitempty"`
 }
 
 type response struct {
@@ -199,7 +201,26 @@ func Run(c Config) (Receipt, error) {
 			return meta, err
 		}
 	}
+	retainedResponse := func() error {
+		ev, found, e := calljournal.LatestKind(dir, "response")
+		if e != nil {
+			return e
+		}
+		meta.RetainedResponseAvailable = found
+		meta.RetainedResponseEventID = ev.ID
+		if found {
+			var saved response
+			if json.Unmarshal(ev.Value, &saved) != nil || saved.Intent != intent {
+				return ErrConflict
+			}
+		}
+		return nil
+	}
 	finish := func(saved response, cached bool, ev calljournal.Event) (Receipt, error) {
+		if e := retainedResponse(); e != nil {
+			meta.Outcome = "uncertain"
+			return meta, e
+		}
 		meta.HTTPStatus = saved.Status
 		meta.Cached = cached
 		meta.EventID = ev.ID
@@ -270,6 +291,10 @@ func Run(c Config) (Receipt, error) {
 		}
 		return false
 	}); e != nil {
+		meta.Outcome = "uncertain"
+		return meta, e
+	}
+	if e := retainedResponse(); e != nil {
 		meta.Outcome = "uncertain"
 		return meta, e
 	}

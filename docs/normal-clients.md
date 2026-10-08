@@ -111,3 +111,12 @@ new daemon or a guest credential. Actual provisioning is separate from source
 merge. After installation, ordinary history/start/result retrieval needs no
 administrator password. A remote controller still needs its agreed authenticated
 host entry; a Unix socket or sudoers rule is not a new remote transport.
+
+The response dimensions are separate: `response_available` describes the
+current original-response observation; a fresh reconciliation does not become
+that response. `retained_response_available` and `retained_response_event_id`
+identify an earlier privately retained original HTTP response, including a
+refusal, even after a new control observation. That pointer permits retrieval of
+the original one-time login reply from its private event; it never establishes
+success of the original operation or current authentication. `event_id` and
+`observed_at` identify the current observation independently.

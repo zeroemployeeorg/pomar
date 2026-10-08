@@ -146,3 +146,28 @@ func TestConcurrentAttemptHasOneAdmission(t *testing.T) {
 		t.Fatal(e)
 	}
 }
+
+func TestFreshReconciliationNamesEarlierRetainedResponse(t *testing.T) {
+	var p Policy
+	var r Request
+	var gets atomic.Int32
+	p, r = fixture(t, func(w http.ResponseWriter, q *http.Request) {
+		if q.Method == "POST" {
+			w.WriteHeader(409)
+			return
+		}
+		if gets.Add(1) == 1 {
+			w.WriteHeader(404)
+			return
+		}
+		json.NewEncoder(w).Encode(attemptEntry(p, r))
+	})
+	first, e := runRequest(p, r)
+	if e == nil || !first.RetainedResponseAvailable {
+		t.Fatal(first, e)
+	}
+	observed, e := runRequest(p, r)
+	if e != nil || observed.ResponseAvailable || !observed.RetainedResponseAvailable || observed.RetainedResponseEventID != first.EventID || observed.EventID == first.EventID || observed.Cached {
+		t.Fatal(observed, e)
+	}
+}

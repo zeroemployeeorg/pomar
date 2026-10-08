@@ -89,7 +89,10 @@ func TestOneTimeLoginReplySurvivesPermittedRetry(t *testing.T) {
 			w.Write([]byte(`{"operation":{"state":"sent"},"login":{"authUrl":"https://fixture.invalid/ONCE"}}`))
 			return
 		}
-		gets.Add(1)
+		if gets.Add(1) > 1 {
+			w.Write([]byte(`{"state":"sent"}`))
+			return
+		}
 		w.WriteHeader(404)
 		w.Write([]byte(`{"evidence":"durable_non_acceptance"}`))
 	})
@@ -105,6 +108,12 @@ func TestOneTimeLoginReplySurvivesPermittedRetry(t *testing.T) {
 	b, err := Run(c)
 	if err != nil || !b.Cached || !b.ResponseAvailable || posts.Load() != 2 {
 		t.Fatal(b, err)
+	}
+	c.Reconcile = true
+	c.RetryKnownUnaccepted = false
+	observed, e := Run(c)
+	if !errors.Is(e, ErrUncertain) || observed.ResponseAvailable || !observed.RetainedResponseAvailable || observed.RetainedResponseEventID != a.EventID || observed.EventID == a.EventID || posts.Load() != 2 {
+		t.Fatal("fresh control observation hid retained one-time reply", observed, e)
 	}
 	dir := filepath.Join(c.Records, c.OperationID)
 	old, _ := os.ReadFile(filepath.Join(dir, "event-00000000002.json"))

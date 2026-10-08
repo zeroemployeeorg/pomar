@@ -50,19 +50,21 @@ type Request struct {
 	RetryKnownUnaccepted bool                  `json:"retry_known_unaccepted,omitempty"`
 }
 type Reply struct {
-	CallerUID         int    `json:"caller_uid"`
-	Status            int    `json:"http_status"`
-	RequestSHA256     string `json:"request_sha256"`
-	Observation       bool   `json:"observation"`
-	Body              []byte `json:"body"`
-	Outcome           string `json:"outcome"`
-	OperationState    string `json:"operation_state"`
-	Transport         string `json:"transport_outcome"`
-	SessionState      string `json:"session_state"`
-	ResponseAvailable bool   `json:"response_available"`
-	Cached            bool   `json:"cached"`
-	EventID           string `json:"event_id,omitempty"`
-	ObservedAt        string `json:"observed_at,omitempty"`
+	CallerUID                 int    `json:"caller_uid"`
+	Status                    int    `json:"http_status"`
+	RequestSHA256             string `json:"request_sha256"`
+	Observation               bool   `json:"observation"`
+	Body                      []byte `json:"body"`
+	Outcome                   string `json:"outcome"`
+	OperationState            string `json:"operation_state"`
+	Transport                 string `json:"transport_outcome"`
+	SessionState              string `json:"session_state"`
+	ResponseAvailable         bool   `json:"response_available"`
+	RetainedResponseAvailable bool   `json:"retained_response_available"`
+	RetainedResponseEventID   string `json:"retained_response_event_id,omitempty"`
+	Cached                    bool   `json:"cached"`
+	EventID                   string `json:"event_id,omitempty"`
+	ObservedAt                string `json:"observed_at,omitempty"`
 }
 
 // ReadPolicy reads only root-owned, non-writable, non-symlink public
@@ -290,7 +292,26 @@ func Run(p Policy, reader io.Reader) (Reply, error) {
 			return reply, errors.New("sealed original request unavailable or changed; preserve and inspect")
 		}
 	}
+	retainedResponse := func(out *Reply) error {
+		ev, found, e := calljournal.LatestKind(dir, "response")
+		if e != nil {
+			return e
+		}
+		out.RetainedResponseAvailable = found
+		out.RetainedResponseEventID = ev.ID
+		if found {
+			var saved Reply
+			if json.Unmarshal(ev.Value, &saved) != nil || saved.RequestSHA256 != reply.RequestSHA256 || saved.CallerUID != p.CallerUID {
+				return errors.New("retained response binding invalid")
+			}
+		}
+		return nil
+	}
 	finish := func(saved Reply, cached bool) (Reply, error) {
+		if e := retainedResponse(&saved); e != nil {
+			saved.Outcome = "uncertain"
+			return saved, e
+		}
 		saved.Cached = cached
 		if saved.Status >= 500 || saved.Status == 409 {
 			saved.Outcome = "uncertain"
@@ -330,6 +351,10 @@ func Run(p Policy, reader io.Reader) (Reply, error) {
 		}
 		return false
 	}); e != nil {
+		reply.Outcome = "uncertain"
+		return reply, e
+	}
+	if e := retainedResponse(&reply); e != nil {
 		reply.Outcome = "uncertain"
 		return reply, e
 	}
@@ -379,6 +404,10 @@ func Run(p Policy, reader io.Reader) (Reply, error) {
 			out.Outcome = "uncertain"
 			out.ResponseAvailable = false
 			return out, errors.New("response retention uncertain; inspect original attempt")
+		}
+		if e := retainedResponse(&out); e != nil {
+			out.Outcome = "uncertain"
+			return out, e
 		}
 		return out, nil
 	}
