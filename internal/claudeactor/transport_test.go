@@ -53,8 +53,8 @@ func TestForwardSeparatesNotDeliveredFromUncertain(t *testing.T) {
 		t.Fatalf("a lost reply: %v", err)
 	}
 
-	defer func(w time.Duration) { forwardReplyWait = w }(forwardReplyWait)
-	forwardReplyWait = 300 * time.Millisecond
+	defer forwardReplyWait.Store(forwardReplyWait.Load())
+	forwardReplyWait.Store(int64(300 * time.Millisecond))
 	held := make(chan net.Conn, 1)
 	go func() {
 		c, err := ln.Accept()
@@ -168,8 +168,8 @@ func TestServeMCPDuplicateRequestIDs(t *testing.T) {
 func TestBridgeConnectionsAreBounded(t *testing.T) {
 	defer func(w time.Duration) { bridgeReadWait = w }(bridgeReadWait)
 	bridgeReadWait = time.Minute // set before the actor is created: it takes the value then
-	defer func(w time.Duration) { forwardReplyWait = w }(forwardReplyWait)
-	forwardReplyWait = 500 * time.Millisecond
+	defer forwardReplyWait.Store(forwardReplyWait.Load())
+	forwardReplyWait.Store(int64(500 * time.Millisecond))
 	h, sock := startHeld(t)
 	defer func() { h.fakes[0].Interrupt(); h.waitOp("op-1", finished) }()
 	var silent []net.Conn
@@ -197,5 +197,73 @@ func TestBridgeConnectionsAreBounded(t *testing.T) {
 	}
 	if approvals(h) != 1 {
 		t.Fatal("the waiting request was not served once slots freed")
+	}
+}
+
+// The review's regression (#75, P1): within one connection, a reused request
+// ID is never dispatched again, even after its full reply has been evicted,
+// and even when its original outcome was uncertain. Past the connection's
+// history bound, new calls are refused, not dispatched.
+func TestServeMCPReusedIDAfterEvictionIsNeverDispatched(t *testing.T) {
+	defer func(n int) { maxConnectionCalls = n }(maxConnectionCalls)
+	maxConnectionCalls = maxRecordedCalls + 2
+	inR, inW := io.Pipe()
+	var out syncBuffer
+	var calls atomic.Int32
+	done := make(chan error, 1)
+	go func() {
+		done <- ServeMCPController(inR, &out, []string{"inbox"}, func(_ string, args json.RawMessage) (bridgeReply, error) {
+			calls.Add(1)
+			if strings.Contains(string(args), `"first"`) {
+				return bridgeReply{}, ErrDeliveryUncertain // the original outcome was uncertain
+			}
+			return bridgeReply{Text: "ok"}, nil
+		})
+	}()
+	send := func(id int, data string) {
+		fmt.Fprintf(inW, `{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"pomar_controller_request","arguments":{"capability":"inbox","data":%q}}}`+"\n", id, data)
+	}
+	repliesFor := func(id int) []string { return mcpReplies(t, out.String())[fmt.Sprint(id)] }
+	waitReplies := func(id, n int) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for len(repliesFor(id)) < n && time.Now().Before(deadline) {
+			time.Sleep(2 * time.Millisecond)
+		}
+		if len(repliesFor(id)) < n {
+			t.Fatalf("id %d: %d replies", id, len(repliesFor(id)))
+		}
+	}
+	send(1, "first")
+	waitReplies(1, 1)
+	for id := 2; id <= maxRecordedCalls+1; id++ { // IDs 1 to 257 completed: ID 1's reply is evicted
+		send(id, fmt.Sprintf("call %d", id))
+		waitReplies(id, 1)
+	}
+	before := calls.Load()
+	send(1, "first") // identical input
+	waitReplies(1, 2)
+	send(1, "changed") // other input
+	waitReplies(1, 3)
+	send(maxRecordedCalls+2, "the last allowed") // the history's last slot
+	waitReplies(maxRecordedCalls+2, 1)
+	send(maxRecordedCalls+3, "over the bound")
+	waitReplies(maxRecordedCalls+3, 1)
+	inW.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load() - before; got != 1 {
+		t.Fatalf("%d dispatches after eviction, want 1 (the last allowed new ID)", got)
+	}
+	r := repliesFor(1)
+	if !strings.Contains(r[1], "no longer retained") || !strings.Contains(r[1], `"isError":true`) {
+		t.Fatalf("an evicted identical reuse: %s", r[1])
+	}
+	if !strings.Contains(r[2], "reused with different input") {
+		t.Fatalf("an evicted changed reuse: %s", r[2])
+	}
+	if over := repliesFor(maxRecordedCalls + 3)[0]; !strings.Contains(over, "call history is full") {
+		t.Fatalf("over the history bound: %s", over)
 	}
 }
