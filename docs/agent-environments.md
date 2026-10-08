@@ -341,6 +341,27 @@ runs unasked on 2.1.280. `TestLiveBashRules` records this and must be re-run
 on every pin change. Prefix rules are a policy layer; the egress allowlist and
 fence remain the containment.
 
+A profile marked `qualification` may carry one `qualificationFixture`, for
+adapter qualification only. It's an owner-supplied synthetic file (a public
+marker, never a real credential), placed once into each new environment before
+its agent starts. Neither the host's top-level configuration nor any request
+can name one. The fixture names its `source`, `sha256`, exact `size` (at most
+64 KiB) and `destination`; the only destination is the Claude Code credential
+path, `/pomar/job/.claude/.credentials.json`.
+
+Custody is checked at configuration load, at each start, and again by the VM
+owner as it copies the bytes in:
+- the source is directly inside `<host root>/fixtures`;
+- that directory and the file are the owner's, private, and not symlinks;
+- the file is regular, `0600`, with one link and the exact size;
+- the bytes read have the exact digest;
+- afterwards, the path still names the same file and directory.
+
+A replacement is refused, never followed. In the guest, setup checks the
+digest again, places the file only on the environment's first setup, and
+refuses if its destination already exists. A retained environment refuses a
+changed fixture.
+
 ## First assignment and acceptance
 
 The initial assignment uses an isolated Pomar checkout: accept only ASCII

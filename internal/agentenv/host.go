@@ -54,6 +54,9 @@ type HostConfig struct {
 	// Claude Code's version, and is required for it.
 	Agent        string `json:"agent,omitempty"`
 	AgentVersion string `json:"agentVersion,omitempty"`
+	// QualificationFixture reaches a VM spec only from a profile marked
+	// Qualification; the owner's top-level configuration may not set it.
+	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
 }
 
 // EnvironmentProfile selects project inputs supplied by the service owner.
@@ -72,6 +75,11 @@ type EnvironmentProfile struct {
 	AgentVersion       string `json:"agentVersion,omitempty"`
 	AgentArchive       string `json:"agentArchive,omitempty"`
 	AgentArchiveSHA256 string `json:"agentArchiveSHA256,omitempty"`
+	// Qualification marks a profile for adapter qualification only. Only
+	// such a profile may carry a QualificationFixture, which is placed once
+	// into each new environment's guest before its agent starts.
+	Qualification        bool                  `json:"qualification,omitempty"`
+	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
 }
 
 var agentVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,3}$`)
@@ -121,6 +129,11 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 	}
 	if p.AgentArchive != "" {
 		c.CodexArchive, c.CodexArchiveSHA256 = p.AgentArchive, p.AgentArchiveSHA256
+	}
+	c.QualificationFixture = nil
+	if p.Qualification && p.QualificationFixture != nil {
+		f := *p.QualificationFixture
+		c.QualificationFixture = &f
 	}
 	return c, nil
 }
@@ -209,7 +222,22 @@ func OpenHost(config HostConfig) (*Host, error) {
 	if err := ValidateAgent(config); err != nil {
 		return nil, err
 	}
+	if config.QualificationFixture != nil {
+		return nil, errors.New("a qualification fixture belongs to a qualification profile, not the host configuration")
+	}
 	for name, p := range config.Profiles {
+		if p.QualificationFixture != nil {
+			agent := config.Agent
+			if p.Agent != "" {
+				agent = p.Agent
+			}
+			if !p.Qualification {
+				return nil, fmt.Errorf("profile %s: a qualification fixture needs a profile marked qualification", name)
+			}
+			if err := ValidateFixture(config.Root, *p.QualificationFixture, agent, os.Getuid()); err != nil {
+				return nil, fmt.Errorf("profile %s: %w", name, err)
+			}
+		}
 		if err := ValidateControllerCapabilities(p.ControllerCapabilities); err != nil {
 			return nil, err
 		}
@@ -451,6 +479,16 @@ func (h *Host) start(e *Environment) error {
 	}
 	if cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef {
 		return errors.New("retained project inputs changed; use a distinct environment")
+	}
+	if (cfg.QualificationFixture == nil) != (e.Spec.QualificationFixture == nil) || (cfg.QualificationFixture != nil && *cfg.QualificationFixture != *e.Spec.QualificationFixture) {
+		return errors.New("retained qualification fixture changed; use a distinct environment")
+	}
+	if f := cfg.QualificationFixture; f != nil {
+		// Custody is checked again at each start; the VM owner checks it a
+		// third time as it copies the bytes in.
+		if err := ValidateFixture(h.config.Root, *f, cfg.Agent, os.Getuid()); err != nil {
+			return err
+		}
 	}
 	e.Spec.Incarnation = randomID()
 	e.HelperExit = nil
