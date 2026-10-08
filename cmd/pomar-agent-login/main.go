@@ -4,12 +4,22 @@
 //	pomar-agent-login -root DIR -environment ID
 //	    prints the authorization URL, reads the code (not echoed), completes
 //	    the sign-in and reports whether the environment is authenticated
-//	pomar-agent-login -root DIR -environment ID -start
-//	    prints {"login_id","auth_url"} as JSON and leaves the sign-in waiting
-//	pomar-agent-login -root DIR -environment ID -complete LOGIN_ID
+//	pomar-agent-login -root DIR -environment ID -start [-operation-id OP]
+//	    prints {"operation_id","login_id","auth_url"} as JSON and leaves the
+//	    sign-in waiting
+//	pomar-agent-login -root DIR -environment ID -complete LOGIN_ID [-operation-id OP]
 //	    reads the code from stdin and completes that waiting sign-in
 //	pomar-agent-login -root DIR -environment ID -status
 //	    prints whether the environment is authenticated
+//
+// With -start or -complete, -operation-id gives the request its own operation
+// identity instead of a fresh one, and the operation ID used is always
+// printed, so a retry can carry it. Retrying with the same ID and input
+// returns the retained outcome and never signs in again; the same ID with
+// other input, or for the other action, is refused by the broker. A retained
+// start's authorization URL is not journaled, so it is never returned again.
+// An uncertain original is reported as uncertain, to be inspected, not to be
+// reissued under a new identity.
 //
 // The code goes only to the environment's actor: it is never printed,
 // logged or journaled, and no credential ever leaves the environment.
@@ -29,6 +39,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -107,30 +118,63 @@ func operationID(kind string) string {
 	return fmt.Sprintf("%s-%d", kind, time.Now().UTC().UnixNano())
 }
 
-func (c *client) start(incarnation string) (id, url string, err error) {
-	var out struct {
-		Login struct {
-			LoginID string `json:"loginId"`
-			AuthURL string `json:"authUrl"`
-		} `json:"login"`
-	}
-	if err = c.do("POST", "login", map[string]string{"expected_incarnation": incarnation, "operation_id": operationID("login")}, &out); err != nil {
-		return "", "", err
-	}
-	if out.Login.LoginID == "" || !strings.HasPrefix(out.Login.AuthURL, "https://") {
-		return "", "", errors.New("the environment returned no authorization URL (is it a Claude Code environment?)")
-	}
-	return out.Login.LoginID, out.Login.AuthURL, nil
+// validOperation is the broker's rule for an operation ID.
+var validOperation = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+
+// retained is the broker's reply for an operation ID it already recorded:
+// that operation's retained control record, not a new dispatch.
+type retained struct {
+	OperationID string `json:"operation_id"`
+	State       string `json:"state"`
 }
 
-func (c *client) complete(incarnation, id, code string) (bool, error) {
-	var out struct {
-		Login struct {
-			Success bool `json:"success"`
-		} `json:"login"`
+func (r retained) Error() string {
+	if r.State == "acceptance_unknown" {
+		return fmt.Sprintf("operation %s is already recorded and its acceptance is uncertain: inspect -status, and do not reissue it under a new operation ID", r.OperationID)
 	}
-	err := c.do("POST", "login/complete", map[string]string{"expected_incarnation": incarnation, "operation_id": operationID("login-complete"), "login_id": id, "code": code}, &out)
-	return out.Login.Success, err
+	return fmt.Sprintf("operation %s is already recorded (state %s) and was not repeated", r.OperationID, r.State)
+}
+
+// reply is the broker's login reply: a new dispatch carries "login", and a
+// retained operation is its control record.
+type reply struct {
+	Login json.RawMessage `json:"login"`
+	retained
+}
+
+func (c *client) start(incarnation, op string) (id, url string, err error) {
+	var out reply
+	if err = c.do("POST", "login", map[string]string{"expected_incarnation": incarnation, "operation_id": op}, &out); err != nil {
+		return "", "", err
+	}
+	if len(out.Login) == 0 && out.OperationID != "" {
+		// The URL was never journaled, so a retained start can't return it.
+		return "", "", out.retained
+	}
+	var login struct {
+		LoginID string `json:"loginId"`
+		AuthURL string `json:"authUrl"`
+	}
+	json.Unmarshal(out.Login, &login)
+	if login.LoginID == "" || !strings.HasPrefix(login.AuthURL, "https://") {
+		return "", "", errors.New("the environment returned no authorization URL (is it a Claude Code environment?)")
+	}
+	return login.LoginID, login.AuthURL, nil
+}
+
+func (c *client) complete(incarnation, op, id, code string) (bool, error) {
+	var out reply
+	if err := c.do("POST", "login/complete", map[string]string{"expected_incarnation": incarnation, "operation_id": op, "login_id": id, "code": code}, &out); err != nil {
+		return false, err
+	}
+	if len(out.Login) == 0 && out.OperationID != "" {
+		return false, out.retained
+	}
+	var login struct {
+		Success bool `json:"success"`
+	}
+	json.Unmarshal(out.Login, &login)
+	return login.Success, nil
 }
 
 // readCode reads one line; on a terminal, without echo.
@@ -153,14 +197,29 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	root := fs.String("root", "", "the development host's data root (its host.sock is used)")
 	environment := fs.String("environment", "", "the agent environment's ID")
-	startOnly := fs.Bool("start", false, "print the login ID and authorization URL as JSON, and leave the sign-in waiting")
+	startOnly := fs.Bool("start", false, "print the operation ID, login ID and authorization URL as JSON, and leave the sign-in waiting")
 	complete := fs.String("complete", "", "complete the waiting sign-in with this login ID, reading the code from stdin")
 	status := fs.Bool("status", false, "print whether the environment is authenticated")
+	opID := fs.String("operation-id", "", "with -start or -complete: the request's own operation ID, kept on retries")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *root == "" || *environment == "" {
 		return errors.New("-root and -environment are required")
+	}
+	if *opID != "" {
+		if *startOnly == (*complete != "") {
+			return errors.New("-operation-id applies to exactly one of -start or -complete")
+		}
+		if !validOperation.MatchString(*opID) {
+			return fmt.Errorf("-operation-id %q is not a valid operation ID (1-128 letters, digits, '.', '_' or '-', starting with a letter or digit)", *opID)
+		}
+	}
+	op := func(kind string) string {
+		if *opID != "" {
+			return *opID
+		}
+		return operationID(kind)
 	}
 	c := newClient(filepath.Join(*root, "host.sock"), *environment)
 	s, err := c.session()
@@ -173,19 +232,20 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "authenticated: %v\n", s.Authenticated)
 		return nil
 	case *startOnly:
-		id, url, err := c.start(inc)
+		o := op("login")
+		id, url, err := c.start(inc, o)
 		if err != nil {
 			return err
 		}
-		return json.NewEncoder(stdout).Encode(map[string]string{"login_id": id, "auth_url": url})
+		return json.NewEncoder(stdout).Encode(map[string]string{"operation_id": o, "login_id": id, "auth_url": url})
 	case *complete != "":
 		code, err := readCode(stdin, stderr)
 		if err != nil {
 			return err
 		}
-		return finish(c, inc, *complete, code, stdout)
+		return finish(c, inc, op("login-complete"), *complete, code, stdout, stderr)
 	}
-	id, url, err := c.start(inc)
+	id, url, err := c.start(inc, op("login"))
 	if err != nil {
 		return err
 	}
@@ -194,11 +254,23 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	return finish(c, inc, id, code, stdout)
+	return finish(c, inc, op("login-complete"), id, code, stdout, stderr)
 }
 
-func finish(c *client, incarnation, id, code string, stdout io.Writer) error {
-	ok, err := c.complete(incarnation, id, code)
+func finish(c *client, incarnation, op, id, code string, stdout, stderr io.Writer) error {
+	fmt.Fprintf(stderr, "operation: %s\n", op)
+	ok, err := c.complete(incarnation, op, id, code)
+	var kept retained
+	if errors.As(err, &kept) {
+		// The original completion is the outcome: report the account's
+		// state, and never complete again under this identity.
+		s, serr := c.session()
+		if serr == nil && s.Authenticated && kept.State != "acceptance_unknown" {
+			fmt.Fprintf(stdout, "signed in: authenticated: true (operation %s already recorded; not repeated)\n", op)
+			return nil
+		}
+		return err
+	}
 	if err != nil {
 		return err
 	}
