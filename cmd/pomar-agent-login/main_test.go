@@ -19,17 +19,27 @@ const code = "synthetic-code-0123456789"
 // A shell script that behaves like `claude auth login --claudeai` with no
 // terminal (probed on 2.1.280): the URL, then a code on stdin.
 const fakeLogin = `#!/bin/sh
+[ -n "$CALLS" ] && echo start >> "$CALLS"
 echo "Opening browser to sign in…"
 echo "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?code=true&client_id=c&state=s"
 printf 'Paste code here if prompted > '
 read c
 [ "$c" = "` + code + `" ] || exit 1
 printf 'synthetic-credential' > "$CRED"
+[ -n "$CALLS" ] && echo complete >> "$CALLS"
 `
 
 // host serves a real broker, with a Claude actor whose sign-in is the fake
 // script, behind a host-shaped socket: /v1/environments/env-1/agent/...
 func host(t *testing.T) (root string, config string) {
+	root, config, _ = hostWith(t)
+	return root, config
+}
+
+// hostWith is host, also returning the fake sign-in's call log: a "start" line
+// each time the actor starts a sign-in, a "complete" line each time one
+// completes.
+func hostWith(t *testing.T) (root string, config string, calls string) {
 	t.Helper()
 	dir := t.TempDir()
 	root, _ = os.MkdirTemp("/tmp", "pal")
@@ -44,7 +54,8 @@ func host(t *testing.T) (root string, config string) {
 	}
 	t.Cleanup(func() { store.Close() })
 	broker := agentenv.NewBroker(store, dir)
-	env := []string{"PATH=/usr/bin:/bin", "CRED=" + filepath.Join(config, ".credentials.json")}
+	calls = filepath.Join(dir, "calls")
+	env := []string{"PATH=/usr/bin:/bin", "CRED=" + filepath.Join(config, ".credentials.json"), "CALLS=" + calls}
 	actor := claudeactor.New(claudeactor.Config{
 		Version:       "2.1.280",
 		Start:         claudeactor.Exec{Binary: script, Dir: dir, Env: env, UID: -1, GID: -1}.Start,
@@ -65,7 +76,7 @@ func host(t *testing.T) (root string, config string) {
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln)
 	t.Cleanup(func() { srv.Close() })
-	return root, config
+	return root, config, calls
 }
 
 // rewrite maps agent/{path} to /v1/{path}, as the host proxy does.
