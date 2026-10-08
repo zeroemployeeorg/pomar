@@ -458,7 +458,15 @@ Deletion requires a fresh trusted native executor/descriptor/fileport/mmap
 probe covering the exact private singly linked disk device/inode. Inaccessible
 process coverage, possible unrelated executors, writers, inode substitution,
 symlinks, hard links and journal failures refuse deletion. The existing
-conservative native attribution limits still apply. Retirement does not clear
+conservative native attribution limits still apply. A missing executable path
+remains an unresolved executable-identity hold. Kernel PID/UID/birth can
+positively identify a still-live original-helper binding without that path;
+this does not exclude an unidentified executor or grant retirement. For
+kernel-identified owned processes, descriptor, fileport and mapped-region
+inspection continues independently of path availability. Full kernel birth
+(including microseconds) and UID are rechecked after the resource scan; changed
+identity, inaccessible metadata and incomplete enumeration retain UNKNOWN.
+Retirement does not clear
 cc-3's held reservation or permit stopping another owner to obtain coverage.
 
 The host retains its root and environment locks and persists the terminal
