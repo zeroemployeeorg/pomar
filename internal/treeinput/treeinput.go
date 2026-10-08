@@ -175,7 +175,7 @@ func Build(ctx context.Context, mirror, ref, commit, dst string, required []stri
 		}
 	}()
 	g := gzip.NewWriter(&boundedWriter{f, maxBytes})
-	t := tar.NewWriter(g)
+	t := tar.NewWriter(&boundedWriter{g, MaxExpanded + MaxManifest + (32 << 20)})
 	for i := range m.Entries {
 		x := &m.Entries[i]
 		b, e := git(ctx, mirror, MaxExpanded-total, "cat-file", "blob", x.Blob)
