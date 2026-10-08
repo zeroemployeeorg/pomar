@@ -35,6 +35,65 @@ public enum AgentEnvironment {
         public var agent: String? = nil
         /// The pinned agent version, required for "claude".
         public var agentVersion: String? = nil
+        /// An owner-supplied synthetic file for a qualification profile only
+        /// (agentenv QualificationFixture), placed once before the agent starts.
+        public var qualificationFixture: QualificationFixture? = nil
+    }
+
+    /// The owner's synthetic qualification file: its source inside the host
+    /// root's fixtures directory, its exact digest and size, and the one
+    /// compiled guest destination.
+    public struct QualificationFixture: Codable, Sendable, Equatable {
+        public var source: String
+        public var sha256: String
+        public var size: Int
+        public var destination: String
+    }
+
+    /// The only guest path a fixture may take: a Claude Code qualification
+    /// environment's credential file (agentenv ClaudeQualificationDestination).
+    public static let claudeQualificationDestination = "/pomar/job/.claude/.credentials.json"
+
+    /// A fixture belongs to a Claude Code environment, at the compiled
+    /// destination, with a sha256 and an exact size of at most 64 KiB.
+    public static func validFixture(_ o: Options) -> Bool {
+        guard let f = o.qualificationFixture else { return true }
+        let hex = f.sha256.count == 64 && f.sha256.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+        return o.agent == "claude" && f.destination == claudeQualificationDestination && hex
+            && f.size > 0 && f.size <= 64 * 1024 && f.source.hasPrefix("/") && f.source.split(separator: "/").allSatisfy { $0 != ".." && $0 != "." }
+    }
+
+    public enum FixtureError: Error, Equatable { case custody(String), digest, replaced }
+
+    /// Reads the fixture's bytes with the owner's custody checked on the opened
+    /// file itself: the source and its parent are the owner's, private and not
+    /// symlinks; the file is regular, 0600, one link, of the exact size; the
+    /// bytes read have the exact digest; and afterwards the path still names
+    /// the same file and directory. A replacement is refused, never followed.
+    /// afterRead is a test seam between the read and the recheck.
+    public static func readFixture(_ f: QualificationFixture, afterRead: () -> Void = {}) throws -> Data {
+        let parent = (f.source as NSString).deletingLastPathComponent
+        var dirBefore = stat()
+        guard lstat(parent, &dirBefore) == 0, (dirBefore.st_mode & S_IFMT) == S_IFDIR, dirBefore.st_uid == getuid(),
+              dirBefore.st_mode & 0o077 == 0 else { throw FixtureError.custody("the fixtures directory") }
+        let fd = open(f.source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw FixtureError.custody("the source cannot be opened without following a link") }
+        defer { close(fd) }
+        var opened = stat()
+        guard fstat(fd, &opened) == 0, (opened.st_mode & S_IFMT) == S_IFREG, opened.st_uid == getuid(),
+              opened.st_mode & 0o777 == 0o600, opened.st_nlink == 1, Int(opened.st_size) == f.size
+        else { throw FixtureError.custody("the source must be the owner's one regular 0600 file of the exact size") }
+        var data = Data(count: f.size)
+        let n = data.withUnsafeMutableBytes { read(fd, $0.baseAddress, f.size) }
+        guard n == f.size else { throw FixtureError.custody("the source's size changed") }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        guard digest == f.sha256 else { throw FixtureError.digest }
+        afterRead()
+        var fileAfter = stat(), dirAfter = stat()
+        guard lstat(f.source, &fileAfter) == 0, fileAfter.st_dev == opened.st_dev, fileAfter.st_ino == opened.st_ino,
+              lstat(parent, &dirAfter) == 0, dirAfter.st_dev == dirBefore.st_dev, dirAfter.st_ino == dirBefore.st_ino
+        else { throw FixtureError.replaced }
+        return data
     }
 
     /// The agent an environment runs; anything else is refused.
@@ -61,7 +120,7 @@ public enum AgentEnvironment {
         }
         let sha: (String, Int) -> Bool = { s, n in s.count == n && s.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) } }
         return id(o.environment) && id(o.session) && id(o.incarnation)
-            && validControllerCapabilities(o.controllerCapabilities ?? []) && validAgent(o)
+            && validControllerCapabilities(o.controllerCapabilities ?? []) && validAgent(o) && validFixture(o)
             && sha(o.sourceSHA, 40) && sha(o.codexArchiveSHA256, 64)
             && o.cpus > 0 && o.cpus <= 4 && o.memoryBytes >= 512 * 1024 * 1024 && o.memoryBytes <= 8 * 1024 * 1024 * 1024
             && o.rootfs == o.directory + "/workspace.ext4"
@@ -86,16 +145,28 @@ public enum AgentEnvironment {
 
     /// Source is installed once. Restarts retain Git changes, Codex home and
     /// the root-owned broker journal. No host directory is mounted.
-    public static func setupCommand(sourceSHA: String, agent: String = "codex") -> [String] {
+    public static func setupCommand(sourceSHA: String, agent: String = "codex", fixtureSHA256: String? = nil) -> [String] {
         // Codex: /opt/pomar-codex and CODEX_HOME. Claude Code: /opt/pomar-claude
         // and CLAUDE_CONFIG_DIR, and a stale bridge socket from a previous
         // boot removed (the broker refuses to replace one).
         let claude = agent == "claude"
         let path = claude ? "/opt/pomar-claude/bin" : "/opt/pomar-codex/codex-path"
+        // A qualification fixture is placed once, on the environment's first
+        // setup: its copied bytes' digest is checked again in the guest, and
+        // it never replaces an existing file at its destination.
+        var fixture = ""
+        if claude, let sha = fixtureSHA256 {
+            let dest = claudeQualificationDestination
+            fixture = "; if [ ! -e /var/lib/pomar-agent/fixture-placed ]; then "
+                + "test ! -e " + dest + " || { echo 'qualification fixture refused: its destination exists'; exit 1; }; "
+                + "echo '" + sha + "  /pomar/qualification-fixture' | sha256sum -c - >/dev/null || { echo 'qualification fixture refused: digest'; exit 1; }; "
+                + "install -o 1000 -g 1000 -m 0600 /pomar/qualification-fixture " + dest + "; touch /var/lib/pomar-agent/fixture-placed; fi; "
+                + "rm -f /pomar/qualification-fixture"
+        }
         let install = claude
             ? "mkdir -p /opt/pomar-claude /pomar/job/.claude; chmod 700 /pomar/job/.claude; rm -f /run/pomar-claude/bridge.sock; "
                 + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-claude; "
-                + "chmod -R go-w /opt/pomar-claude; chown -R 1000:1000 /pomar/job"
+                + "chmod -R go-w /opt/pomar-claude; chown -R 1000:1000 /pomar/job" + fixture
             : "mkdir -p /opt/pomar-codex /pomar/job/.codex; chmod 700 /pomar/job/.codex; "
                 + "tar -xzf /pomar/codex-package.tar.gz -C /opt/pomar-codex; "
                 + "chmod -R go-w /opt/pomar-codex; chown -R 1000:1000 /pomar/job"
@@ -193,8 +264,21 @@ public enum AgentEnvironment {
             try await container.copyIn(from: URL(fileURLWithPath: o.guestBinary), to: URL(fileURLWithPath: "/pomar/agent-guest"), mode: 0o755)
             try await container.copyIn(from: URL(fileURLWithPath: o.codexArchive), to: URL(fileURLWithPath: "/pomar/codex-package.tar.gz"), mode: 0o600)
             try await container.copyIn(from: URL(fileURLWithPath: o.sourceBundle), to: URL(fileURLWithPath: "/pomar/source.bundle"), mode: 0o600)
+            if let f = o.qualificationFixture {
+                // The bytes copied are the bytes checked: read with custody
+                // pinned, staged privately, then copied in and checked again.
+                let data = try readFixture(f)
+                let staged = o.directory + "/qualification-fixture-" + o.incarnation
+                let fd = open(staged, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                guard fd >= 0 else { throw FixtureError.custody("the staged copy") }
+                let written = data.withUnsafeBytes { write(fd, $0.baseAddress, data.count) }
+                close(fd)
+                defer { unlink(staged) }
+                guard written == data.count else { throw FixtureError.custody("the staged copy") }
+                try await container.copyIn(from: URL(fileURLWithPath: staged), to: URL(fileURLWithPath: "/pomar/qualification-fixture"), mode: 0o600)
+            }
             let setup = try await container.exec("agent-setup") { config in
-                config.arguments = setupCommand(sourceSHA: o.sourceSHA, agent: o.agent ?? "codex"); config.stdout = out; config.stderr = out
+                config.arguments = setupCommand(sourceSHA: o.sourceSHA, agent: o.agent ?? "codex", fixtureSHA256: o.qualificationFixture?.sha256); config.stdout = out; config.stderr = out
             }
             try await setup.start(); let result = try await setup.wait(); try await setup.delete()
             guard result.exitCode == 0 else { throw CocoaError(.fileReadCorruptFile) }
