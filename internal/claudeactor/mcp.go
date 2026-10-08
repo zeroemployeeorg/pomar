@@ -2,6 +2,8 @@ package claudeactor
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,8 +53,9 @@ var ErrDeliveryUncertain = errors.New("the request reached the Pomar bridge but 
 
 // forwardReplyWait bounds how long Forward waits for its reply once the
 // request is written. The bridge holds a request until the controller answers
-// (RT's answer deadline is 30 minutes), so this is well above that.
-var forwardReplyWait = time.Hour
+// (RT's answer deadline is 30 minutes), so this is well above that. It is
+// atomic: a Forward still waiting from an earlier call reads it.
+var forwardReplyWait = func() *atomic.Int64 { var d atomic.Int64; d.Store(int64(time.Hour)); return &d }()
 
 // Forward sends one tool call to the bridge socket and waits for its reply.
 func Forward(socket string, tool string, args json.RawMessage) (bridgeReply, error) {
@@ -69,7 +72,7 @@ func Forward(socket string, tool string, args json.RawMessage) (bridgeReply, err
 	if _, err = c.Write(append(b, '\n')); err != nil {
 		return bridgeReply{}, fmt.Errorf("not delivered: %w", err)
 	}
-	c.SetReadDeadline(time.Now().Add(forwardReplyWait))
+	c.SetReadDeadline(time.Now().Add(time.Duration(forwardReplyWait.Load())))
 	var r bridgeReply
 	line, err := readLine(c)
 	if err != nil || json.Unmarshal(line, &r) != nil {
@@ -97,15 +100,32 @@ const controllerTextLimit = 32 << 10
 // itself refuses beyond maxBridgeWaiting outstanding requests.
 const maxMCPInFlight = 2 * maxBridgeWaiting
 
-// maxRecordedCalls bounds the completed tool calls whose outcome a reused
-// request ID is answered with.
+// maxRecordedCalls bounds the completed tool calls whose full reply a reused
+// request ID is answered with. Older calls keep only their identity.
 const maxRecordedCalls = 256
 
-// recordedCall is one tool call's input and, once done is closed, its reply.
+// maxConnectionCalls bounds the distinct request IDs one connection may use.
+// Every ID's identity is kept for the connection's lifetime, so memory is
+// bounded by refusing new calls beyond it, never by forgetting an ID.
+var maxConnectionCalls = 1 << 16
+
+// recordedCall is one tool call's identity (its tool and input digest) and,
+// once done is closed, its reply; callsMu guards result.
 type recordedCall struct {
-	input  string
+	tool   string
+	input  string // sha256 of the tool and canonical input
 	done   chan struct{}
 	result map[string]any
+}
+
+// evictedResult replaces a completed call's reply once it is no longer
+// retained: a reused ID is still never dispatched again.
+func evictedResult(tool string) map[string]any {
+	text := "The original outcome of this request ID is no longer retained, and it was not repeated. The controller can inspect the original request."
+	if tool == PermissionTool {
+		return map[string]any{"content": []any{map[string]string{"type": "text", "text": denyText("the original decision for this request ID is no longer retained; it was not repeated")}}, "isError": false}
+	}
+	return map[string]any{"content": []any{map[string]string{"type": "text", "text": text}}, "isError": true}
 }
 
 // ServeMCP runs the MCP server on in/out until in ends. call forwards a tool
@@ -140,8 +160,11 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 	// a new process and a new server, so IDs never span connections. A
 	// reused ID with the same tool and input is answered with the one
 	// recorded outcome, waiting for it if still in flight, and is never
-	// dispatched twice. A reused ID with other input is refused. Completed
-	// calls are kept for the last maxRecordedCalls IDs.
+	// dispatched twice, however long the connection lives. A reused ID with
+	// other input is refused. Full replies are kept for the last
+	// maxRecordedCalls IDs; older IDs keep their identity and are answered
+	// that their outcome is no longer retained. Past maxConnectionCalls
+	// distinct IDs, new calls are refused.
 	var callsMu sync.Mutex
 	calls := map[string]*recordedCall{}
 	var completed []string
@@ -206,10 +229,16 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 				fail(m.ID, -32000, "too many tool calls in flight")
 				continue
 			}
-			idKey, input := canonical(m.ID), p.Name+"\x00"+canonical(p.Arguments)
+			idKey := canonical(m.ID)
 			if idKey == "" {
 				idKey = string(m.ID)
 			}
+			args := canonical(p.Arguments)
+			if args == "" {
+				args = string(p.Arguments)
+			}
+			sum := sha256.Sum256([]byte(p.Name + "\x00" + args))
+			input := hex.EncodeToString(sum[:])
 			callsMu.Lock()
 			rec, reused := calls[idKey]
 			if reused && rec.input != input {
@@ -218,8 +247,14 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 				fail(m.ID, -32600, "request id reused with different input")
 				continue
 			}
+			if !reused && len(calls) >= maxConnectionCalls {
+				callsMu.Unlock()
+				inFlight.Add(-1)
+				fail(m.ID, -32000, "this connection's call history is full; no new call is dispatched")
+				continue
+			}
 			if !reused {
-				rec = &recordedCall{input: input, done: make(chan struct{})}
+				rec = &recordedCall{tool: p.Name, input: input, done: make(chan struct{})}
 				calls[idKey] = rec
 			}
 			callsMu.Unlock()
@@ -230,7 +265,10 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 					defer wg.Done()
 					defer inFlight.Add(-1)
 					<-rec.done
-					reply(id, rec.result)
+					callsMu.Lock()
+					result := rec.result
+					callsMu.Unlock()
+					reply(id, result)
 				}(m.ID)
 				continue
 			}
@@ -254,16 +292,19 @@ func ServeMCPController(in io.Reader, out io.Writer, capabilities []string, call
 						r = bridgeReply{Text: "the Pomar bridge is unavailable; the request was not delivered", IsError: true}
 					}
 				}
-				rec.result = map[string]any{"content": []any{map[string]string{"type": "text", "text": r.Text}}, "isError": r.IsError}
-				close(rec.done)
+				result := map[string]any{"content": []any{map[string]string{"type": "text", "text": r.Text}}, "isError": r.IsError}
 				callsMu.Lock()
+				rec.result = result
+				close(rec.done)
 				completed = append(completed, idKey)
 				if len(completed) > maxRecordedCalls {
-					delete(calls, completed[0])
+					// Drop the oldest full reply, never its identity.
+					old := calls[completed[0]]
+					old.result = evictedResult(old.tool)
 					completed = completed[1:]
 				}
 				callsMu.Unlock()
-				reply(id, rec.result)
+				reply(id, result)
 			}(m.ID, p.Name, p.Arguments)
 		default:
 			fail(m.ID, -32601, "method not found")
