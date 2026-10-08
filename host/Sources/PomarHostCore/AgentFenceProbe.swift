@@ -150,7 +150,11 @@ public enum AgentFenceProbe {
                 let foreignMissing = short.pbsi_uid != r.uid && executable == nil
                 var identity = proc_bsdinfo()
                 var identityValid = false
-                if short.pbsi_uid == r.uid || foreignMissing {
+                // The separate actual-root diagnostic inspects target inode
+                // custody for every process, including foreign processes whose
+                // executable path is available. Ordinary owner coverage keeps
+                // its existing privilege boundary and conservative holds.
+                if privilegedObserver || short.pbsi_uid == r.uid || foreignMissing {
                     errno = 0
                     identityValid = access.info(pid, PROC_PIDTBSDINFO, 0, &identity, Int32(MemoryLayout<proc_bsdinfo>.size)) == MemoryLayout<proc_bsdinfo>.size
                         && identity.pbi_pid == UInt32(pid) && identity.pbi_uid == short.pbsi_uid
