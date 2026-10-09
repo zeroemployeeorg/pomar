@@ -109,6 +109,9 @@ func seatsCmd(args []string, stdin io.Reader, interactive bool, stdout, stderr i
 }
 
 func seatCmd(args []string, stdout, stderr io.Writer) int {
+	if len(args) >= 1 && args[0] == "attach" {
+		return seatAttach(args[1:], os.Stdin, stdout, stderr)
+	}
 	if len(args) < 1 || args[0] != "status" {
 		fmt.Fprint(stderr, usage)
 		return 2

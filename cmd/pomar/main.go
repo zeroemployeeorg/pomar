@@ -44,6 +44,8 @@ const usage = `usage:
   pomar seats [-root DIR]           list the declared seats; on a terminal, a numbered menu
   pomar seat status [-root DIR] SEAT
                                     one seat's declaration and location, as JSON
+  pomar seat attach [-root DIR] -environment ENV
+                                    the seat environment's interactive terminal; Ctrl-b d detaches
   pomar venue status [-root DIR]    fill, open ledgered objects, unaccounted entries (exit 3)
   pomar venue init [-root DIR]      create the structure directories (idempotent)
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
