@@ -45,3 +45,19 @@ var CIPackages = []debs.Package{
 	{Name: "libonig5", URL: "https://deb.debian.org/debian/pool/main/libo/libonig/libonig5_6.9.8-1_arm64.deb",
 		SHA256: "4693ac0f4fc8f2b8b4a7854463a8061a5b0fe7a7c2eb46b9cc21bc4c3adaf1ee"},
 }
+
+// SeatPackages carry tmux into a seat's base: the terminal an interactive
+// seat's operator attaches to (POMAR-CC SOW 15 §5, SOW 16 §3). Bookworm's
+// tmux 3.3a-3 and exactly its library dependencies, each fetched from the
+// archive and matched to the arm64 Packages index on 2026-10-09. No
+// maintainer script runs, and no utempter helper is installed or used.
+var SeatPackages = []debs.Package{
+	{Name: "tmux", URL: "https://deb.debian.org/debian/pool/main/t/tmux/tmux_3.3a-3_arm64.deb",
+		SHA256: "bbf91233312841253fb0c79c28d28d08680d23056674b4499aac14bd4831ac28"},
+	{Name: "libevent-core-2.1-7", URL: "https://deb.debian.org/debian/pool/main/libe/libevent/libevent-core-2.1-7_2.1.12-stable-8_arm64.deb",
+		SHA256: "b2ffdb6e02105a89fb1f306a6736be3cd302cdb225dc6d48f2e623baaf123efe"},
+	{Name: "libutempter0", URL: "https://deb.debian.org/debian/pool/main/libu/libutempter/libutempter0_1.2.1-3_arm64.deb",
+		SHA256: "7e637ec93daa487f5729640da48a059f4c960dbf6d56d53a711e3200e0b8b4b7"},
+	{Name: "libtinfo6", URL: "https://deb.debian.org/debian/pool/main/n/ncurses/libtinfo6_6.4-4_arm64.deb",
+		SHA256: "baef0f6776f84c7eed4f1146d6e5774689567dad43216894d41da02e6608e4b3"},
+}
