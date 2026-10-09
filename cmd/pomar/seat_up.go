@@ -26,11 +26,13 @@ import (
 //	    compiles the seat's current declaration against the owner's seat
 //	    class catalogue into the profile the owner adds to the host's
 //	    configuration, as {"seat-SEAT": {...}}
-//	pomar seat up SEAT -records REC -here WHERE -classes FILE
+//	pomar seat up SEAT -records REC -classes FILE [-here WHERE]
 //	    creates the seat's environment from that profile if it doesn't
 //	    exist, and starts it if it isn't running; a running seat is left
-//	    alone. It refuses unless the seat's location names WHERE and its
-//	    current declaration, so one seat never runs in two places.
+//	    alone. It refuses unless the seat's location names this host, as
+//	    the host's configuration states it (seatHere; -here only states
+//	    what the caller expects), and its current declaration, so one seat
+//	    never runs in two places.
 //	pomar seat stop SEAT -records REC
 //	    stops the seat's environment, keeping its workspace.
 //
@@ -238,9 +240,9 @@ func seatUpCmd(args []string, stdout, stderr io.Writer) int {
 	fs.SetOutput(stderr)
 	root := seatHostRoot(fs)
 	records := fs.String("records", "", "the owner's private (0700) operation records directory")
-	here := fs.String("here", "", "this host's location name, as the seat's location names it (for example pomar:macbook)")
+	here := fs.String("here", "", "optional: the location name you expect this host to have; refused if the host's configuration says otherwise")
 	classes := fs.String("classes", "", "the owner's seat class catalogue (pomar.seat-classes/v1), as the seat's profile was compiled against")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *records == "" || *here == "" || *classes == "" {
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *records == "" || *classes == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
@@ -250,12 +252,22 @@ func seatUpCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "pomar seat up:", err)
 		return 1
 	}
+	// This host's location is its owner's statement, from the host's
+	// configuration (seatHere), never the caller's flag: -here only states
+	// what the caller expects.
+	host := r.Seat.HostLocation
 	switch {
-	case r.Seat.Location == nil:
-		fmt.Fprintf(stderr, "pomar seat up: %s has no recorded location; it doesn't start until its location names %s\n", seat, *here)
+	case host == "":
+		fmt.Fprintln(stderr, "pomar seat up: this host names no seat location (seatHere in its configuration); no seat starts here until it does")
 		return 1
-	case r.Seat.Location.Where != *here:
-		fmt.Fprintf(stderr, "pomar seat up: %s is active at %s, not %s; it never runs in two places (move its location first)\n", seat, r.Seat.Location.Where, *here)
+	case *here != "" && *here != host:
+		fmt.Fprintf(stderr, "pomar seat up: this host is %s, not %s as you expected\n", host, *here)
+		return 1
+	case r.Seat.Location == nil:
+		fmt.Fprintf(stderr, "pomar seat up: %s has no recorded location; it doesn't start until its location names %s\n", seat, host)
+		return 1
+	case r.Seat.Location.Where != host:
+		fmt.Fprintf(stderr, "pomar seat up: %s is active at %s, not %s; it never runs in two places (move its location first)\n", seat, r.Seat.Location.Where, host)
 		return 1
 	case !r.Seat.LocationCurrent:
 		fmt.Fprintf(stderr, "pomar seat up: %s's location names an older declaration; move it to the current one first\n", seat)

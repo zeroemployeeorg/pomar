@@ -139,3 +139,6 @@ func (l Locations) Move(seat string, expected uint64, next Location) (Location, 
 	}
 	return next, calljournal.Sync(dir)
 }
+
+// ValidWhere reports whether s is a well-formed location name.
+func ValidWhere(s string) bool { return where.MatchString(s) }

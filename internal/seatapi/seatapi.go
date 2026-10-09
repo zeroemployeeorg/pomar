@@ -27,7 +27,9 @@ import (
 // Store holds the seats under one private root:
 // ROOT/declarations/<seat>/declaration-NNNNNNNNNNNN.json, add-only, and
 // ROOT/locations (seatdecl.Locations).
-type Store struct{ Root string }
+// Here is this host's location name, from the owner's host configuration;
+// empty when the host names none.
+type Store struct{ Root, Here string }
 
 var seatName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
 
@@ -192,6 +194,10 @@ type Seat struct {
 	ProviderAccount     string             `json:"provider_account"`
 	Location            *seatdecl.Location `json:"location,omitempty"`
 	LocationCurrent     bool               `json:"location_matches_declaration"`
+	// HostLocation is this host's own location name, as its owner configured
+	// it; LocationHere says the seat's location names this host.
+	HostLocation string `json:"host_location,omitempty"`
+	LocationHere bool   `json:"location_is_this_host"`
 }
 
 func (s Store) report(seat string) (Seat, bool, error) {
@@ -199,7 +205,7 @@ func (s Store) report(seat string) (Seat, bool, error) {
 	if err != nil || !ok {
 		return Seat{}, ok, err
 	}
-	r := Seat{Seat: seat, DeclarationRevision: d.Revision, DeclarationSHA256: d.SHA256, Role: d.Body.Identity.Role, ProviderAccount: d.Body.Provider.Account}
+	r := Seat{Seat: seat, DeclarationRevision: d.Revision, DeclarationSHA256: d.SHA256, Role: d.Body.Identity.Role, ProviderAccount: d.Body.Provider.Account, HostLocation: s.Here}
 	_, locations, err := s.readable()
 	if err != nil {
 		return Seat{}, false, err
@@ -214,6 +220,7 @@ func (s Store) report(seat string) (Seat, bool, error) {
 	if has {
 		r.Location = &loc
 		r.LocationCurrent = loc.DeclarationSHA256 == d.SHA256
+		r.LocationHere = s.Here != "" && loc.Where == s.Here
 	}
 	return r, true, nil
 }

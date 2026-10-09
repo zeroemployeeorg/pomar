@@ -61,6 +61,10 @@ type HostConfig struct {
 	// SeatRoot is the owner's private directory of seat declarations and
 	// locations (internal/seatapi); empty serves no seat routes.
 	SeatRoot string `json:"seatRoot,omitempty"`
+	// SeatHere is this host's location name, as seat locations name it (for
+	// example pomar:macbook). `pomar seat up` starts a seat only where its
+	// location names this, the owner's statement, never a caller's flag.
+	SeatHere string `json:"seatHere,omitempty"`
 
 	// Seat reaches a VM spec only from a profile that names one: the guest
 	// then runs the interactive seat (pomar-agent-guest -actor seat), not a
