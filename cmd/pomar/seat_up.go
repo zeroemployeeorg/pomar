@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
 	"github.com/zeroemployeeorg/pomar/internal/localclient"
@@ -24,7 +26,7 @@ import (
 //	    compiles the seat's current declaration against the owner's seat
 //	    class catalogue into the profile the owner adds to the host's
 //	    configuration, as {"seat-SEAT": {...}}
-//	pomar seat up SEAT -records REC -here WHERE
+//	pomar seat up SEAT -records REC -here WHERE -classes FILE
 //	    creates the seat's environment from that profile if it doesn't
 //	    exist, and starts it if it isn't running; a running seat is left
 //	    alone. It refuses unless the seat's location names WHERE and its
@@ -64,42 +66,104 @@ func seatProfileCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "pomar seat profile:", err)
 		return 1
 	}
-	raw, err := os.ReadFile(*classes)
+	p, err := seatProfile(r, *classes, *bundle)
 	if err != nil {
 		fmt.Fprintln(stderr, "pomar seat profile:", err)
 		return 1
-	}
-	cat, err := seatdecl.ParseClasses(raw)
-	if err != nil {
-		fmt.Fprintln(stderr, "pomar seat profile:", err)
-		return 1
-	}
-	compiled, err := seatdecl.Compile(r.Declaration, r.Seat.DeclarationSHA256, cat)
-	if err != nil {
-		fmt.Fprintln(stderr, "pomar seat profile:", err)
-		return 1
-	}
-	p := compiled.Profile
-	p.Seat = r.Declaration.Seat
-	for _, s := range compiled.Sources {
-		if s.Role == "work" {
-			p.SourceBundle, p.SourceSHA = *bundle, s.Commit
-		}
 	}
 	out, _ := json.MarshalIndent(map[string]agentenv.EnvironmentProfile{seatEnvironment(r.Declaration.Seat): p}, "", "  ")
 	stdout.Write(append(out, '\n'))
 	return 0
 }
 
+// seatProfile compiles the seat's current declaration against the owner's
+// catalogue into its profile, bound to the declaration's digest. An
+// environment carries only the sources in carriedSources, so a declaration
+// with any other is refused rather than started without it.
+func seatProfile(r seatRecord, classes, bundle string) (agentenv.EnvironmentProfile, error) {
+	raw, err := os.ReadFile(classes)
+	if err != nil {
+		return agentenv.EnvironmentProfile{}, err
+	}
+	cat, err := seatdecl.ParseClasses(raw)
+	if err != nil {
+		return agentenv.EnvironmentProfile{}, err
+	}
+	compiled, err := seatdecl.Compile(r.Declaration, r.Seat.DeclarationSHA256, cat)
+	if err != nil {
+		return agentenv.EnvironmentProfile{}, err
+	}
+	var work *seatdecl.Binding
+	for i, s := range compiled.Sources {
+		if !slices.Contains(carriedSources, s.Role) {
+			return agentenv.EnvironmentProfile{}, fmt.Errorf("%s declares a %s source; an environment carries only %v so far, and a seat isn't started without a source it declares", r.Declaration.Seat, s.Role, carriedSources)
+		}
+		if s.Role == "work" {
+			work = &compiled.Sources[i]
+		}
+	}
+	if work == nil {
+		return agentenv.EnvironmentProfile{}, errors.New("the declaration has no work source")
+	}
+	p := compiled.Profile
+	p.Seat, p.SeatDeclarationSHA256 = r.Declaration.Seat, compiled.DeclarationSHA256
+	p.SourceBundle, p.SourceSHA = bundle, work.Commit
+	return p, nil
+}
+
+// carriedSources are the source roles an environment receives. The
+// declaration's digest, which the profile carries, binds every source in
+// order; the work source is also bound by its commit.
+var carriedSources = []string{"work"}
+
+// staleness lists where an environment's spec differs from the profile the
+// seat's current declaration compiles to; empty means it is current.
+func staleness(spec environmentSpec, want agentenv.EnvironmentProfile) []string {
+	var d []string
+	diff := func(field, got, want string) {
+		if got != want {
+			d = append(d, fmt.Sprintf("%s is %q, the declaration says %q", field, got, want))
+		}
+	}
+	diff("seatDeclarationSHA256", spec.SeatDeclarationSHA256, want.SeatDeclarationSHA256)
+	diff("seat", spec.Seat, want.Seat)
+	diff("sourceSHA", spec.SourceSHA, want.SourceSHA)
+	diff("base", spec.Base, want.Base)
+	diff("imageRef", spec.ImageRef, want.ImageRef)
+	diff("imageDigest", spec.ImageDigest, want.ImageDigest)
+	diff("agent", spec.Agent, want.Agent)
+	diff("agentVersion", spec.AgentVersion, want.AgentVersion)
+	diff("agentArchiveSHA256", spec.CodexArchiveSHA256, want.AgentArchiveSHA256)
+	diff("allowedHosts", strings.Join(spec.AllowedHosts, ","), strings.Join(want.AllowedHosts, ","))
+	diff("controllerCapabilities", strings.Join(spec.ControllerCapabilities, ","), strings.Join(want.ControllerCapabilities, ","))
+	return d
+}
+
 type environmentRecord struct {
 	Environment struct {
-		Phase string `json:"phase"`
-		Spec  struct {
-			Profile     string `json:"profile"`
-			Session     string `json:"session"`
-			Incarnation string `json:"incarnation"`
-		} `json:"spec"`
+		Phase string          `json:"phase"`
+		Spec  environmentSpec `json:"spec"`
 	} `json:"environment"`
+}
+
+// environmentSpec is what `seat up` reads of an environment's spec: its
+// identity, and the inputs it was made from, which must be the ones the
+// seat's current declaration compiles to.
+type environmentSpec struct {
+	Profile                string   `json:"profile"`
+	Session                string   `json:"session"`
+	Incarnation            string   `json:"incarnation"`
+	Seat                   string   `json:"seat"`
+	SeatDeclarationSHA256  string   `json:"seatDeclarationSHA256"`
+	SourceSHA              string   `json:"sourceSHA"`
+	Base                   string   `json:"base"`
+	ImageRef               string   `json:"imageRef"`
+	ImageDigest            string   `json:"imageDigest"`
+	Agent                  string   `json:"agent"`
+	AgentVersion           string   `json:"agentVersion"`
+	CodexArchiveSHA256     string   `json:"codexArchiveSHA256"`
+	AllowedHosts           []string `json:"allowedHosts"`
+	ControllerCapabilities []string `json:"controllerCapabilities"`
 }
 
 // environment reads the seat's environment; ok is false when it doesn't
@@ -175,7 +239,8 @@ func seatUpCmd(args []string, stdout, stderr io.Writer) int {
 	root := seatHostRoot(fs)
 	records := fs.String("records", "", "the owner's private (0700) operation records directory")
 	here := fs.String("here", "", "this host's location name, as the seat's location names it (for example pomar:macbook)")
-	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *records == "" || *here == "" {
+	classes := fs.String("classes", "", "the owner's seat class catalogue (pomar.seat-classes/v1), as the seat's profile was compiled against")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 1 || *records == "" || *here == "" || *classes == "" {
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
@@ -194,6 +259,11 @@ func seatUpCmd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	case !r.Seat.LocationCurrent:
 		fmt.Fprintf(stderr, "pomar seat up: %s's location names an older declaration; move it to the current one first\n", seat)
+		return 1
+	}
+	want, err := seatProfile(r, *classes, "")
+	if err != nil {
+		fmt.Fprintln(stderr, "pomar seat up:", err)
 		return 1
 	}
 	id := seatEnvironment(seat)
@@ -215,6 +285,14 @@ func seatUpCmd(args []string, stdout, stderr io.Writer) int {
 	}
 	if e.Environment.Spec.Profile != id {
 		fmt.Fprintf(stderr, "pomar seat up: environment %s exists with profile %q, not the seat's; inspect it\n", id, e.Environment.Spec.Profile)
+		return 1
+	}
+	// An environment made from another declaration, source or catalogue is
+	// never reported as the seat, nor started: it is left as it is, its
+	// incarnation kept, for the owner to stop and retire before a new one.
+	if d := staleness(e.Environment.Spec, want); len(d) > 0 {
+		fmt.Fprintf(stderr, "pomar seat up: environment %s (%s, incarnation %s) isn't the seat's current declaration; it is left as it is:\n  %s\nRecompile the profile (pomar seat profile), update the host's configuration, and retire this environment first.\n",
+			id, e.Environment.Phase, e.Environment.Spec.Incarnation, strings.Join(d, "\n  "))
 		return 1
 	}
 	if e.Environment.Phase == "running" {
