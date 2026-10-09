@@ -46,6 +46,11 @@ const usage = `usage:
                                     one seat's declaration and location, as JSON
   pomar seat attach [-root DIR] -environment ENV
                                     the seat environment's interactive terminal; Ctrl-b d detaches
+  pomar seat profile [-root DIR] -classes FILE -source-bundle FILE SEAT
+                                    the seat's compiled profile, for the host's configuration
+  pomar seat up [-root DIR] -records REC -here WHERE SEAT
+                                    create and start the seat's environment where its location says
+  pomar seat stop [-root DIR] -records REC SEAT
   pomar venue status [-root DIR]    fill, open ledgered objects, unaccounted entries (exit 3)
   pomar venue init [-root DIR]      create the structure directories (idempotent)
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
