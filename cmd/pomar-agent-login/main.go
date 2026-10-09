@@ -21,7 +21,11 @@
 // overwritten. Rerunning with the same ID reads the retained reply back
 // (reported as cached) and never signs in again; -reconcile inspects an
 // uncertain original afresh, and -retry-known-unaccepted resends the same
-// request only when that inspection proves it was never accepted.
+// request only when that inspection proves it was never accepted. Each
+// operation's identity (action, environment, session, incarnation and login
+// ID, no secret) is sealed once in REC/.bindings and compared on every rerun,
+// and a rerun recovers its retained reply from it even when the environment
+// can't be reached now; an operation with no record dispatches nothing then.
 //
 // The JSON report keeps the dimensions apart: transport_outcome,
 // operation_state, response_available and retained_response_available,
@@ -258,19 +262,21 @@ func run(args []string, stdin *os.File, stdout, stderr io.Writer) error {
 	}
 	c := newClient(filepath.Join(*root, "host.sock"), *environment)
 	s, err := c.session()
+	if scriptedMode {
+		// The original operation's sealed binding comes first: an owner that
+		// can't be reached now must not hide an already retained reply.
+		return scripted(c, s, err, ownerclient.Config{
+			Root: *root, Records: *records, Environment: *environment, OperationID: *opID,
+			Reconcile: *reconcile, RetryKnownUnaccepted: *retry,
+		}, *complete, stdin, stdout, stderr)
+	}
 	if err != nil {
 		return err
 	}
 	inc := s.Session.Incarnation
-	switch {
-	case *status:
+	if *status {
 		fmt.Fprintf(stdout, "authenticated: %v\n", s.Authenticated)
 		return nil
-	case scriptedMode:
-		return scripted(c, s, ownerclient.Config{
-			Root: *root, Records: *records, Environment: *environment, OperationID: *opID,
-			Session: s.Session.ID, Incarnation: inc, Reconcile: *reconcile, RetryKnownUnaccepted: *retry,
-		}, *complete, stdin, stdout, stderr)
 	}
 	id, url, err := c.start(inc, operationID("login"))
 	if err != nil {
@@ -320,11 +326,16 @@ type result struct {
 // read back from the journal, never recreated. Success needs that retained
 // reply: an authorization URL, or a completion whose own success is true;
 // the current session is reported separately and never stands in for it.
-func scripted(c *client, s session, cfg ownerclient.Config, loginID string, stdin *os.File, stdout, stderr io.Writer) error {
+func scripted(c *client, s session, sessionErr error, cfg ownerclient.Config, loginID string, stdin *os.File, stdout, stderr io.Writer) error {
 	cfg.Action = "login"
 	if loginID != "" {
 		cfg.Action = "login-complete"
 	}
+	b, err := sealBinding(cfg, loginID, s, sessionErr)
+	if err != nil {
+		return err
+	}
+	cfg.Session, cfg.Incarnation = b.Session, b.Incarnation
 	request, err := sealRequest(cfg, loginID, stdin, stderr)
 	if err != nil {
 		return err
@@ -418,4 +429,62 @@ func sealRequest(cfg ownerclient.Config, loginID string, stdin *os.File, stderr 
 		return "", err
 	}
 	return path, nil
+}
+
+// binding is an operation's original identity, sealed once before its first
+// dispatch and kept apart from the request: the request, and with it a
+// completion's code, is removed once the reply is durable, but the binding
+// stays. It holds no secret.
+type binding struct {
+	Action      string `json:"action"`
+	Environment string `json:"environment"`
+	Session     string `json:"session_id"`
+	Incarnation string `json:"incarnation"`
+	LoginID     string `json:"login_id,omitempty"`
+}
+
+// sealBinding returns the operation's binding from REC/.bindings/OP.json,
+// writing it on the first dispatch from the current session. Every rerun is
+// compared with it, so the same operation ID can't be reread for another
+// login or action, and it supplies the original session and incarnation, so
+// a retained reply is recovered even when the owner can't be reached now.
+func sealBinding(cfg ownerclient.Config, loginID string, s session, sessionErr error) (binding, error) {
+	want := binding{Action: cfg.Action, Environment: cfg.Environment, LoginID: loginID}
+	if err := localclient.PrivateDir(cfg.Records); err != nil {
+		return binding{}, err
+	}
+	dir := filepath.Join(cfg.Records, ".bindings")
+	if err := os.Mkdir(dir, 0o700); err != nil && !os.IsExist(err) {
+		return binding{}, err
+	}
+	if err := localclient.PrivateDir(dir); err != nil {
+		return binding{}, err
+	}
+	path := filepath.Join(dir, cfg.OperationID+".json")
+	if raw, err := localclient.ReadPrivate(path, 64<<10); err == nil {
+		var prior binding
+		if json.Unmarshal(raw, &prior) != nil || prior.Session == "" || prior.Incarnation == "" {
+			return binding{}, errors.New("operation binding unreadable; preserve and inspect")
+		}
+		if prior.Action != want.Action || prior.Environment != want.Environment || prior.LoginID != want.LoginID {
+			return binding{}, ownerclient.ErrConflict
+		}
+		return prior, nil
+	} else if _, e := os.Lstat(path); !os.IsNotExist(e) {
+		return binding{}, errors.New("operation binding unreadable; preserve and inspect")
+	}
+	if _, err := os.Lstat(filepath.Join(cfg.Records, cfg.OperationID)); err == nil {
+		return binding{}, errors.New("operation recorded without its binding; preserve and inspect, and don't reuse its ID")
+	}
+	if sessionErr != nil {
+		return binding{}, fmt.Errorf("the environment can't be reached and this operation has no record, so nothing was dispatched: %w", sessionErr)
+	}
+	want.Session, want.Incarnation = s.Session.ID, s.Session.Incarnation
+	if want.Session == "" || want.Incarnation == "" {
+		return binding{}, errors.New("the environment reported no session or incarnation; nothing was dispatched")
+	}
+	if err := calljournal.Save(path, want); err != nil {
+		return binding{}, err
+	}
+	return want, nil
 }
