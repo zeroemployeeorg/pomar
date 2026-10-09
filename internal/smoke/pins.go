@@ -48,9 +48,17 @@ var CIPackages = []debs.Package{
 
 // SeatPackages carry tmux into a seat's base: the terminal an interactive
 // seat's operator attaches to (POMAR-CC SOW 15 §5, SOW 16 §3). Bookworm's
-// tmux 3.3a-3 and exactly its library dependencies, each fetched from the
-// archive and matched to the arm64 Packages index on 2026-10-09. No
-// maintainer script runs, and no utempter helper is installed or used.
+// tmux 3.3a-3 and the library dependencies its images don't already ship,
+// each fetched from the archive and matched to the arm64 Packages index on
+// 2026-10-09. No maintainer script runs.
+//
+// Every path these packages carry is under /usr. A package with top-level
+// /bin, /sbin, /lib or /lib64 paths would replace a merged-/usr image's
+// links and break the guest: libtinfo6 (./lib/aarch64-linux-gnu/...) did,
+// and is left out, as bookworm images already carry libtinfo6 6.4-4.
+// libutempter0 installs its helper, /usr/lib/aarch64-linux-gnu/utempter/
+// utempter, setgid utmp as Debian ships it; tmux links its library, so it
+// stays, and the helper's reach is the guest's utmp and wtmp files.
 var SeatPackages = []debs.Package{
 	{Name: "tmux", URL: "https://deb.debian.org/debian/pool/main/t/tmux/tmux_3.3a-3_arm64.deb",
 		SHA256: "bbf91233312841253fb0c79c28d28d08680d23056674b4499aac14bd4831ac28"},
@@ -58,6 +66,4 @@ var SeatPackages = []debs.Package{
 		SHA256: "b2ffdb6e02105a89fb1f306a6736be3cd302cdb225dc6d48f2e623baaf123efe"},
 	{Name: "libutempter0", URL: "https://deb.debian.org/debian/pool/main/libu/libutempter/libutempter0_1.2.1-3_arm64.deb",
 		SHA256: "7e637ec93daa487f5729640da48a059f4c960dbf6d56d53a711e3200e0b8b4b7"},
-	{Name: "libtinfo6", URL: "https://deb.debian.org/debian/pool/main/n/ncurses/libtinfo6_6.4-4_arm64.deb",
-		SHA256: "baef0f6776f84c7eed4f1146d6e5774689567dad43216894d41da02e6608e4b3"},
 }
