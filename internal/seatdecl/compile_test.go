@@ -129,3 +129,18 @@ func TestParseClassesRefusesAnIncompleteCatalogue(t *testing.T) {
 		t.Error("unknown field accepted")
 	}
 }
+
+// The catalogue is read as strictly as a declaration: a key given twice is
+// refused, so an agent's qualification can't be shadowed.
+func TestParseClassesRefusesAKeyGivenTwice(t *testing.T) {
+	good, _ := json.Marshal(catalogue("q"))
+	s := string(good)
+	edit := `"interactive_qualified":"q"`
+	if !strings.Contains(s, edit) {
+		t.Fatalf("the fixture has no %s", edit)
+	}
+	raw := strings.Replace(s, edit, `"interactive_qualified":"","interactive_qualified":"q"`, 1)
+	if _, err := ParseClasses([]byte(raw)); err == nil {
+		t.Fatal("a duplicate key was accepted")
+	}
+}

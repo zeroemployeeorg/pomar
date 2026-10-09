@@ -217,3 +217,31 @@ func TestHostsAndPathsAreStrict(t *testing.T) {
 		t.Fatalf("valid hosts refused: %v", err)
 	}
 }
+
+// A key given twice is refused at every level, compared case-folded:
+// encoding/json would keep the last value, so the bytes, and their sha256,
+// could show one value while another validates (ZEO-RT's review of
+// c0121325, SOW 84).
+func TestParseRefusesAKeyGivenTwice(t *testing.T) {
+	good := string(encode(t, valid()))
+	if _, _, err := Parse([]byte(good)); err != nil {
+		t.Fatal(err)
+	}
+	for name, edit := range map[string][2]string{
+		"top level":               {`"seat":"zeocreator"`, `"seat":"zeocreator","seat":"zeocore"`},
+		"top level, other case":   {`"seat":"zeocreator"`, `"seat":"zeocreator","Seat":"zeocore"`},
+		"nested identity":         {`"identity":{"role":`, `"identity":{"role":"master","role":`},
+		"identity permissions":    {`"permissions":{"contents":"write"`, `"permissions":{"contents":"read","contents":"write"`},
+		"permissions, other case": {`"permissions":{"contents":"write"`, `"permissions":{"Contents":"read","contents":"write"`},
+		"inside a source":         {`"role":"work"`, `"role":"work","role":"read_only"`},
+		"a non-ASCII key":         {`"seat":"zeocreator"`, `"seat":"zeocreator","ſeat":"zeocore"`},
+	} {
+		if !strings.Contains(good, edit[0]) {
+			t.Fatalf("%s: the fixture has no %s", name, edit[0])
+		}
+		raw := strings.Replace(good, edit[0], edit[1], 1)
+		if _, _, err := Parse([]byte(raw)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
