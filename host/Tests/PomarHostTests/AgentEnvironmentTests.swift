@@ -140,3 +140,21 @@ import Foundation
     var o = agentOptions(); o.agent = "claude"; o.agentVersion = "2.1.280"
     #expect(AgentEnvironment.brokerArguments(o) == codex + ["-actor", "claude", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", "2.1.280"])
 }
+
+// A seat profile's environment runs the interactive seat, not the headless
+// actor: Claude Code only, a valid seat name, no controller capabilities
+// and no qualification fixture.
+@Test func aSeatRunsTheInteractiveSeat() {
+    var o = agentOptions(); o.agent = "claude"; o.agentVersion = "2.1.280"; o.seat = "zeocreator"
+    #expect(AgentEnvironment.valid(o))
+    let codex = AgentEnvironment.brokerArguments(agentOptions())
+    #expect(AgentEnvironment.brokerArguments(o) == codex + ["-actor", "seat", "-seat", "zeocreator", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", "2.1.280"])
+    var codexSeat = agentOptions(); codexSeat.seat = "zeocreator"
+    #expect(!AgentEnvironment.valid(codexSeat))
+    for bad in ["", "Zeocreator", "1seat", "zeo creator", "zeo/../x", String(repeating: "a", count: 64)] {
+        var b = o; b.seat = bad
+        #expect(!AgentEnvironment.valid(b), "\(bad)")
+    }
+    var withController = o; withController.controllerCapabilities = ["inbox"]
+    #expect(!AgentEnvironment.valid(withController))
+}

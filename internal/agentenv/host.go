@@ -61,6 +61,11 @@ type HostConfig struct {
 	// SeatRoot is the owner's private directory of seat declarations and
 	// locations (internal/seatapi); empty serves no seat routes.
 	SeatRoot string `json:"seatRoot,omitempty"`
+
+	// Seat reaches a VM spec only from a profile that names one: the guest
+	// then runs the interactive seat (pomar-agent-guest -actor seat), not a
+	// headless actor. The owner's top-level configuration may not set it.
+	Seat string `json:"seat,omitempty"`
 }
 
 // EnvironmentProfile selects project inputs supplied by the service owner.
@@ -84,6 +89,10 @@ type EnvironmentProfile struct {
 	// into each new environment's guest before its agent starts.
 	Qualification        bool                  `json:"qualification,omitempty"`
 	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
+
+	// Seat makes this an interactive seat's profile (POMAR-CC SOW 15 §5): a
+	// Claude Code agent with no controller capabilities, run as the seat.
+	Seat string `json:"seat,omitempty"`
 }
 
 var agentVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,3}$`)
@@ -135,6 +144,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 		c.CodexArchive, c.CodexArchiveSHA256 = p.AgentArchive, p.AgentArchiveSHA256
 	}
 	c.QualificationFixture = nil
+	c.Seat = p.Seat
 	if p.Qualification && p.QualificationFixture != nil {
 		f := *p.QualificationFixture
 		c.QualificationFixture = &f
@@ -230,6 +240,9 @@ func OpenHost(config HostConfig) (*Host, error) {
 	if err := ValidateAgent(config); err != nil {
 		return nil, err
 	}
+	if config.Seat != "" {
+		return nil, errors.New("a seat belongs to a seat profile, not the host configuration")
+	}
 	if config.QualificationFixture != nil {
 		return nil, errors.New("a qualification fixture belongs to a qualification profile, not the host configuration")
 	}
@@ -253,6 +266,9 @@ func OpenHost(config HostConfig) (*Host, error) {
 		effective.ControllerCapabilities = p.ControllerCapabilities
 		if p.Agent != "" {
 			effective.Agent, effective.AgentVersion = p.Agent, p.AgentVersion
+		}
+		if p.Seat != "" && (!seatProfileName.MatchString(p.Seat) || effective.Agent != "claude" || len(p.ControllerCapabilities) > 0 || p.Qualification) {
+			return nil, fmt.Errorf("profile %s: a seat profile names a seat, runs Claude Code, and has no controller capabilities or qualification fixture", name)
 		}
 		if err := ValidateAgent(effective); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", name, err)
@@ -878,3 +894,6 @@ func ReadHostConfig(path string) (HostConfig, error) {
 }
 
 func (h *Host) String() string { return fmt.Sprintf("agent development host %s", h.config.Root) }
+
+// seatProfileName is a seat's name, as seatdecl declares it.
+var seatProfileName = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
