@@ -158,6 +158,10 @@ func TestValidateAcceptsTheAllowedShapes(t *testing.T) {
 		"a host-only case":   func(d *Declaration) { d.HostOnly = []HostOnly{{What: "three Keychain tests", Route: "stays-on-host"}} },
 		"no allowed hosts":   func(d *Declaration) { d.Network.AllowedHosts = nil },
 		"a labelled account": func(d *Declaration) { d.Provider.Account = "claude-max-2" },
+		"no records source (DESIGN-01)": func(d *Declaration) {
+			d.Sources = append(d.Sources[:1], d.Sources[2:]...)
+			d.Identity.Forks, d.Identity.Push = []string{"architect/zeocreator"}, []string{"refs/heads/zeocreator/*"}
+		},
 	}
 	for name, mutate := range cases {
 		d := valid()

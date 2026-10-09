@@ -49,8 +49,9 @@ type Declaration struct {
 }
 
 // Source is one repository the seat's workspace is built from, at a full
-// pin. A writable source (the work or records lane) is cloned and pushed on
-// its fork; a read-only one is owner-supplied data (SOW 16 §2).
+// pin. A writable source (the work lane, and the records lane if there is
+// one) is cloned and pushed on its fork; a read-only one is owner-supplied
+// data (SOW 16 §2).
 type Source struct {
 	Role        string `json:"role"`
 	Repository  string `json:"repository"`
@@ -229,8 +230,10 @@ func (d Declaration) validateSources() error {
 		}
 		dests = append(dests, dest)
 	}
-	if count["work"] != 1 || count["records"] != 1 {
-		return errors.New("a seat has exactly one work and one records source")
+	// A records source is optional: under org-memory DESIGN-01 a seat submits
+	// its records through Messenger rather than carrying a records lane.
+	if count["work"] != 1 || count["records"] > 1 {
+		return errors.New("a seat has exactly one work source and at most one records source")
 	}
 	for i, a := range dests {
 		for _, b := range dests[i+1:] {
