@@ -178,3 +178,76 @@ func TestRequestsAreStrict(t *testing.T) {
 		t.Fatal("a non-private root was served")
 	}
 }
+
+// The POMAR Codex's counterexamples (PR93 review at 92e7f77), as given.
+func TestOwnerReadRoutesDoNotInitializeStore(t *testing.T) {
+	s := store(t)
+	before, err := os.ReadDir(s.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before) != 0 {
+		t.Fatal("fixture not empty")
+	}
+	if code, _ := call(t, s, "GET", "/v1/seats", nil); code != 200 {
+		t.Fatalf("GET %d", code)
+	}
+	after, err := os.ReadDir(s.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("read-only GET created %d store entries", len(after))
+	}
+}
+
+func TestOwnerDeclareRefusesSymlinkedEmptySeatDirectory(t *testing.T) {
+	s := store(t)
+	for _, n := range []string{"declarations", "locations"} {
+		if err := os.Mkdir(filepath.Join(s.Root, n), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	outside := filepath.Join(s.Root, "owned-outside-fixture")
+	if err := os.Mkdir(outside, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(s.Root, "declarations", "zeocreator")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Declare("zeocreator", "", declaration("seat-linux-arm64-v1")); err == nil {
+		t.Fatal("symlinked empty seat dir accepted; declaration was written outside declarations")
+	}
+	files, err := os.ReadDir(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Fatal("refusal still wrote outside declaration directory")
+	}
+}
+
+// The same boundary for the other reads and the location record.
+func TestReadsCreateNothingAndLinkedSeatDirectoriesAreRefused(t *testing.T) {
+	s := store(t)
+	for _, path := range []string{"/v1/seats/zeocreator"} {
+		call(t, s, "GET", path, nil)
+	}
+	if entries, _ := os.ReadDir(s.Root); len(entries) != 0 {
+		t.Fatalf("a read of one seat created %d entries", len(entries))
+	}
+	_, d := declare(t, s, "", declaration("seat-linux-arm64-v1"))
+	outside := filepath.Join(s.Root, "outside-locations")
+	os.Mkdir(outside, 0o700)
+	os.Symlink(outside, filepath.Join(s.Root, "locations", "zeocreator"))
+	if code, _ := call(t, s, "GET", "/v1/seats/zeocreator", nil); code == 200 {
+		t.Fatal("a linked location directory was read")
+	}
+	code, _ := call(t, s, "POST", "/v1/seats/zeocreator/location", map[string]any{"expected_revision": 0, "location": map[string]string{"where": "mac-mini-naked", "declaration_sha256": d["declaration_sha256"].(string)}})
+	if code == 200 {
+		t.Fatal("a location was written through a linked directory")
+	}
+	if files, _ := os.ReadDir(outside); len(files) != 0 {
+		t.Fatal("a location was written outside the store")
+	}
+}

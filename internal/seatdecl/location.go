@@ -53,10 +53,16 @@ func (l Locations) Current(seat string) (Location, bool, error) {
 		return Location{}, false, err
 	}
 	dir := filepath.Join(l.Dir, seat)
-	entries, err := os.ReadDir(dir)
-	if os.IsNotExist(err) {
+	if _, err := os.Lstat(dir); os.IsNotExist(err) {
 		return Location{}, false, nil
-	} else if err != nil {
+	}
+	// The seat's directory is checked before it is read: a link or an open
+	// mode is refused, never followed.
+	if err := localclient.PrivateDir(dir); err != nil {
+		return Location{}, false, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
 		return Location{}, false, err
 	}
 	var latest string
