@@ -41,14 +41,22 @@ func WriteFrame(w io.Writer, kind byte, payload []byte) error {
 	var head [3]byte
 	head[0] = kind
 	binary.BigEndian.PutUint16(head[1:], uint16(len(payload)))
-	if _, err := w.Write(head[:]); err != nil {
+	if n, err := w.Write(head[:]); err != nil || n != len(head) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
 		return err
 	}
 	if len(payload) == 0 {
 		return nil // a zero-length write can block a synchronous stream forever
 	}
-	_, err := w.Write(payload)
-	return err
+	if n, err := w.Write(payload); err != nil || n != len(payload) {
+		if err == nil {
+			err = io.ErrShortWrite
+		}
+		return err
+	}
+	return nil
 }
 
 // ReadFrame reads one frame, refusing an unknown type, an oversized or
