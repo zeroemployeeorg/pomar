@@ -2,6 +2,7 @@ package seatterm
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -37,6 +38,12 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 		return err
 	}
 	defer master.Close()
+	// Every side of the teardown is bounded by a deadline, so a stream or
+	// terminal that can't take one is refused before anything starts.
+	var zero time.Time
+	if err := errors.Join(stream.SetReadDeadline(zero), stream.SetWriteDeadline(zero), master.SetReadDeadline(zero), master.SetWriteDeadline(zero)); err != nil {
+		return fmt.Errorf("attach needs deadlines on its stream and terminal: %w", err)
+	}
 	slave, err := os.OpenFile(tty, os.O_RDWR|syscall.O_NOCTTY, 0)
 	if err == nil {
 		// The size is set on the terminal side: darwin refuses it on the
@@ -88,8 +95,27 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 		}
 	}()
 	clientDone := make(chan struct{})
+	var inputErr error
+	input := make(chan []byte, InputQueue)
+	inputDone := make(chan struct{})
 	go func() {
+		// The input pump: the terminal takes keys at its own pace, and never
+		// holds up the stream's reader below.
+		defer close(inputDone)
+		broken := false
+		for p := range input {
+			if !broken {
+				if _, err := master.Write(p); err != nil {
+					broken = true // released at teardown, or the terminal side is gone
+				}
+			}
+		}
+	}()
+	go func() {
+		// The stream's reader never blocks on the terminal, so a disconnect is
+		// always seen: keys queue, bounded, and a full queue ends the attach.
 		defer close(clientDone)
+		defer close(input)
 		for {
 			kind, payload, err := ReadFrame(stream)
 			if err != nil || kind == Close {
@@ -97,7 +123,10 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 			}
 			switch kind {
 			case Data:
-				if _, err := master.Write(payload); err != nil {
+				select {
+				case input <- payload:
+				default:
+					inputErr = ErrInputStalled
 					return
 				}
 			case Resize:
@@ -109,10 +138,10 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 	select {
 	case err = <-exited:
 	case <-clientDone:
-		// The operator left, or sent something malformed: the stream takes no
-		// more (so a pending write is released and the PTY keeps draining),
-		// then hang up the attach client's own group only, and give it a
-		// moment before killing it.
+		// The operator left, or sent something malformed, or the terminal
+		// stopped taking keys: the stream takes no more (so a pending write is
+		// released and the PTY keeps draining), then hang up the attach
+		// client's own group only, and give it a moment before killing it.
 		stream.SetWriteDeadline(time.Now())
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
 		select {
@@ -125,25 +154,57 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 	// The teardown is bounded on every side. The remaining screen bytes and
 	// the close go out within DrainTimeout: the PTY read and the stream
 	// write both have deadlines, so a peer that stopped reading can't hold
-	// Attach. Then the stream's reader is released.
+	// Attach. Then the stream's reader and the input pump are released. Each
+	// wait also has its own limit; one that passes it is an error, and the
+	// caller's close of the stream releases what is left.
 	end := time.Now().Add(DrainTimeout)
-	master.SetReadDeadline(end)
-	stream.SetWriteDeadline(end)
-	<-screenDone
+	terr := errors.Join(master.SetReadDeadline(end), stream.SetWriteDeadline(end))
+	if !waitUntil(screenDone, end.Add(time.Second)) {
+		terr = errors.Join(terr, errors.New("the screen wasn't released"))
+	}
 	send(Close, nil)
-	stream.SetReadDeadline(time.Now())
-	<-clientDone
+	terr = errors.Join(terr, stream.SetReadDeadline(time.Now()), master.SetWriteDeadline(time.Now()))
+	if !waitUntil(clientDone, time.Now().Add(DrainTimeout)) || !waitUntil(inputDone, time.Now().Add(DrainTimeout)) {
+		terr = errors.Join(terr, errors.New("the stream's reader wasn't released"))
+	}
+	if terr != nil {
+		return errors.Join(ErrTeardown, terr)
+	}
+	if inputErr != nil {
+		return inputErr
+	}
 	return err
+}
+
+func waitUntil(done <-chan struct{}, deadline time.Time) bool {
+	select {
+	case <-done:
+		return true
+	case <-time.After(time.Until(deadline)):
+		return false
+	}
 }
 
 // DrainTimeout bounds an attach's teardown: its last screen bytes and its
 // close frame.
 const DrainTimeout = 2 * time.Second
 
+// InputQueue bounds the keys queued for a terminal that is slow to take
+// them, in frames of at most MaxData: 256 KiB.
+const InputQueue = 8
+
 // Stream is what an attach is carried over: a connection whose reads and
-// writes can be bounded, as a net.Conn's can.
+// writes can be bounded, as a net.Conn's can. Attach refuses a stream whose
+// deadlines can't be set, before it starts anything.
 type Stream interface {
 	io.ReadWriter
 	SetReadDeadline(time.Time) error
 	SetWriteDeadline(time.Time) error
 }
+
+// ErrInputStalled ends an attach whose terminal stopped taking its input.
+var ErrInputStalled = errors.New("the terminal stopped taking its input")
+
+// ErrTeardown is returned when a side of the teardown couldn't be bounded;
+// the caller must close the stream, which releases it.
+var ErrTeardown = errors.New("the attach's teardown wasn't bounded")

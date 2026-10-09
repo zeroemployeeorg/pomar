@@ -2,6 +2,7 @@ package seatterm
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -228,3 +229,91 @@ func (shortWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// A terminal that stops reading its input can't hold Attach: the stream is
+// still read, so the operator's disconnect is seen and the attach ends,
+// bounded, though the PTY's input is full (the POMAR Codex's review of #106).
+func TestANonConsumingTerminalCantHoldAttach(t *testing.T) {
+	guest, near := net.Pipe()
+	defer guest.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- Attach(guest, Command{Path: "/bin/sh", Args: []string{"-c", "stty raw -echo; echo ready; exec sleep 600"}, UID: -1, GID: -1}, 80, 24)
+	}()
+	go func() { // the screen is read throughout
+		for {
+			if _, _, err := ReadFrame(near); err != nil {
+				return
+			}
+		}
+	}()
+	time.Sleep(300 * time.Millisecond)
+	keys := bytes.Repeat([]byte("k"), MaxData)
+	near.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	for i := 0; i < 4; i++ { // more than the PTY's input holds, less than the queue
+		if err := WriteFrame(near, Data, keys); err != nil {
+			t.Fatalf("the input frames weren't read: %v", err)
+		}
+	}
+	near.Close()
+	select {
+	case <-done:
+	case <-time.After(DrainTimeout + 8*time.Second):
+		t.Fatal("Attach was held by a terminal that stopped reading its input")
+	}
+}
+
+// Input the terminal never takes is bounded too: once the queue is full the
+// attach ends with ErrInputStalled, rather than reading without limit or
+// stopping reading the stream.
+func TestUnconsumedInputEndsTheAttach(t *testing.T) {
+	guest, near := net.Pipe()
+	defer near.Close()
+	defer guest.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- Attach(guest, Command{Path: "/bin/sh", Args: []string{"-c", "stty raw -echo; exec sleep 600"}, UID: -1, GID: -1}, 80, 24)
+	}()
+	go func() {
+		for {
+			if _, _, err := ReadFrame(near); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		keys := bytes.Repeat([]byte("k"), MaxData)
+		for WriteFrame(near, Data, keys) == nil {
+		}
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrInputStalled) {
+			t.Fatalf("Attach ended with %v, want ErrInputStalled", err)
+		}
+	case <-time.After(DrainTimeout + 8*time.Second):
+		t.Fatal("unconsumed input held Attach")
+	}
+}
+
+// A stream whose deadlines can't be set is refused before anything starts:
+// without them no side of the teardown is bounded.
+func TestAStreamWithoutDeadlinesIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "ran")
+	err := Attach(noDeadlines{}, Command{Path: "/bin/sh", Args: []string{"-c", "touch " + marker}, UID: -1, GID: -1}, 80, 24)
+	if err == nil {
+		t.Fatal("a stream without deadlines was accepted")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, serr := os.Stat(marker); serr == nil {
+		t.Fatal("the command ran on a refused stream")
+	}
+}
+
+type noDeadlines struct{}
+
+func (noDeadlines) Read([]byte) (int, error)         { select {} }
+func (noDeadlines) Write(p []byte) (int, error)      { return len(p), nil }
+func (noDeadlines) SetReadDeadline(time.Time) error  { return errors.New("no deadlines") }
+func (noDeadlines) SetWriteDeadline(time.Time) error { return errors.New("no deadlines") }
