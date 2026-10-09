@@ -60,32 +60,40 @@ func ReadPrivate(path string, limit int64) ([]byte, error) {
 	return b[:n], nil
 }
 
+// Dial connects to an owner-only socket with the same checks New applies:
+// the endpoint's custody before connecting, then the kernel peer UID and
+// the endpoint's identity before anything is sent. A raw stream, such as a
+// seat's terminal, uses it directly.
+func Dial(ctx context.Context, socket string, uid int) (net.Conn, error) {
+	fi, err := os.Lstat(socket)
+	parent, pe := os.Lstat(filepath.Dir(socket))
+	resolved, re := filepath.EvalSymlinks(filepath.Dir(socket))
+	if err != nil || pe != nil || re != nil || resolved != filepath.Dir(socket) {
+		return nil, errors.New("socket custody unavailable")
+	}
+	s, ok := fi.Sys().(*syscall.Stat_t)
+	ps, pok := parent.Sys().(*syscall.Stat_t)
+	if !ok || !pok || fi.Mode()&os.ModeSocket == 0 || int(s.Uid) != uid || fi.Mode().Perm()&0007 != 0 || !parent.IsDir() || int(ps.Uid) != uid || parent.Mode().Perm()&0022 != 0 {
+		return nil, errors.New("socket ownership or privacy refused")
+	}
+	c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", socket)
+	if err != nil {
+		return nil, errors.New("owner socket connection failed")
+	}
+	actual, err := peerUID(c)
+	after, ae := os.Lstat(socket)
+	if err != nil || actual != uint32(uid) || ae != nil || !os.SameFile(fi, after) {
+		c.Close()
+		return nil, errors.New("kernel socket peer or endpoint identity refused")
+	}
+	return c, nil
+}
+
 // New checks the endpoint before each connection, verifies the kernel peer UID
 // before sending HTTP, and refuses redirects and proxy/environment routing.
 func New(socket string, uid int) *http.Client {
 	transport := &http.Transport{MaxResponseHeaderBytes: 32 << 10, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		fi, err := os.Lstat(socket)
-		parent, pe := os.Lstat(filepath.Dir(socket))
-		resolved, re := filepath.EvalSymlinks(filepath.Dir(socket))
-		if err != nil || pe != nil || re != nil || resolved != filepath.Dir(socket) {
-			return nil, errors.New("socket custody unavailable")
-		}
-		s, ok := fi.Sys().(*syscall.Stat_t)
-		ps, pok := parent.Sys().(*syscall.Stat_t)
-		if !ok || !pok || fi.Mode()&os.ModeSocket == 0 || int(s.Uid) != uid || fi.Mode().Perm()&0007 != 0 || !parent.IsDir() || int(ps.Uid) != uid || parent.Mode().Perm()&0022 != 0 {
-			return nil, errors.New("socket ownership or privacy refused")
-		}
-		c, err := (&net.Dialer{Timeout: 5 * time.Second}).DialContext(ctx, "unix", socket)
-		if err != nil {
-			return nil, errors.New("owner socket connection failed")
-		}
-		actual, err := peerUID(c)
-		after, ae := os.Lstat(socket)
-		if err != nil || actual != uint32(uid) || ae != nil || !os.SameFile(fi, after) {
-			c.Close()
-			return nil, errors.New("kernel socket peer or endpoint identity refused")
-		}
-		return c, nil
+		return Dial(ctx, socket, uid)
 	}}
 	return &http.Client{Transport: transport, Timeout: 150 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 }
