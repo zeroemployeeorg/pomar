@@ -44,16 +44,42 @@ type Declared struct {
 
 func (s Store) dir(seat string) string { return filepath.Join(s.Root, "declarations", seat) }
 
-func (s Store) private() error {
+// checkDir checks one of the store's directories: owner-private and not a
+// link. A missing directory is created only when create is set; otherwise
+// it is reported absent, and nothing is written.
+func checkDir(p string, create bool) (present bool, err error) {
+	if create {
+		if err := os.Mkdir(p, 0o700); err != nil && !os.IsExist(err) {
+			return false, err
+		}
+	} else if _, err := os.Lstat(p); os.IsNotExist(err) {
+		return false, nil
+	}
+	if err := localclient.PrivateDir(p); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// readable checks the store for a read: it never creates anything.
+func (s Store) readable() (declarations, locations bool, err error) {
+	if err := localclient.PrivateDir(s.Root); err != nil {
+		return false, false, err
+	}
+	if declarations, err = checkDir(filepath.Join(s.Root, "declarations"), false); err != nil {
+		return false, false, err
+	}
+	locations, err = checkDir(filepath.Join(s.Root, "locations"), false)
+	return declarations, locations, err
+}
+
+// writable prepares the store for a write.
+func (s Store) writable() error {
 	if err := localclient.PrivateDir(s.Root); err != nil {
 		return err
 	}
 	for _, d := range []string{"declarations", "locations"} {
-		p := filepath.Join(s.Root, d)
-		if err := os.Mkdir(p, 0o700); err != nil && !os.IsExist(err) {
-			return err
-		}
-		if err := localclient.PrivateDir(p); err != nil {
+		if _, err := checkDir(filepath.Join(s.Root, d), true); err != nil {
 			return err
 		}
 	}
@@ -65,13 +91,18 @@ func (s Store) Current(seat string) (Declared, bool, error) {
 	if !seatName.MatchString(seat) {
 		return Declared{}, false, errors.New("invalid seat name")
 	}
-	if err := s.private(); err != nil {
+	declarations, _, err := s.readable()
+	if err != nil || !declarations {
+		return Declared{}, false, err
+	}
+	// The seat's own directory is checked before it is read, even when
+	// empty: a link or an open mode is refused, never followed.
+	present, err := checkDir(s.dir(seat), false)
+	if err != nil || !present {
 		return Declared{}, false, err
 	}
 	entries, err := os.ReadDir(s.dir(seat))
-	if os.IsNotExist(err) {
-		return Declared{}, false, nil
-	} else if err != nil {
+	if err != nil {
 		return Declared{}, false, err
 	}
 	n := 0
@@ -116,7 +147,12 @@ func (s Store) Declare(seat, expected string, raw []byte) (Declared, error) {
 	if ok && cur.SHA256 == sum {
 		return cur, nil // the same bytes again: no new revision
 	}
-	if err := os.Mkdir(s.dir(seat), 0o700); err != nil && !os.IsExist(err) {
+	if err := s.writable(); err != nil {
+		return Declared{}, err
+	}
+	// Created or found, the seat's directory must be private and not a
+	// link before anything is written into it.
+	if _, err := checkDir(s.dir(seat), true); err != nil {
 		return Declared{}, err
 	}
 	next := cur.Revision + 1
@@ -164,6 +200,13 @@ func (s Store) report(seat string) (Seat, bool, error) {
 		return Seat{}, ok, err
 	}
 	r := Seat{Seat: seat, DeclarationRevision: d.Revision, DeclarationSHA256: d.SHA256, Role: d.Body.Identity.Role, ProviderAccount: d.Body.Provider.Account}
+	_, locations, err := s.readable()
+	if err != nil {
+		return Seat{}, false, err
+	}
+	if !locations {
+		return r, true, nil
+	}
 	loc, has, err := s.locations().Current(seat)
 	if err != nil {
 		return Seat{}, false, err
@@ -177,14 +220,18 @@ func (s Store) report(seat string) (Seat, bool, error) {
 
 // List reports every declared seat.
 func (s Store) List() ([]Seat, error) {
-	if err := s.private(); err != nil {
+	declarations, _, err := s.readable()
+	if err != nil {
 		return nil, err
+	}
+	out := []Seat{}
+	if !declarations {
+		return out, nil
 	}
 	entries, err := os.ReadDir(filepath.Join(s.Root, "declarations"))
 	if err != nil {
 		return nil, err
 	}
-	out := []Seat{}
 	for _, e := range entries {
 		if !e.IsDir() || !seatName.MatchString(e.Name()) {
 			return nil, fmt.Errorf("stray entry %q in the declarations; inspect", e.Name())
@@ -267,6 +314,10 @@ func (s Store) Handler() http.Handler {
 		}
 		if req.Next.DeclarationSHA256 != d.SHA256 {
 			respond(w, 409, map[string]string{"error": "the location must name the seat's current declaration"})
+			return
+		}
+		if err := s.writable(); err != nil {
+			respond(w, 500, map[string]string{"error": err.Error()})
 			return
 		}
 		loc, err := s.locations().Move(seat, req.Expected, req.Next)
