@@ -69,7 +69,10 @@ func TestTheSeatImageCarriesTmux(t *testing.T) {
 			t.Fatalf("package %s isn't pinned on the archive", p.Name)
 		}
 	}
-	for _, n := range []string{"tmux", "libevent-core-2.1-7", "libutempter0", "libtinfo6"} {
+	for _, n := range []string{"tmux", "libevent-core-2.1-7", "libutempter0"} {
+		if names["libtinfo6"] {
+			t.Fatal("libtinfo6 ships /lib paths, which break a merged-/usr image")
+		}
 		if !names[n] {
 			t.Fatalf("%s is missing", n)
 		}
