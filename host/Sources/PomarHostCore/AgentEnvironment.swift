@@ -38,6 +38,9 @@ public enum AgentEnvironment {
         /// An owner-supplied synthetic file for a qualification profile only
         /// (agentenv QualificationFixture), placed once before the agent starts.
         public var qualificationFixture: QualificationFixture? = nil
+        /// An interactive seat's name (agentenv Seat): the guest runs the
+        /// seat (pomar-agent-guest -actor seat), not a headless actor.
+        public var seat: String? = nil
     }
 
     /// The owner's synthetic qualification file: its source inside the host
@@ -96,10 +99,17 @@ public enum AgentEnvironment {
         return data
     }
 
+    /// A seat's name, as seatdecl declares it: a lower-case letter, then up to
+    /// 62 lower-case letters, digits or hyphens.
+    public static func validSeatName(_ s: String) -> Bool {
+        guard let first = s.first, first.isASCII, first.isLowercase, s.count <= 63 else { return false }
+        return s.allSatisfy { $0.isASCII && ($0.isLowercase || $0.isNumber || $0 == "-") }
+    }
+
     /// The agent an environment runs; anything else is refused.
     public static func validAgent(_ o: Options) -> Bool {
         switch o.agent ?? "codex" {
-        case "codex":
+        case "codex" where o.seat == nil:
             return o.agentVersion == nil
         case "claude":
             // A dotted numeric version only. Controller capabilities pass
@@ -108,6 +118,10 @@ public enum AgentEnvironment {
             // (agentenv qualifiedController), and refuses to start otherwise.
             guard let v = o.agentVersion, !v.isEmpty, v.count <= 32,
                   v.allSatisfy({ $0.isASCII && ($0.isNumber || $0 == ".") }), !v.hasPrefix("."), !v.hasSuffix(".") else { return false }
+            if let s = o.seat {
+                // A seat runs no headless bridge: no controller capabilities.
+                guard validSeatName(s), (o.controllerCapabilities ?? []).isEmpty, o.qualificationFixture == nil else { return false }
+            }
             return true
         default:
             return false
@@ -189,7 +203,11 @@ public enum AgentEnvironment {
         var args = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
                     "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
         if o.agent == "claude" {
-            args += ["-actor", "claude", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]
+            if let seat = o.seat {
+                args += ["-actor", "seat", "-seat", seat, "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]
+            } else {
+                args += ["-actor", "claude", "-claude", "/opt/pomar-claude/bin/claude", "-claude-version", o.agentVersion ?? ""]
+            }
         }
         return args
     }
