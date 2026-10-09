@@ -28,10 +28,17 @@ type fakeHost struct {
 
 func lifecycleHost(t *testing.T) (string, seatapi.Store, *fakeHost) {
 	t.Helper()
+	return lifecycleHostAt(t, "pomar:macbook")
+}
+
+// lifecycleHostAt serves the seat routes as a host whose configuration
+// names here as its location ("" names none).
+func lifecycleHostAt(t *testing.T, here string) (string, seatapi.Store, *fakeHost) {
+	t.Helper()
 	root, _ := os.MkdirTemp("/tmp", "seatup")
 	root, _ = filepath.EvalSymlinks(root)
 	t.Cleanup(func() { os.RemoveAll(root) })
-	store := seatapi.Store{Root: filepath.Join(root, "seats")}
+	store := seatapi.Store{Root: filepath.Join(root, "seats"), Here: here}
 	os.Mkdir(store.Root, 0o700)
 	f := &fakeHost{envs: map[string]map[string]any{}, profiles: map[string]map[string]any{}}
 	mux := http.NewServeMux()
@@ -344,4 +351,42 @@ func carryRecords(t *testing.T) {
 	prev := carriedSources
 	carriedSources = []string{"work", "records"}
 	t.Cleanup(func() { carriedSources = prev })
+}
+
+// This host's location is its configuration's statement, never the
+// caller's flag (ZEO-RT's review, SOW 84): a host naming no location starts
+// no seat, a -here that disagrees with the host is refused, and -here may
+// be left out.
+func TestSeatUpTakesThisHostsLocationFromItsConfiguration(t *testing.T) {
+	carryRecords(t)
+	for _, c := range []struct {
+		name, host, flag, want string
+		code                   int
+	}{
+		{"a host naming no location", "", "pomar:macbook", "names no seat location", 1},
+		{"a flag naming the seat's location on another host", "pomar:other", "pomar:macbook", "this host is pomar:other", 1},
+		{"no flag, at the seat's location", "pomar:macbook", "", "", 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root, store, f := lifecycleHostAt(t, c.host)
+			sum := declareSeat(t, store, "2.1.280")
+			locations := seatdecl.Locations{Dir: filepath.Join(store.Root, "locations")}
+			os.Mkdir(locations.Dir, 0o700)
+			locations.Move("zeocreator", 0, seatdecl.Location{Where: "pomar:macbook", DeclarationSHA256: sum})
+			rec, classes := records(t), catalogue(t)
+			installProfile(t, root, classes, f)
+			args := []string{"-root", root, "-records", rec, "-classes", classes}
+			if c.flag != "" {
+				args = append(args, "-here", c.flag)
+			}
+			var out, errb bytes.Buffer
+			code := seatUpCmd(append(args, "zeocreator"), &out, &errb)
+			if code != c.code || !strings.Contains(errb.String(), c.want) {
+				t.Fatalf("%d %s", code, errb.String())
+			}
+			if c.code != 0 && (f.creates != 0 || f.starts != 0) {
+				t.Fatalf("%d creates and %d starts on a refusal", f.creates, f.starts)
+			}
+		})
+	}
 }
