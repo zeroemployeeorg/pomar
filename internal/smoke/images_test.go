@@ -81,3 +81,25 @@ func TestTheSeatImageCarriesTmux(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The qualification seat base is the CI image with its packages plus tmux,
+// distinct from the CI base.
+func TestTheSeatQualificationImageIsTheCIImageWithTmux(t *testing.T) {
+	q, err := GuestImageByName("seat-qualification")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ci, _ := GuestImageByName(DefaultGuestImage)
+	if q.Digest != ci.Digest || q.Arm64 != ci.Arm64 || q.PackageSet() == ci.PackageSet() {
+		t.Fatal("not the CI image with a distinct package set")
+	}
+	names := map[string]bool{}
+	for _, p := range q.Packages {
+		names[p.Name] = true
+	}
+	for _, n := range []string{"jq", "tmux", "libevent-core-2.1-7"} {
+		if !names[n] {
+			t.Fatalf("%s is missing", n)
+		}
+	}
+}

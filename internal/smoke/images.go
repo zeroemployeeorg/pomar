@@ -77,6 +77,12 @@ var GuestImages = []GuestImage{
 		Digest:   "sha256:498c46febe123361a398475cdf47da02426ee1b6d6982ca15f190ac5bcc320bd",
 		Arm64:    "sha256:ab317bddf37bbc3bc03e5f51b40636512b9e2ef1266983791e8e439e24a4d7ae",
 		Packages: SeatPackages},
+	// The CI image with tmux, for qualifying Claude Code in an interactive
+	// seat (POMAR-CC SOW 15 §5.4) on a development host that holds no
+	// runner-tools layout. It is a qualification base only: no seat runs
+	// its work on it.
+	{Name: "seat-qualification", Repo: ImageRepo, Tag: ImageTag, Digest: ImageDigest, Arm64: ImageArm64,
+		Packages: append(append([]debs.Package{}, CIPackages...), SeatPackages...)},
 }
 
 var (
