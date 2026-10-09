@@ -167,3 +167,53 @@ func TestValidateAcceptsTheAllowedShapes(t *testing.T) {
 		}
 	}
 }
+
+// The POMAR Codex's counterexamples (PR89 review at f8ffb220), as given.
+func TestOwnerReviewStrictDeclarationRefusals(t *testing.T) {
+	for name, mutate := range map[string]func(*Declaration){
+		"unallocated ledger role": func(d *Declaration) {
+			d.Identity.Role = "ledger"
+			d.Identity.AppID = 1
+			d.Identity.InstallationID = 2
+			d.Identity.GitAuthor = "unallocated[bot] <1+unallocated[bot]@users.noreply.github.com>"
+		},
+		"newline in allowed DNS name": func(d *Declaration) { d.Network.AllowedHosts = []string{"api.example.com\n"} },
+		"tab in allowed DNS name":     func(d *Declaration) { d.Network.AllowedHosts = []string{"api.example.com\t"} },
+		"parent directory lock path":  func(d *Declaration) { d.Sources[0].Locks[0].Path = ".." },
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := valid()
+			mutate(&d)
+			if _, _, err := Parse(encode(t, d)); err == nil {
+				t.Fatal("invalid declaration was accepted")
+			}
+		})
+	}
+}
+
+// The same boundary, more widely: the DNS grammar and inner paths.
+func TestHostsAndPathsAreStrict(t *testing.T) {
+	for name, mutate := range map[string]func(*Declaration){
+		"a self lock path":       func(d *Declaration) { d.Sources[0].Locks[0].Path = "." },
+		"a NUL in a lock path":   func(d *Declaration) { d.Sources[0].Locks[0].Path = "uv\x00.lock" },
+		"a control in a dest":    func(d *Declaration) { d.Sources[2].Destination = "deps/zeo\x1bcore" },
+		"an empty DNS label":     func(d *Declaration) { d.Network.AllowedHosts = []string{"api..example.com"} },
+		"a trailing dot":         func(d *Declaration) { d.Network.AllowedHosts = []string{"api.example.com."} },
+		"a leading hyphen label": func(d *Declaration) { d.Network.AllowedHosts = []string{"-api.example.com"} },
+		"an underscore":          func(d *Declaration) { d.Network.AllowedHosts = []string{"api_x.example.com"} },
+		"a single label":         func(d *Declaration) { d.Network.AllowedHosts = []string{"localhost"} },
+		"a 64-character label":   func(d *Declaration) { d.Network.AllowedHosts = []string{strings.Repeat("a", 64) + ".com"} },
+		"a non-ASCII host":       func(d *Declaration) { d.Network.AllowedHosts = []string{"api.exämple.com"} },
+	} {
+		d := valid()
+		mutate(&d)
+		if _, _, err := Parse(encode(t, d)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	d := valid()
+	d.Network.AllowedHosts = []string{"api.anthropic.com", "files.pythonhosted.org", "a-b.c-d.example"}
+	if _, _, err := Parse(encode(t, d)); err != nil {
+		t.Fatalf("valid hosts refused: %v", err)
+	}
+}
