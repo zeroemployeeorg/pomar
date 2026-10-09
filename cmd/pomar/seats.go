@@ -109,6 +109,16 @@ func seatsCmd(args []string, stdin io.Reader, interactive bool, stdout, stderr i
 }
 
 func seatCmd(args []string, stdout, stderr io.Writer) int {
+	if len(args) >= 1 {
+		switch args[0] {
+		case "profile":
+			return seatProfileCmd(args[1:], stdout, stderr)
+		case "up":
+			return seatUpCmd(args[1:], stdout, stderr)
+		case "stop":
+			return seatStopCmd(args[1:], stdout, stderr)
+		}
+	}
 	if len(args) >= 1 && args[0] == "attach" {
 		return seatAttach(args[1:], os.Stdin, stdout, stderr)
 	}
