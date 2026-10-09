@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"github.com/zeroemployeeorg/pomar/internal/agentenv"
+	"github.com/zeroemployeeorg/pomar/internal/seatapi"
 )
 
 func main() {
@@ -22,6 +23,11 @@ func main() {
 		host, err = agentenv.OpenHost(config)
 		if err == nil {
 			defer host.Close()
+			if config.SeatRoot != "" {
+				seats := seatapi.Store{Root: config.SeatRoot}.Handler()
+				host.Mount("/v1/seats", seats)
+				host.Mount("/v1/seats/", seats)
+			}
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 			err = host.Serve(ctx)
