@@ -77,9 +77,14 @@ func (m *Manager) mayUse(c caller, name string) bool {
 	if !c.known {
 		return false // fail closed
 	}
+	// Retained attempts can name retired classes (including the legacy ci
+	// default). An absent allow list does not authorise an absent class.
+	if !slices.ContainsFunc(m.cfg.Classes, func(jc JobClass) bool { return jc.Class.Name == name }) {
+		return false
+	}
 	uids, ok := m.cfg.ClassAllow[name]
 	if !ok {
-		return true // no list: only possible with one class, as today
+		return true // configured class; single-class control-socket compatibility
 	}
 	return slices.Contains(uids, c.uid)
 }
