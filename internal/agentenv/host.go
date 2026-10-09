@@ -57,6 +57,10 @@ type HostConfig struct {
 	// QualificationFixture reaches a VM spec only from a profile marked
 	// Qualification; the owner's top-level configuration may not set it.
 	QualificationFixture *QualificationFixture `json:"qualificationFixture,omitempty"`
+
+	// SeatRoot is the owner's private directory of seat declarations and
+	// locations (internal/seatapi); empty serves no seat routes.
+	SeatRoot string `json:"seatRoot,omitempty"`
 }
 
 // EnvironmentProfile selects project inputs supplied by the service owner.
@@ -200,6 +204,10 @@ type Host struct {
 	stopWait  time.Duration
 	probe     func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error)
 	fatal     error
+
+	// mounts are owner routes served beside the environment routes, such as
+	// the seat routes (internal/seatapi), which this package can't import.
+	mounts map[string]http.Handler
 }
 
 var environmentID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
@@ -617,8 +625,24 @@ func (h *Host) stop(e *Environment) error {
 	return errors.New("network revoked but VM execution departure unconfirmed; replacement refused")
 }
 
+// Mount serves an owner handler beside the environment routes, at a
+// pattern the environment routes don't use. Call it before Serve.
+func (h *Host) Mount(pattern string, handler http.Handler) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.mounts == nil {
+		h.mounts = map[string]http.Handler{}
+	}
+	h.mounts[pattern] = handler
+}
+
 func (h *Host) Handler() http.Handler {
 	mux := http.NewServeMux()
+	h.mu.Lock()
+	for pattern, handler := range h.mounts {
+		mux.Handle(pattern, handler)
+	}
+	h.mu.Unlock()
 	mux.HandleFunc("POST /v1/environments/{id}/retire", h.retireHandler)
 	mux.HandleFunc("POST /v1/environments/{id}/reconcile", h.reconcileHandler)
 	mux.HandleFunc("POST /v1/environments/{id}/continuations", h.continuationHandler)
