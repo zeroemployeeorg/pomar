@@ -117,7 +117,9 @@ var (
 	branchName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$`)
 )
 
-var roles = map[string]bool{"master": true, "principal": true, "sparring": true, "steward": true, "ledger": true, NotEstablished: true}
+// roles are R-36c's adopted role list. Nothing is added from a seat's other
+// responsibilities: a new role needs its adoption first.
+var roles = map[string]bool{"master": true, "principal": true, "sparring": true, "steward": true, NotEstablished: true}
 var resumePolicies = map[string]bool{"fresh-from-sow": true, "import-transcript": true}
 var hostRoutes = map[string]bool{"host-act": true, "stays-on-host": true, "after-p6": true}
 
@@ -217,11 +219,11 @@ func (d Declaration) validateSources() error {
 			return errors.New("every source is pinned to a full commit and tree")
 		}
 		dest := s.Destination
-		if dest == "" || path.IsAbs(dest) || path.Clean(dest) != dest || dest == "." || strings.HasPrefix(dest, "../") || dest == ".." {
+		if !innerPath(dest) {
 			return fmt.Errorf("destination %q must be a clean relative path inside the workspace", dest)
 		}
 		for _, l := range s.Locks {
-			if l.Path == "" || path.IsAbs(l.Path) || path.Clean(l.Path) != l.Path || strings.HasPrefix(l.Path, "../") || !digest.MatchString(l.SHA256) {
+			if !innerPath(l.Path) || !digest.MatchString(l.SHA256) {
 				return errors.New("a lock names a clean relative path and its sha256")
 			}
 		}
@@ -236,17 +238,6 @@ func (d Declaration) validateSources() error {
 				return fmt.Errorf("destinations %q and %q overlap", a, b)
 			}
 		}
-	}
-	return nil
-}
-
-func validateHosts(hosts []string) error {
-	seen := map[string]bool{}
-	for _, h := range hosts {
-		if h != strings.ToLower(h) || strings.ContainsAny(h, "/*:@ ") || !strings.Contains(h, ".") || net.ParseIP(h) != nil || seen[h] {
-			return fmt.Errorf("allowed host %q must be an exact, unique, lower-case DNS name", h)
-		}
-		seen[h] = true
 	}
 	return nil
 }
@@ -337,4 +328,36 @@ func pushAllowed(seat, ref string) bool {
 		return true
 	}
 	return false
+}
+
+// dnsName is a fully spelled lower-case DNS name: two or more labels of
+// letters, digits and inner hyphens, at most 253 characters, no trailing
+// dot. Anything else, whitespace and controls included, is refused here,
+// at the declaration's own boundary; the egress check stays independent.
+var dnsName = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+
+func validateHosts(hosts []string) error {
+	seen := map[string]bool{}
+	for _, h := range hosts {
+		if len(h) > 253 || !dnsName.MatchString(h) || net.ParseIP(h) != nil || seen[h] {
+			return fmt.Errorf("allowed host %q must be an exact, unique, lower-case DNS name", h)
+		}
+		seen[h] = true
+	}
+	return nil
+}
+
+// innerPath admits a clean relative path that names something inside its
+// root: never empty, absolute, ".", "..", or reaching above the root, and
+// never carrying a control character or NUL.
+func innerPath(p string) bool {
+	if p == "" || path.IsAbs(p) || path.Clean(p) != p || p == "." || p == ".." || strings.HasPrefix(p, "../") {
+		return false
+	}
+	for _, r := range p {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	return true
 }
