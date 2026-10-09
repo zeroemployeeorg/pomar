@@ -28,7 +28,7 @@ type Command struct {
 // attach client), never anything the command started in another session,
 // such as the tmux server and the actor in it. It returns once the command
 // has exited.
-func Attach(stream io.ReadWriter, c Command, cols, rows uint16) error {
+func Attach(stream Stream, c Command, cols, rows uint16) error {
 	if c.Path == "" || cols < 1 || cols > MaxCols || rows < 1 || rows > MaxRows {
 		return errors.New("attach needs its command and a bounded window size")
 	}
@@ -73,10 +73,14 @@ func Attach(stream io.ReadWriter, c Command, cols, rows uint16) error {
 	go func() {
 		defer close(screenDone)
 		buf := make([]byte, MaxData)
+		// The PTY is always drained, even once the stream can't take more:
+		// a terminal whose output nobody reads keeps its last process from
+		// exiting (darwin waits for pending output on the last close).
+		discard := false
 		for {
 			n, err := master.Read(buf)
-			if n > 0 && send(Data, buf[:n]) != nil {
-				return
+			if n > 0 && !discard && send(Data, buf[:n]) != nil {
+				discard = true
 			}
 			if err != nil {
 				return // EIO once the terminal side has no process left
@@ -104,13 +108,12 @@ func Attach(stream io.ReadWriter, c Command, cols, rows uint16) error {
 
 	select {
 	case err = <-exited:
-		// The remaining screen bytes go out before the close; a platform whose
-		// controlling side never reports the end is bounded by a deadline.
-		master.SetReadDeadline(time.Now().Add(time.Second))
-		<-screenDone
 	case <-clientDone:
-		// The operator left, or sent something malformed: hang up the attach
-		// client's own group only, then give it a moment before killing it.
+		// The operator left, or sent something malformed: the stream takes no
+		// more (so a pending write is released and the PTY keeps draining),
+		// then hang up the attach client's own group only, and give it a
+		// moment before killing it.
+		stream.SetWriteDeadline(time.Now())
 		syscall.Kill(-cmd.Process.Pid, syscall.SIGHUP)
 		select {
 		case err = <-exited:
@@ -119,6 +122,28 @@ func Attach(stream io.ReadWriter, c Command, cols, rows uint16) error {
 			err = <-exited
 		}
 	}
+	// The teardown is bounded on every side. The remaining screen bytes and
+	// the close go out within DrainTimeout: the PTY read and the stream
+	// write both have deadlines, so a peer that stopped reading can't hold
+	// Attach. Then the stream's reader is released.
+	end := time.Now().Add(DrainTimeout)
+	master.SetReadDeadline(end)
+	stream.SetWriteDeadline(end)
+	<-screenDone
 	send(Close, nil)
+	stream.SetReadDeadline(time.Now())
+	<-clientDone
 	return err
+}
+
+// DrainTimeout bounds an attach's teardown: its last screen bytes and its
+// close frame.
+const DrainTimeout = 2 * time.Second
+
+// Stream is what an attach is carried over: a connection whose reads and
+// writes can be bounded, as a net.Conn's can.
+type Stream interface {
+	io.ReadWriter
+	SetReadDeadline(time.Time) error
+	SetWriteDeadline(time.Time) error
 }

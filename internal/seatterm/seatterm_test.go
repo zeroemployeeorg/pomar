@@ -169,7 +169,62 @@ func TestFramesAreBounded(t *testing.T) {
 	if kind, p, err := ReadFrame(&b); err != nil || kind != Resize || len(p) != 4 {
 		t.Fatal(kind, p, err)
 	}
-	if err := Attach(&b, Command{}, 80, 24); err == nil {
+	g, n := net.Pipe()
+	defer g.Close()
+	defer n.Close()
+	if err := Attach(g, Command{}, 80, 24); err == nil {
 		t.Fatal("an attach without a command started")
 	}
+}
+
+// The POMAR Codex's counterexample (PR94 review): a peer that keeps the
+// stream open but never reads can't hold Attach once its command exits.
+func TestAPeerThatStopsReadingCantHoldAttach(t *testing.T) {
+	guest, near := net.Pipe()
+	defer near.Close()
+	defer guest.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- Attach(guest, Command{Path: "/bin/sh", Args: []string{"-c", "printf done"}, UID: -1, GID: -1}, 80, 24)
+	}()
+	select {
+	case <-done:
+	case <-time.After(DrainTimeout + 5*time.Second):
+		t.Fatal("Attach was held by a peer that stopped reading")
+	}
+}
+
+// The same when the peer disconnects mid-output while not reading: the
+// attach client is hung up and Attach returns, bounded.
+func TestASilentPeerDuringOutputCantHoldAttach(t *testing.T) {
+	guest, near := net.Pipe()
+	defer guest.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- Attach(guest, Command{Path: "/bin/sh", Args: []string{"-c", "while :; do echo spam; done"}, UID: -1, GID: -1}, 80, 24)
+	}()
+	time.Sleep(300 * time.Millisecond)
+	WriteFrame(near, Close, nil) // ask to end, then never read the screen
+	select {
+	case <-done:
+	case <-time.After(DrainTimeout + 8*time.Second):
+		t.Fatal("Attach was held by a peer that asked to close but never read")
+	}
+	near.Close()
+}
+
+// A short write is an error, never a silently truncated frame.
+func TestAShortWriteIsAnError(t *testing.T) {
+	if err := WriteFrame(shortWriter{}, Data, []byte("abcdef")); err == nil {
+		t.Fatal("a short write passed")
+	}
+}
+
+type shortWriter struct{}
+
+func (shortWriter) Write(p []byte) (int, error) {
+	if len(p) > 1 {
+		return 1, nil
+	}
+	return len(p), nil
 }
