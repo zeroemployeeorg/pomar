@@ -66,6 +66,9 @@ type HostConfig struct {
 	// then runs the interactive seat (pomar-agent-guest -actor seat), not a
 	// headless actor. The owner's top-level configuration may not set it.
 	Seat string `json:"seat,omitempty"`
+	// SeatDeclarationSHA256 reaches a VM spec only with Seat: the seat
+	// declaration the profile was compiled from.
+	SeatDeclarationSHA256 string `json:"seatDeclarationSHA256,omitempty"`
 }
 
 // EnvironmentProfile selects project inputs supplied by the service owner.
@@ -93,6 +96,9 @@ type EnvironmentProfile struct {
 	// Seat makes this an interactive seat's profile (POMAR-CC SOW 15 §5): a
 	// Claude Code agent with no controller capabilities, run as the seat.
 	Seat string `json:"seat,omitempty"`
+	// SeatDeclarationSHA256 binds a seat profile, and so every environment
+	// made from it, to the one declaration it was compiled from.
+	SeatDeclarationSHA256 string `json:"seatDeclarationSHA256,omitempty"`
 }
 
 var agentVersion = regexp.MustCompile(`^[0-9]+(\.[0-9]+){0,3}$`)
@@ -144,7 +150,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 		c.CodexArchive, c.CodexArchiveSHA256 = p.AgentArchive, p.AgentArchiveSHA256
 	}
 	c.QualificationFixture = nil
-	c.Seat = p.Seat
+	c.Seat, c.SeatDeclarationSHA256 = p.Seat, p.SeatDeclarationSHA256
 	if p.Qualification && p.QualificationFixture != nil {
 		f := *p.QualificationFixture
 		c.QualificationFixture = &f
@@ -240,7 +246,7 @@ func OpenHost(config HostConfig) (*Host, error) {
 	if err := ValidateAgent(config); err != nil {
 		return nil, err
 	}
-	if config.Seat != "" {
+	if config.Seat != "" || config.SeatDeclarationSHA256 != "" {
 		return nil, errors.New("a seat belongs to a seat profile, not the host configuration")
 	}
 	if config.QualificationFixture != nil {
@@ -269,6 +275,9 @@ func OpenHost(config HostConfig) (*Host, error) {
 		}
 		if p.Seat != "" && (!seatProfileName.MatchString(p.Seat) || effective.Agent != "claude" || len(p.ControllerCapabilities) > 0 || p.Qualification) {
 			return nil, fmt.Errorf("profile %s: a seat profile names a seat, runs Claude Code, and has no controller capabilities or qualification fixture", name)
+		}
+		if (p.Seat != "") != (p.SeatDeclarationSHA256 != "") || (p.Seat != "" && !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(p.SeatDeclarationSHA256)) {
+			return nil, fmt.Errorf("profile %s: a seat profile names the sha256 of the declaration it was compiled from, and only a seat profile does", name)
 		}
 		if err := ValidateAgent(effective); err != nil {
 			return nil, fmt.Errorf("profile %s: %w", name, err)

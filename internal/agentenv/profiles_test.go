@@ -118,7 +118,7 @@ func TestASeatComesOnlyFromASeatProfile(t *testing.T) {
 	os.Chmod(root, 0o700)
 	base := HostConfig{Root: root, MaxLive: 1, CPUs: 2, MemoryBytes: 4 << 30, SourceSHA: strings.Repeat("a", 40), SourceBundle: root + "/source.bundle", Base: root + "/base.ext4", ImageDigest: "sha256:" + strings.Repeat("b", 64)}
 	base.ImageRef = "docker.io/library/golang@" + base.ImageDigest
-	seat := EnvironmentProfile{Base: base.Base, ImageRef: base.ImageRef, ImageDigest: base.ImageDigest, SourceBundle: base.SourceBundle, SourceSHA: base.SourceSHA, Agent: "claude", AgentVersion: "2.1.280", Seat: "zeocreator"}
+	seat := EnvironmentProfile{Base: base.Base, ImageRef: base.ImageRef, ImageDigest: base.ImageDigest, SourceBundle: base.SourceBundle, SourceSHA: base.SourceSHA, Agent: "claude", AgentVersion: "2.1.280", Seat: "zeocreator", SeatDeclarationSHA256: strings.Repeat("d", 64)}
 	good := base
 	good.Profiles = map[string]EnvironmentProfile{"seat-zeocreator": seat}
 	h, err := OpenHost(good)
@@ -127,11 +127,27 @@ func TestASeatComesOnlyFromASeatProfile(t *testing.T) {
 	}
 	cfg, err := h.profileConfig("seat-zeocreator")
 	h.Close()
-	if err != nil || cfg.Seat != "zeocreator" || cfg.Agent != "claude" {
+	if err != nil || cfg.Seat != "zeocreator" || cfg.SeatDeclarationSHA256 != seat.SeatDeclarationSHA256 || cfg.Agent != "claude" {
 		t.Fatalf("%+v %v", cfg.Seat, err)
 	}
 	for name, mutate := range map[string]func(*HostConfig){
 		"a top-level seat": func(c *HostConfig) { c.Seat = "zeocreator" },
+		"a seat without its declaration": func(c *HostConfig) {
+			p := c.Profiles["seat-zeocreator"]
+			p.SeatDeclarationSHA256 = ""
+			c.Profiles["seat-zeocreator"] = p
+		},
+		"a malformed declaration sha256": func(c *HostConfig) {
+			p := c.Profiles["seat-zeocreator"]
+			p.SeatDeclarationSHA256 = "D" + strings.Repeat("d", 63)
+			c.Profiles["seat-zeocreator"] = p
+		},
+		"a declaration without a seat": func(c *HostConfig) {
+			p := c.Profiles["seat-zeocreator"]
+			p.Seat = ""
+			c.Profiles["seat-zeocreator"] = p
+		},
+		"a top-level declaration": func(c *HostConfig) { c.SeatDeclarationSHA256 = strings.Repeat("d", 64) },
 		"a Codex seat": func(c *HostConfig) {
 			p := c.Profiles["seat-zeocreator"]
 			p.Agent, p.AgentVersion = "", ""

@@ -48,7 +48,7 @@ const usage = `usage:
                                     the seat environment's interactive terminal; Ctrl-b d detaches
   pomar seat profile [-root DIR] -classes FILE -source-bundle FILE SEAT
                                     the seat's compiled profile, for the host's configuration
-  pomar seat up [-root DIR] -records REC -here WHERE SEAT
+  pomar seat up [-root DIR] -records REC -here WHERE -classes FILE SEAT
                                     create and start the seat's environment where its location says
   pomar seat stop [-root DIR] -records REC SEAT
   pomar venue status [-root DIR]    fill, open ledgered objects, unaccounted entries (exit 3)
