@@ -75,6 +75,11 @@ func TestClassAllowIsCheckedAtOpen(t *testing.T) {
 // it) and py (another uid's), serving both sockets.
 func openTwoClassSockets(t *testing.T) (*Manager, *Client, *Client) {
 	t.Helper()
+	return openNamedClassSockets(t, "ci")
+}
+
+func openNamedClassSockets(t *testing.T, ciName string) (*Manager, *Client, *Client) {
+	t.Helper()
 	base := shortDir(t)
 	root := filepath.Join(base, "root")
 	os.Mkdir(root, 0o700)
@@ -90,12 +95,14 @@ func openTwoClassSockets(t *testing.T) (*Manager, *Client, *Client) {
 	os.Chmod(run, 0o750)
 	py := capacity.CI
 	py.Name = "py"
+	ci := capacity.CI
+	ci.Name = ciName
 	me := uint32(os.Getuid())
 	self, _ := os.Executable()
 	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
 		Host: capacity.Host{CPUSlots: 8, MemoryBytes: 16 * capacity.GiB}, CtlSocket: filepath.Join(run, "ctl.sock"),
-		Classes:    []JobClass{{Class: capacity.CI}, {Class: py}},
-		ClassAllow: map[string][]uint32{"ci": {me}, "py": {me + 1}}})
+		Classes:    []JobClass{{Class: ci}, {Class: py}},
+		ClassAllow: map[string][]uint32{ciName: {me}, "py": {me + 1}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,5 +185,57 @@ func TestUnidentifiedCallersAreRefusedAndTheStarterIsRecorded(t *testing.T) {
 	e.StartedByUID = &uid
 	if got := m.resultDoc(e)["started_by_uid"]; got != uid {
 		t.Fatalf("started_by_uid = %v", got)
+	}
+}
+
+// A retained attempt can name a class that is no longer configured. Absence
+// from today's allow lists must not make its history or stop route public.
+func TestControlSocketRefusesRetainedUnconfiguredClasses(t *testing.T) {
+	m, owner, ctl := openNamedClassSockets(t, "current-ci")
+	retired := terminalEntry("retired-1")
+	retired.Class.Name = "retired-ci"
+	legacy := terminalEntry("legacy-1")
+	legacy.Class = capacity.Class{}
+	m.mu.Lock()
+	current := terminalEntry("current-1")
+	current.Class.Name = "current-ci"
+	m.t.entries[retired.Attempt] = &retired
+	m.t.entries[legacy.Attempt] = &legacy
+	m.t.entries[current.Attempt] = &current
+	m.mu.Unlock()
+
+	var list []Entry
+	if err := ctl.Do("GET", "/v1/attempts", nil, &list); err != nil || len(list) != 1 || list[0].Attempt != current.Attempt {
+		t.Fatalf("control history exposed a retired class: %+v, %v", list, err)
+	}
+	if err := owner.Do("GET", "/v1/attempts", nil, &list); err != nil || len(list) != 3 {
+		t.Fatalf("owner lost retained history: %+v, %v", list, err)
+	}
+	for _, id := range []string{retired.Attempt, legacy.Attempt} {
+		for _, suffix := range []string{"", "/result", "/log", "/pins", "/outputs/x"} {
+			if err := ctl.Do("GET", "/v1/attempts/"+id+suffix, nil, nil); err == nil || !strings.Contains(err.Error(), "403") {
+				t.Errorf("retained attempt %s%s accessible: %v", id, suffix, err)
+			}
+		}
+		if err := ctl.Do("POST", "/v1/attempts/"+id+"/stop", nil, nil); err == nil || !strings.Contains(err.Error(), "403") {
+			t.Errorf("retained attempt %s stop reached handler: %v", id, err)
+		}
+		if err := owner.Do("GET", "/v1/attempts/"+id, nil, nil); err != nil {
+			t.Errorf("owner cannot read retained attempt %s: %v", id, err)
+		}
+	}
+}
+
+func TestSingleConfiguredClassWithoutAllowListDoesNotAllowOtherClasses(t *testing.T) {
+	m := &Manager{cfg: Config{Classes: []JobClass{{Class: capacity.CI}}}}
+	c := caller{uid: uint32(os.Getuid()), known: true}
+	if !m.mayUse(c, "ci") {
+		t.Fatal("configured single-class compatibility lost")
+	}
+	if m.mayUse(c, "unconfigured") {
+		t.Fatal("missing allow list admitted an unconfigured class")
+	}
+	if !m.mayUse(caller{owner: true}, "unconfigured") {
+		t.Fatal("owner lost access to retained unconfigured classes")
 	}
 }
