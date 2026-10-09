@@ -41,6 +41,9 @@ const version = "0.0.0-dev"
 
 const usage = `usage:
   pomar version
+  pomar seats [-root DIR]           list the declared seats; on a terminal, a numbered menu
+  pomar seat status [-root DIR] SEAT
+                                    one seat's declaration and location, as JSON
   pomar venue status [-root DIR]    fill, open ledgered objects, unaccounted entries (exit 3)
   pomar venue init [-root DIR]      create the structure directories (idempotent)
   pomar venue classify [-root DIR] -kind K -id ID -class attempt|cache
@@ -134,6 +137,10 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return attemptCmd(args[1], args[2:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "volume" && (args[1] == "create" || args[1] == "rm"):
 		return volumeCmd(args[1], args[2:], stdout, stderr)
+	case len(args) >= 1 && args[0] == "seats":
+		return seatsCmd(args[1:], os.Stdin, onTerminal(os.Stdin) && onTerminal(os.Stdout), stdout, stderr)
+	case len(args) >= 1 && args[0] == "seat":
+		return seatCmd(args[1:], stdout, stderr)
 	case len(args) >= 2 && args[0] == "result" && args[1] == "verify":
 		return resultVerify(args[2:], stdout, stderr)
 	}
