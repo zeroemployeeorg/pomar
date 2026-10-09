@@ -4,6 +4,7 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"debug/elf"
 	"debug/macho"
@@ -41,6 +42,10 @@ func run(args []string) error {
 	if !distribution.ValidIdentity(*version, *commit) || *bins == "" || *out == "" || fs.NArg() != 0 {
 		return fmt.Errorf("required: -version -commit -bin-dir -source -out")
 	}
+	sourceRoot, err := filepath.Abs(*source)
+	if err != nil {
+		return err
+	}
 	// Validate target formats before creating output. The build script performs
 	// host entitlement signing and verifies clean VCS stamping separately.
 	for _, name := range distribution.Files {
@@ -48,6 +53,13 @@ func run(args []string) error {
 			continue
 		}
 		p := filepath.Join(*bins, filepath.Base(name))
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return err
+		}
+		if bytes.Contains(data, []byte("/Users/")) || bytes.Contains(data, []byte(sourceRoot)) {
+			return fmt.Errorf("release executable contains builder/source paths: %s; remap and strip before packaging", name)
+		}
 		if strings.HasSuffix(name, "linux-arm64") {
 			f, err := elf.Open(p)
 			if err != nil {

@@ -27,9 +27,15 @@ for command in pomar pomar-agent-owner pomar-ci-caller; do
  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags "$flags" -o "$scratch/bin/$command" "./cmd/$command"
 done
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags '-s -w' -o "$scratch/bin/pomar-shim-linux-arm64" ./cmd/pomar-shim
-swift build --package-path host --force-resolved-versions --configuration release --jobs 2
-host_bin=$(swift build --package-path host --configuration release --show-bin-path)/pomar-host
+swift_release() {
+ swift build --package-path host --force-resolved-versions --configuration release --jobs 2 \
+  -Xswiftc -file-prefix-map -Xswiftc "$root=." \
+  -Xswiftc -debug-prefix-map -Xswiftc "$root=." "$@"
+}
+swift_release
+host_bin=$(swift_release --show-bin-path)/pomar-host
 cp "$host_bin" "$scratch/bin/pomar-host"
+/usr/bin/strip -S -x "$scratch/bin/pomar-host"
 codesign --force --sign - --entitlements host/pomar-host.entitlements "$scratch/bin/pomar-host"
 codesign --verify --strict "$scratch/bin/pomar-host"
 codesign -d --entitlements - --xml "$scratch/bin/pomar-host" 2>/dev/null | grep -q com.apple.security.virtualization

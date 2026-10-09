@@ -20,12 +20,14 @@ sh tools/build-release.sh v0.1.0-rc.1 /path/to/new/release-output
 This is a maintainer operation; release users never run it. Go uses local
 Go1.27, readonly modules, clean VCS metadata and two workers. Swift uses the
 resolved Containerization0.45.0 dependency graph, release configuration and two
-workers. The host is signed with its Virtualization entitlement. The script
+workers. Swift source/debug paths are remapped; local debug symbols are removed before
+the host is signed with its Virtualization entitlement. The script
 refuses dirty source, an existing output directory and a changed source HEAD.
 It does not fetch/update source, tag, publish or install anything.
 
 `pomar-dist` validates Mach-O arm64 executables and a static ARM64 Linux shim,
-constructs a fixed allowlisted bundle, hashes every file, and produces a stable
+refuses embedded builder/home paths before creating output, constructs a fixed
+allowlisted bundle, hashes every file, and produces a stable
 ordered tar.gz with normalized timestamps and ownership. Identical input bytes
 produce identical archives; Go/Swift/signing toolchain differences may change
 executables. The manifest binds the archive's source commit and files. It is not
