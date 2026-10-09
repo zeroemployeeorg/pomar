@@ -70,6 +70,13 @@ var GuestImages = []GuestImage{
 	{Name: "node24-python314-chromium", Repo: "localhost/pomar/runner-tools", Tag: "20261007-v5", LocalLayout: true,
 		Digest: "sha256:498c46febe123361a398475cdf47da02426ee1b6d6982ca15f190ac5bcc320bd",
 		Arm64:  "sha256:ab317bddf37bbc3bc03e5f51b40636512b9e2ef1266983791e8e439e24a4d7ae"},
+	// The same runner tools with tmux, for interactive seats (POMAR-CC SOW 15
+	// §5): its base is the runner-tools layout plus SeatPackages. This names
+	// the image only; it qualifies no seat, agent version or class.
+	{Name: "seat-runner-tools", Repo: "localhost/pomar/runner-tools", Tag: "20261007-v5", LocalLayout: true,
+		Digest:   "sha256:498c46febe123361a398475cdf47da02426ee1b6d6982ca15f190ac5bcc320bd",
+		Arm64:    "sha256:ab317bddf37bbc3bc03e5f51b40636512b9e2ef1266983791e8e439e24a4d7ae",
+		Packages: SeatPackages},
 }
 
 var (

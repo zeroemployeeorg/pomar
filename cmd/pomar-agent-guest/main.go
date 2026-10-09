@@ -23,6 +23,9 @@ import (
 
 func main() {
 	run := run
+	if len(os.Args) > 1 && os.Args[1] == "seat-supervisor" {
+		run = runSeatSupervisor
+	}
 	if len(os.Args) > 1 && os.Args[1] == "claude-mcp" {
 		run = runClaudeMCP
 	}
@@ -89,11 +92,12 @@ func run() error {
 	workspace := flag.String("workspace", "/work", "isolated workspace")
 	sourceSHA := flag.String("source-sha", "", "initial source commit")
 	capabilities := flag.String("controller-capabilities", "", "owner-configured comma-separated controller capability names")
-	actorKind := flag.String("actor", "codex", "the coding agent: codex (app-server) or claude (Claude Code, stream-json)")
+	actorKind := flag.String("actor", "codex", "the coding agent: codex (app-server), claude (Claude Code, stream-json) or seat (an interactive Claude Code seat)")
+	seat := flag.String("seat", "", "with -actor seat: the seat's name")
 	claude := flag.String("claude", "/opt/pomar-claude/bin/claude", "pinned Claude Code binary, with -actor claude")
 	claudeVersion := flag.String("claude-version", "", "the pinned Claude Code version, reported in the userAgent, with -actor claude")
 	flag.Parse()
-	if *actorKind != "codex" && *actorKind != "claude" {
+	if *actorKind != "codex" && *actorKind != "claude" && *actorKind != "seat" {
 		return fmt.Errorf("unknown -actor %q", *actorKind)
 	}
 	if os.Getuid() != 0 {
@@ -106,6 +110,13 @@ func run() error {
 	defer store.Close()
 	if err = store.BindSource(*sourceSHA); err != nil {
 		return err
+	}
+	if *actorKind == "seat" {
+		self, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return runSeat(store, seatConfig{Seat: *seat, Claude: *claude, ClaudeVersion: *claudeVersion, Self: self, Workspace: *workspace}, *socket)
 	}
 	broker := agentenv.NewBroker(store, *workspace)
 	var names []string
