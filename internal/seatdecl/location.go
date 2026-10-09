@@ -83,7 +83,7 @@ func (l Locations) Current(seat string) (Location, bool, error) {
 		return Location{}, false, err
 	}
 	var loc Location
-	if json.Unmarshal(raw, &loc) != nil || loc.Seat != seat || l.path(seat, loc.Revision) != filepath.Join(dir, latest) {
+	if strictDecode(raw, &loc, "location") != nil || loc.Seat != seat || l.path(seat, loc.Revision) != filepath.Join(dir, latest) {
 		return Location{}, false, errors.New("location record identity invalid")
 	}
 	return loc, true, nil

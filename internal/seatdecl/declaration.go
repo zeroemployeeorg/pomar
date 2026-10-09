@@ -10,13 +10,10 @@
 package seatdecl
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"path"
 	"regexp"
@@ -125,20 +122,16 @@ var resumePolicies = map[string]bool{"fresh-from-sow": true, "import-transcript"
 var hostRoutes = map[string]bool{"host-act": true, "stays-on-host": true, "after-p6": true}
 
 // Parse reads one declaration from exactly its bytes, refusing unknown
-// fields, trailing data and anything Validate refuses. It returns the
-// declaration and its sha256, the declaration's identity.
+// fields, a key given twice (case-folded), trailing data and anything
+// Validate refuses. It returns the declaration and its sha256, the
+// declaration's identity.
 func Parse(raw []byte) (Declaration, string, error) {
 	if len(raw) == 0 || len(raw) > Limit {
 		return Declaration{}, "", errors.New("a declaration is 1 byte to 64 KiB")
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var d Declaration
-	if err := dec.Decode(&d); err != nil {
-		return Declaration{}, "", fmt.Errorf("declaration: %w", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return Declaration{}, "", errors.New("declaration: trailing data")
+	if err := strictDecode(raw, &d, "declaration"); err != nil {
+		return Declaration{}, "", err
 	}
 	if err := d.Validate(); err != nil {
 		return Declaration{}, "", err

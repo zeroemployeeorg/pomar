@@ -1,11 +1,8 @@
 package seatdecl
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"slices"
 
@@ -71,14 +68,9 @@ func ParseClasses(raw []byte) (Classes, error) {
 	if len(raw) == 0 || len(raw) > 256<<10 {
 		return Classes{}, errors.New("a class catalogue is 1 byte to 256 KiB")
 	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	dec.DisallowUnknownFields()
 	var c Classes
-	if err := dec.Decode(&c); err != nil {
-		return Classes{}, fmt.Errorf("class catalogue: %w", err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return Classes{}, errors.New("class catalogue: trailing data")
+	if err := strictDecode(raw, &c, "class catalogue"); err != nil {
+		return Classes{}, err
 	}
 	if c.Schema != ClassesSchema || len(c.Classes) == 0 {
 		return Classes{}, fmt.Errorf("class catalogue schema must be %s, with at least one class", ClassesSchema)
