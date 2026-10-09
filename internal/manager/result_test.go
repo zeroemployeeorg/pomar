@@ -53,12 +53,7 @@ func openSigning(t *testing.T, sign bool) (*Manager, *Client, *venue.Venue) {
 	stopped := make(chan struct{})
 	go func() { m.Serve(ctx); close(stopped) }()
 	t.Cleanup(func() { cancel(); <-stopped; m.Close() })
-	for i := 0; i < 200; i++ {
-		if _, err := os.Stat(filepath.Join(run, "ctl.sock")); err == nil {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitTestSocket(t, filepath.Join(run, "ctl.sock"), 0o660)
 	return m, NewSocketClient(filepath.Join(run, "ctl.sock")), v
 }
 

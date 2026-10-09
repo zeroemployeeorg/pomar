@@ -78,9 +78,7 @@ func serveWithCtl(t *testing.T, ctlMode os.FileMode) (owner, ctl *Client, ctlSoc
 		m.Close()
 	})
 	for i := 0; i < 200; i++ {
-		_, e1 := os.Stat(SocketPath(v.Root()))
-		_, e2 := os.Stat(ctlSock)
-		if e1 == nil && e2 == nil {
+		if testSocketReady(SocketPath(v.Root()), 0o600) && testSocketReady(ctlSock, 0o660) {
 			break
 		}
 		select {
@@ -89,6 +87,9 @@ func serveWithCtl(t *testing.T, ctlMode os.FileMode) (owner, ctl *Client, ctlSoc
 			return nil, nil, ctlSock, errs
 		case <-time.After(10 * time.Millisecond):
 		}
+	}
+	if !testSocketReady(SocketPath(v.Root()), 0o600) || !testSocketReady(ctlSock, 0o660) {
+		t.Fatal("manager sockets did not become ready with their final modes")
 	}
 	return NewClient(v.Root()), NewSocketClient(ctlSock), ctlSock, errs
 }
