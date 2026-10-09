@@ -27,10 +27,13 @@ for command in pomar pomar-agent-owner pomar-ci-caller; do
  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags "$flags" -o "$scratch/bin/$command" "./cmd/$command"
 done
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags '-s -w' -o "$scratch/bin/pomar-shim-linux-arm64" ./cmd/pomar-shim
+# C/C++ dependencies also embed __FILE__; Swift-only maps leave those paths.
 swift_release() {
  swift build --package-path host --force-resolved-versions --configuration release --jobs 2 \
   -Xswiftc -file-prefix-map -Xswiftc "$root=." \
-  -Xswiftc -debug-prefix-map -Xswiftc "$root=." "$@"
+  -Xswiftc -debug-prefix-map -Xswiftc "$root=." \
+  -Xcc "-ffile-prefix-map=$root=." \
+  -Xcc "-fdebug-prefix-map=$root=." "$@"
 }
 swift_release
 host_bin=$(swift_release --show-bin-path)/pomar-host
