@@ -50,3 +50,34 @@ func TestCheckGuestImagesRefusals(t *testing.T) {
 		}
 	}
 }
+
+// The seat image is the runner tools plus tmux and exactly its libraries,
+// as its own base, distinct from the runner tools' own.
+func TestTheSeatImageCarriesTmux(t *testing.T) {
+	seat, err := GuestImageByName("seat-runner-tools")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, _ := GuestImageByName("node24-python314-chromium")
+	if seat.Digest != tools.Digest || seat.Arm64 != tools.Arm64 || seat.Ref() != tools.Ref() {
+		t.Fatal("the seat image isn't the runner tools' image")
+	}
+	names := map[string]bool{}
+	for _, p := range seat.Packages {
+		names[p.Name] = true
+		if !strings.HasPrefix(p.URL, "https://deb.debian.org/debian/pool/") || len(p.SHA256) != 64 {
+			t.Fatalf("package %s isn't pinned on the archive", p.Name)
+		}
+	}
+	for _, n := range []string{"tmux", "libevent-core-2.1-7", "libutempter0", "libtinfo6"} {
+		if !names[n] {
+			t.Fatalf("%s is missing", n)
+		}
+	}
+	if seat.PackageSet() == "" || seat.PackageSet() == tools.PackageSet() {
+		t.Fatal("the seat image's base isn't distinct")
+	}
+	if err := checkGuestImages(GuestImages); err != nil {
+		t.Fatal(err)
+	}
+}
