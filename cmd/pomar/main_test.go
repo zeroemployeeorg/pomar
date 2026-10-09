@@ -18,8 +18,8 @@ func TestRun(t *testing.T) {
 	if got := run([]string{"version"}, &out, &errb); got != 0 {
 		t.Errorf("run(version) = %d, want 0", got)
 	}
-	if got := run(nil, &out, &errb); got != 2 {
-		t.Errorf("run() = %d, want 2", got)
+	if got := run(nil, &out, &errb); got != 0 {
+		t.Errorf("run() = %d, want 0", got)
 	}
 }
 

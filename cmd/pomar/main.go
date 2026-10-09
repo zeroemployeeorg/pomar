@@ -37,7 +37,8 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/volume"
 )
 
-const version = "0.0.0-dev"
+var version = "0.0.0-dev"
+var sourceCommit = "unknown"
 
 const usage = `usage:
   pomar version
@@ -121,8 +122,24 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) int {
 	switch {
-	case len(args) == 1 && args[0] == "version":
-		fmt.Fprintln(stdout, "pomar", version)
+	case len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h":
+		return helpCmd(args, stdout, stderr)
+	case args[0] == "doctor":
+		return doctorCmd(args[1:], stdout, stderr)
+	case args[0] == "install":
+		return installCmd(args[1:], stdout, stderr)
+	case args[0] == "server":
+		return serverCmd(args[1:], stdout, stderr)
+	case args[0] == "run":
+		return attemptCmd("start", args[1:], stdout, stderr)
+	case args[0] == "status":
+		return attemptCmd("capacity", args[1:], stdout, stderr)
+	case args[0] == "jobs":
+		return attemptCmd("list", args[1:], stdout, stderr)
+	case args[0] == "logs":
+		return attemptCmd("log", args[1:], stdout, stderr)
+	case len(args) == 1 && (args[0] == "version" || args[0] == "--version"):
+		fmt.Fprintf(stdout, "pomar %s (source %s)\n", version, sourceCommit)
 		return 0
 	case len(args) >= 2 && args[0] == "venue" && args[1] == "status":
 		return venueStatus(args[2:], stdout, stderr)
@@ -151,7 +168,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case len(args) >= 2 && args[0] == "result" && args[1] == "verify":
 		return resultVerify(args[2:], stdout, stderr)
 	}
-	fmt.Fprint(stderr, usage)
+	fmt.Fprintf(stderr, "pomar: unknown command %q; run pomar help\n", args[0])
 	return 2
 }
 
@@ -566,7 +583,7 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("attempt "+step, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	root := fs.String("root", os.Getenv("POMAR_DATA_ROOT"), "data root")
-	socket := fs.String("socket", "", "talk to the manager on this socket instead of the data root's (for example the permanent manager's control socket)")
+	socket := fs.String("socket", os.Getenv("POMAR_SOCKET"), "manager socket (or POMAR_SOCKET); -root selects its owner socket")
 	id := fs.String("id", "", "attempt id")
 	mirrorName := fs.String("mirror", "", "source mirror (start)")
 	ref := fs.String("ref", "", "source ref, pinned to a commit SHA at admission (start)")
@@ -599,10 +616,24 @@ func attemptCmd(step string, args []string, stdout, stderr io.Writer) int {
 		return nil
 	})
 	if err := fs.Parse(args); err != nil {
+		if err == flag.ErrHelp {
+			return 0
+		}
 		return 2
 	}
 	var c *manager.Client
+	rootGiven, socketGiven := false, false
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "root":
+			rootGiven = true
+		case "socket":
+			socketGiven = true
+		}
+	})
 	switch {
+	case rootGiven && !socketGiven && *root != "":
+		c = manager.NewClient(*root)
 	case *socket != "":
 		c = manager.NewSocketClient(*socket)
 	case *root != "":
