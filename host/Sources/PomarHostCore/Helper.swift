@@ -491,10 +491,11 @@ public enum Helper {
             // The free space at the failure, read before deleting the guest
             // frees its clone: the manager names a failure on a full host
             // host-disk-full.
+            metrics.merge(preserveBootLog(o)) { a, _ in a }
             writeStatus(o.stateDir, [
                 "phase": "failed", "attempt": o.attempt, "error": "\(error)",
                 "host_free_bytes": String(Rootfs.freeBytes(o.store)),
-            ])
+            ].merging(metrics) { a, _ in a })
             try? manager.delete(o.attempt)
             return 1
         }
@@ -542,6 +543,7 @@ public enum Helper {
                 metrics["copy_in_ms"] = String(t.copy)
                 metrics["extract_ms"] = String(t.extract)
             } catch {
+                metrics.merge(preserveBootLog(o)) { a, _ in a }
                 writeStatus(o.stateDir, [
                     "phase": "failed", "attempt": o.attempt, "error": "source copy-in: \(error)",
                     "host_free_bytes": String(Rootfs.freeBytes(o.store)),
@@ -554,24 +556,32 @@ public enum Helper {
         writeStatus(o.stateDir, ["phase": "running", "attempt": o.attempt].merging(metrics) { a, _ in a })
 
         // Wait for the command, checking the stop flag once a second.
-        var exitCode: Int32 = -1
-        var stopped = false
-        while true {
-            if stop.isSet {
-                stopped = true
-                break
+        let exitCode: Int32?
+        do {
+            exitCode = try await CommandWait.run(stopped: { stop.isSet }) {
+                try await container.wait(timeoutInSeconds: 1).exitCode
             }
-            if let status = try? await container.wait(timeoutInSeconds: 1) {
-                exitCode = status.exitCode
-                break
-            }
+        } catch {
+            // A lost VM/agent is a failed attempt, not an unbounded retry.
+            // Publish the failure before best-effort cleanup so the manager
+            // can reconcile it without waiting for the class time limit.
+            metrics.merge(preserveBootLog(o)) { a, _ in a }
+            writeStatus(o.stateDir, [
+                "phase": "failed", "attempt": o.attempt, "error": "command wait: \(error)",
+                "host_free_bytes": String(Rootfs.freeBytes(o.store)),
+            ].merging(metrics) { a, _ in a })
+            try? await container.stop()
+            try? manager.delete(o.attempt)
+            return 1
         }
+        let stopped = exitCode == nil
         // The command exited, and with it the shim's staging: copy the staged
         // outputs out while the guest is still up. A stopped attempt has none.
         if !stopped, !o.outputs.isEmpty, let dir = o.outputsDir {
             metrics["outputs_copied"] = String(await copyOutputs(container, names: o.outputs, to: dir))
         }
         try? await container.stop()
+        metrics.merge(preserveBootLog(o)) { a, _ in a }
         // Read before deleting the guest, which frees its clone's blocks.
         let freeAtEnd = Rootfs.freeBytes(o.store)
         metrics["host_free_bytes"] = String(freeAtEnd)
@@ -584,7 +594,13 @@ public enum Helper {
             writeStatus(o.stateDir, ["phase": "stopped", "attempt": o.attempt].merging(metrics) { a, _ in a })
             return 143
         }
-        writeStatus(o.stateDir, ["phase": "exited", "attempt": o.attempt, "exit_code": String(exitCode)].merging(metrics) { a, _ in a })
+        writeStatus(o.stateDir, ["phase": "exited", "attempt": o.attempt, "exit_code": String(exitCode!)].merging(metrics) { a, _ in a })
         return exitCode == 0 ? 0 : 1
+    }
+
+    private static func preserveBootLog(_ o: Options) -> [String: String] {
+        BootDiagnostics.preserve(
+            source: o.store + "/containers/" + o.attempt + "/bootlog.log",
+            destination: o.stateDir + "/boot.log")
     }
 }

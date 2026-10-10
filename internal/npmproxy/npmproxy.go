@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"os"
 	"path"
@@ -31,6 +32,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -202,13 +204,52 @@ func (p *Proxy) Resolve(urlPath string) (string, error) {
 	return sum, nil
 }
 
-// Handler returns the HTTP handler. log receives one line per request.
+// Handler retains the completion line and adds correlated lifecycle events.
+// Unknown paths, queries, absolute URLs and headers are never logged.
 func (p *Proxy) Handler(log io.Writer) http.Handler {
 	p.init()
+	var sequence atomic.Uint64
+	var logMu sync.Mutex
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		status, n, hit := p.serve(w, r)
+		id, started := sequence.Add(1), time.Now()
+		method := r.Method
+		if method != http.MethodGet && method != http.MethodHead {
+			method = "OTHER"
+		}
+		route := "[redacted]"
+		if strings.HasPrefix(r.RequestURI, "/") && r.URL.Host == "" && r.URL.RawQuery == "" {
+			if _, err := p.Resolve(r.URL.Path); err == nil || r.URL.Path == "/npm" || r.URL.Path == "/-/ping" {
+				route = r.URL.Path
+			}
+		}
+		writeEvent := func(event, cache string, status int, bytes int64) {
+			if log == nil {
+				return
+			}
+			entry := struct {
+				Schema    string `json:"schema"`
+				Time      string `json:"time"`
+				Request   uint64 `json:"request"`
+				Event     string `json:"event"`
+				Method    string `json:"method"`
+				Path      string `json:"path"`
+				Cache     string `json:"cache,omitempty"`
+				ElapsedMS int64  `json:"elapsed_ms"`
+				Status    int    `json:"status,omitempty"`
+				Bytes     int64  `json:"bytes,omitempty"`
+			}{"pomar.npm-request/v1", time.Now().UTC().Format(time.RFC3339Nano), id, event, method, route, cache, time.Since(started).Milliseconds(), status, bytes}
+			logMu.Lock()
+			defer logMu.Unlock()
+			_ = json.NewEncoder(log).Encode(entry)
+		}
+		trace := func(event, cache string) { writeEvent(event, cache, 0, 0) }
+		trace("received", "unknown")
+		status, n, hit := p.serve(w, r, trace)
+		writeEvent("completed", "", status, n)
 		if log != nil {
-			fmt.Fprintf(log, "%s %s %q %d %d cache=%v\n", time.Now().UTC().Format(time.RFC3339), r.Method, r.RequestURI, status, n, hit)
+			logMu.Lock()
+			defer logMu.Unlock()
+			fmt.Fprintf(log, "%s %s %q %d %d cache=%v\n", time.Now().UTC().Format(time.RFC3339), method, route, status, n, hit)
 		}
 	})
 }
@@ -218,7 +259,7 @@ func fail(w http.ResponseWriter, code int, msg string) (int, int64, bool) {
 	return code, 0, false
 }
 
-func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) (int, int64, bool) {
+func (p *Proxy) serve(w http.ResponseWriter, r *http.Request, trace func(string, string)) (int, int64, bool) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return fail(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
@@ -232,10 +273,22 @@ func (p *Proxy) serve(w http.ResponseWriter, r *http.Request) (int, int64, bool)
 	}
 	dst := filepath.Join(p.Cache, sum)
 	if f, err := os.Open(dst); err == nil {
+		trace("cache", "hit")
 		defer f.Close()
 		return sendFile(w, r, f, true)
 	}
-	resp, err := p.client.Get(p.Upstream + r.URL.Path)
+	trace("cache", "miss")
+	upstream, err := http.NewRequestWithContext(r.Context(), http.MethodGet, p.Upstream+r.URL.Path, nil)
+	if err != nil {
+		return fail(w, http.StatusBadGateway, "upstream unavailable")
+	}
+	upstream = upstream.WithContext(httptrace.WithClientTrace(upstream.Context(), &httptrace.ClientTrace{
+		ConnectStart:         func(_, _ string) { trace("upstream_connect_started", "") },
+		GotConn:              func(httptrace.GotConnInfo) { trace("upstream_connected", "") },
+		GotFirstResponseByte: func() { trace("upstream_first_byte", "") },
+	}))
+	trace("upstream_started", "")
+	resp, err := p.client.Do(upstream)
 	if err != nil {
 		return fail(w, http.StatusBadGateway, "upstream unavailable")
 	}
