@@ -19,7 +19,6 @@ let package = Package(
             name: "PomarHostCore",
             dependencies: [
                 .product(name: "Containerization", package: "containerization"),
-                .product(name: "ContainerizationError", package: "containerization"),
                 .product(name: "ContainerizationArchive", package: "containerization"),
                 .product(name: "ContainerizationEXT4", package: "containerization"),
             ]
