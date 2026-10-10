@@ -34,3 +34,24 @@ connection count. Guest job cgroup statistics and relay completion counts
 are different measurements. Qualification still requires the actual terminal
 result, expected outputs and their verified hashes, rather than a wrapper's
 exit code or printed `PASS`.
+
+The registry diagnostic checker takes a private result directory, a separately
+reviewed expectation JSON, and that expectation's independently retained SHA256:
+
+```sh
+node scripts/qualify-registry-diagnostic.mjs RESULT_DIR EXPECTATION_JSON EXPECTED_SHA256
+```
+
+The `pomar.registry-expectation/v1` document binds `attempt`, `source`,
+`command`, host `uid`, `guestUid`, original `lockSha256`, the six classified
+`npmConfig` fields, and exactly 32 distinct `selectedRoutes` with locked
+`package`, public registry `resolved` URL and SHA512 `integrity`. Both probe
+reports must contain the same expected package/path/observed SRI set, config,
+lock digest and B1 snapshot. Each request includes its computed `integrity`,
+not just an `integrityMatch` boolean. A duplicate set or a report from another
+lock cannot pass even when its output hashes are internally consistent.
+
+Input files are bounded regular files; the checker refuses symlinks and never
+prints refused report content. This checker does not verify a manager signature
+or qualify production. Independently verify any signed result before using it.
+The lifecycle-disabled install verdict remains limited to the diagnostic.
