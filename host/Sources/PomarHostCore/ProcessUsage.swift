@@ -26,9 +26,11 @@ public enum ProcessUsage {
         let size = Int32(MemoryLayout<proc_bsdinfo>.size)
         guard proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &info, size) == size else { throw Failure.unavailable }
         guard info.pbi_uid == getuid(), info.pbi_ruid == getuid() else { throw Failure.wrongOwner }
-        var path = [CChar](repeating: 0, count: Int(PROC_PIDPATHINFO_MAXSIZE))
+        // Darwin's PROC_PIDPATHINFO_MAXSIZE is 4 * MAXPATHLEN (4096).
+        // Swift cannot import that expression macro from the pinned SDK.
+        var path = [CChar](repeating: 0, count: 4096)
         guard proc_pidpath(pid, &path, UInt32(path.count)) > 0 else { throw Failure.unavailable }
-        return (info, String(cString: path))
+        return (info, path.withUnsafeBufferPointer { String(cString: $0.baseAddress!) })
     }
 
     public static func read(pid: Int32) throws -> Snapshot {
