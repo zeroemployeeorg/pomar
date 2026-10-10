@@ -1,4 +1,5 @@
 import Containerization
+import ContainerizationError
 import Foundation
 
 /// Polling is for the expected wait deadline, not for a disconnected VM.

@@ -31,12 +31,29 @@ let usage = """
                                  [--extra-layers PATH,PATH...]
            pomar-host load-image --store S --layout DIR --manifest D --reference REPO:TAG
            pomar-host key-probe --dir DIR
+           pomar-host sample-process --pid PID --samples N
     """
 
 let args = Array(CommandLine.arguments.dropFirst())
 switch args.first {
 case "version":
     print("pomar-host \(HostInfo.version) containerization \(HostInfo.containerizationVersion)")
+case "sample-process":
+    guard let f = flags(args.dropFirst()), Set(f.keys) == ["pid", "samples"],
+        let pid = f["pid"].flatMap(Int32.init), pid > 0,
+        let count = f["samples"].flatMap(Int.init), (1...156).contains(count) else {
+        fail("sample-process needs an explicit positive PID and 1...156 samples", code: 2)
+    }
+    do {
+        let first = try ProcessUsage.read(pid: pid)
+        for index in 0..<count {
+            if index > 0 { try await Task.sleep(for: .seconds(5)) }
+            let sample = index == 0 ? first : try ProcessUsage.read(pid: pid)
+            guard ProcessUsage.sameProcess(first, sample) else { throw ProcessUsage.Failure.identityChanged }
+            FileHandle.standardOutput.write(try JSONEncoder().encode(sample))
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        }
+    } catch { fail("sample-process: observation unavailable or process identity changed") }
 case "probe-vmnet" where args.count == 2 && (args[1] == "host" || args[1] == "shared"):
     let r = VmnetProbe.run(hostOnly: args[1] == "host")
     print(r.detail)

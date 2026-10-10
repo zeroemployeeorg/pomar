@@ -1,4 +1,5 @@
 import Containerization
+import ContainerizationError
 import Foundation
 import Testing
 @testable import PomarHostCore
