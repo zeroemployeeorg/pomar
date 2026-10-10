@@ -162,7 +162,15 @@ func Attach(stream Stream, c Command, cols, rows uint16) error {
 	if !waitUntil(screenDone, end.Add(time.Second)) {
 		terr = errors.Join(terr, errors.New("the screen wasn't released"))
 	}
-	send(Close, nil)
+	// The close frame goes out only when its write is bounded: the write
+	// deadline was set and the screen writer has let go of the stream. After
+	// a refused deadline or a screen that wasn't released, a close could
+	// wait on the stream, or on the writer's lock, forever; it is skipped,
+	// and the caller's close of the stream ends the attach instead.
+	if terr == nil && wmu.TryLock() {
+		WriteFrame(stream, Close, nil)
+		wmu.Unlock()
+	}
 	terr = errors.Join(terr, stream.SetReadDeadline(time.Now()), master.SetWriteDeadline(time.Now()))
 	if !waitUntil(clientDone, time.Now().Add(DrainTimeout)) || !waitUntil(inputDone, time.Now().Add(DrainTimeout)) {
 		terr = errors.Join(terr, errors.New("the stream's reader wasn't released"))
