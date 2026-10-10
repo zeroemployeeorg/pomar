@@ -31,13 +31,14 @@ Everyday commands:
 
 Installation and development owners:
   install   Verify and install an extracted release in a user-owned prefix
+  upgrade   Check, upgrade or roll back an already provisioned service
   server    Prepare a base/kernel or start a foreground development manager
 
 Set POMAR_SOCKET to the control socket supplied by your host owner.
 No socket or data root is guessed. Options go before positional arguments.
 Job admission is not completion: retrieve the result and verify its signature.
 
-More: pomar help all | pomar help server | pomar help install
+More: pomar help all | pomar help server | pomar help install | pomar help upgrade
 Docs: https://github.com/zeroemployeeorg/pomar/tree/main/docs
 `
 
@@ -47,7 +48,7 @@ func helpCmd(args []string, stdout, stderr io.Writer) int {
 		topic = args[1]
 	}
 	if len(args) > 2 {
-		fmt.Fprintln(stderr, "help: use pomar help [all|server|install]")
+		fmt.Fprintln(stderr, "help: use pomar help [all|server|install|upgrade]")
 		return 2
 	}
 	switch topic {
@@ -59,6 +60,8 @@ func helpCmd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprint(stdout, serverHelp)
 	case "install":
 		fmt.Fprint(stdout, installHelp)
+	case "upgrade":
+		fmt.Fprint(stdout, upgradeHelp)
 	default:
 		fmt.Fprintf(stderr, "unknown help topic %q; use pomar help all\n", topic)
 		return 2

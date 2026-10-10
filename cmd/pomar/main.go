@@ -128,6 +128,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return doctorCmd(args[1:], stdout, stderr)
 	case args[0] == "install":
 		return installCmd(args[1:], stdout, stderr)
+	case args[0] == "upgrade":
+		return upgradeCmd(args[1:], stdout, stderr)
 	case args[0] == "server":
 		return serverCmd(args[1:], stdout, stderr)
 	case args[0] == "run":
