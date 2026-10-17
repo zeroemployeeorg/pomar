@@ -87,3 +87,11 @@ current setup. Login test fixtures now reap their own incomplete fake processes.
 These source changes are not a signed release or an installed/native-qualified
 Codex seat. Both source reviews and the guest security/lifecycle acceptance in
 [codex-seats.md](codex-seats.md) remain required before adoption.
+
+## Unreleased: health-read pre-parse guards
+
+Internal source now supplies bounded health-read byte/encoding, resource-set
+and duplicate-field guards, with the selected empty-set refusal. These guards
+are not wired to an endpoint and do not verify signatures or grant access.
+See [health-read-admission.md](health-read-admission.md) for their exact scope
+and the remaining issuer/trust/transport qualification requirements.
