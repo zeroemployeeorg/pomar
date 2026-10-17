@@ -452,7 +452,7 @@ func startSession(h *SessionHost, id string, spec SessionSpec) (*TermSession, er
 	if c.UID >= 0 && c.GID >= 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: uint32(c.UID), Gid: uint32(c.GID)}
 	}
-	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256)
+	closeAfterStart, err := checkExpectedSHA256(cmd, c.Path, c.ExpectedSHA256, c.PreservesInstallPath)
 	if err != nil {
 		slave.Close()
 		master.Close()
@@ -1166,9 +1166,16 @@ var AgentStates = map[string]bool{"running": true, "waiting-input": true, "permi
 
 // ReportAgent records an adapter's report and tells every client. An empty
 // state keeps the last one, so an adapter may report only an acceptance.
-func (s *TermSession) ReportAgent(state, detail, accepted string) error {
+// It returns the StateSeq this call left in place (unchanged if state was
+// empty), under the same lock that set it: council P3-2 on #137 found that
+// a caller re-reading it afterward, via a separate Agent() call outside
+// this lock, lets a differently-ordered concurrent report's StateSeq come
+// back instead of this call's own -- returning it here, from inside the
+// same critical section that assigned it, closes that gap at the source
+// rather than needing the caller to re-derive it.
+func (s *TermSession) ReportAgent(state, detail, accepted string) (uint64, error) {
 	if state != "" && !AgentStates[state] {
-		return fmt.Errorf("unknown agent state %q", state)
+		return 0, fmt.Errorf("unknown agent state %q", state)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1186,7 +1193,7 @@ func (s *TermSession) ReportAgent(state, detail, accepted string) error {
 	for c := range s.viewers {
 		c.notify(Event{Kind: EventState})
 	}
-	return nil
+	return s.agent.StateSeq, nil
 }
 
 // Agent returns the agent state last reported, and a channel closed at the
@@ -1195,6 +1202,58 @@ func (s *TermSession) Agent() (AgentState, <-chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.agent, s.agentCh
+}
+
+// ResetAgentUnknown takes the agent state back to unknown, but only if its
+// StateSeq still equals ifStateSeq: a disconnected adapter's last report
+// is no longer anyone's word for the program's current state (council P2:
+// a stale "waiting-input" must not keep looking ready once whatever
+// reported it is gone, and a stale "running"/"permission" must not keep
+// looking busy either). The caller decides a reset is due, then calls
+// this with the StateSeq that decision was made against; if a fresh
+// report landed in between (a different connection, or the same one
+// reconnecting), StateSeq has already moved on, and this is a deliberate
+// no-op rather than clobbering a report newer than the disconnect that
+// prompted it (council P3 on #137 -- the two are decided under different
+// locks, by different goroutines, so "newer" can only be judged by
+// comparing the sequence number, not by how the caller's own code reads).
+// Unlike ReportAgent, this never goes through AgentStates — unknown isn't
+// a state an adapter reports, only the one nobody has reported since.
+func (s *TermSession) ResetAgentUnknown(ifStateSeq uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.agent.State == "unknown" || s.agent.StateSeq != ifStateSeq {
+		return // already unknown, or a fresher report already landed: no-op either way
+	}
+	// Accepted is a past fact (an input the program already confirmed),
+	// not a claim about the program's current state: a disconnected
+	// adapter no longer vouches for "running", but it never un-confirms
+	// an input it already said was accepted (council P2 on #137 -- this
+	// used to rebuild the whole struct and lose it, which could flip an
+	// in-flight send's own acceptance read from "yes" back to "pending").
+	s.agent.State, s.agent.Detail = "unknown", ""
+	s.agent.StateSeq, s.agent.Seq = s.agent.Seq+1, s.agent.Seq+1
+	s.agent.Seen = s.host.now().UTC().Format(time.RFC3339Nano)
+	close(s.agentCh)
+	s.agentCh = make(chan struct{})
+	for c := range s.viewers {
+		c.notify(Event{Kind: EventState})
+	}
+}
+
+// WakeAgentWaiters wakes anyone blocked in Agent()'s channel without
+// reporting anything new: a when-ready send waits there for the next
+// agent report, but a readiness it claimed being given back (council P3
+// on #137: a refused send's give-back didn't wake a DIFFERENT send
+// already waiting) isn't a report at all, just bookkeeping that makes
+// the same still-true readiness available again. Closing and remaking
+// the channel, with nothing else touched, lets that waiter re-check
+// immediately instead of sitting out the rest of its own wait bound.
+func (s *TermSession) WakeAgentWaiters() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	close(s.agentCh)
+	s.agentCh = make(chan struct{})
 }
 
 // Presence is the session's clients and controller as this client sees

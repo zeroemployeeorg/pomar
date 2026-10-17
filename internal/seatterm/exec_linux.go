@@ -38,9 +38,22 @@ import (
 // once Start has returned (success or not) -- os/exec never closes an
 // ExtraFiles entry for you, and this package's own host never did either,
 // leaking one fd per launch for as long as the host itself runs.
-func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) (closeAfterStart func(), err error) {
+//
+// preservesInstallPath (Command.PreservesInstallPath) refuses the pin
+// outright rather than open path at all, the same as the Darwin version,
+// for a program that resolves resources relative to its own installed
+// location. Unlike Darwin's private copy, cmd.Path here becomes
+// /proc/self/fd/N against the SAME inode as the original, not a new file
+// at a new path -- whether that leaves argv[0]/self-path-relative lookups
+// resolvable (via /proc/self/exe, say) is plausible but has not been
+// verified on an actual Linux host, so this refuses the same way rather
+// than assume the narrower Darwin problem doesn't also apply here.
+func checkExpectedSHA256(cmd *exec.Cmd, path, expected string, preservesInstallPath bool) (closeAfterStart func(), err error) {
 	if expected == "" {
 		return nil, nil
+	}
+	if preservesInstallPath {
+		return nil, fmt.Errorf("%s resolves resources relative to its installed location; pinning it would run it by a different path (/proc/self/fd), unverified to preserve that, so the launch refuses rather than risk it", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {

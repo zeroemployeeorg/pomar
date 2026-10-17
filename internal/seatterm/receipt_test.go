@@ -160,7 +160,7 @@ func TestExpectedSHA256SurvivesReplacementAfterTheCheck(t *testing.T) {
 	expected := sha256OfFile(t, path)
 
 	cmd := exec.Command(path)
-	closeAfterStart, err := checkExpectedSHA256(cmd, path, expected)
+	closeAfterStart, err := checkExpectedSHA256(cmd, path, expected, false)
 	if err != nil {
 		t.Fatalf("the check should pass on the original bytes: %v", err)
 	}
@@ -183,6 +183,33 @@ func TestExpectedSHA256SurvivesReplacementAfterTheCheck(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(out)); got != "original" {
 		t.Fatalf("the launch reflected the replaced file, not what was checked: got %q", got)
+	}
+}
+
+// The Darwin/Codex-resource-path decision: a program that resolves
+// resources relative to its own installed location refuses pinning
+// outright, on both platforms, rather than silently run it from a
+// relocated path (a private copy on Darwin, /proc/self/fd on Linux) that
+// may not find them. No file is even opened for the check once this is
+// set: a mismatched hash never races with a path concern.
+func TestExpectedSHA256RefusesToPinAProgramThatPreservesItsInstallPath(t *testing.T) {
+	dir := t.TempDir()
+	path := dir + "/prog"
+	if err := os.WriteFile(path, []byte("#!/bin/sh\necho ok\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256OfFile(t, path)
+
+	cmd := exec.Command(path)
+	closeAfterStart, err := checkExpectedSHA256(cmd, path, expected, true)
+	if err == nil {
+		t.Fatal("pinning a path-preserving program should refuse, not silently relocate it")
+	}
+	if closeAfterStart != nil {
+		t.Fatal("a refusal should hand back nothing to close")
+	}
+	if cmd.Path != path {
+		t.Fatalf("a refused launch must not have modified cmd.Path: got %q", cmd.Path)
 	}
 }
 

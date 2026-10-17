@@ -44,9 +44,11 @@ const maxPasteBytes = 8 << 20
 
 const sessionUsage = `usage:
   pomar session serve [-root DIR]   run this user's session service (in the foreground)
-  pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] [-expected-sha256 HEX] NAME -- /ABS/PROGRAM ARGS...
+  pomar session new -id OP [-kind K] [-cols C -rows R] [-env K=V]... [-dir D] [-state] [-expected-sha256 HEX] [-preserves-install-path] NAME -- /ABS/PROGRAM ARGS...
                                     -state: a state channel for an adapter ($POMAR_SESSION_STATE in its environment)
                                     -expected-sha256: refuse the launch unless the program hashes to this
+                                    -preserves-install-path: the program resolves resources relative to its installed
+                                    location; refuses -expected-sha256 outright rather than run a relocated copy
   pomar session ls [-json]
   pomar session show NAME           the session's state, as JSON
   pomar session screen [-json] NAME the current screen, as text
@@ -103,6 +105,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		view      = fs.Bool("view", false, "view only: nothing you type is sent")
 		state     = fs.Bool("state", false, "give the session a state channel, on which an adapter reports its agent state")
 		expectSHA = fs.String("expected-sha256", "", "new: refuse the launch unless the program's file hashes to this")
+		preserves = fs.Bool("preserves-install-path", false, "new: the program resolves resources relative to its installed location; refuses -expected-sha256 outright rather than run a relocated copy")
 		gen       = fs.String("session", "", "the session ID (generation) you last read: refused as stale if the name now has another")
 		epoch     = fs.Int64("epoch", -1, "the grant epoch you last read: refused as stale if control changed since")
 		ready     = fs.Bool("when-ready", false, "write the text only once the session's adapter reports it waiting for input")
@@ -194,7 +197,7 @@ func sessionCmd(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		if *rows > 0 {
 			h = uint16(min(*rows, seatterm.MaxRows))
 		}
-		req := sessiond.CreateRequest{Operation: *op, Name: pos[0], Kind: *kind, Path: tail[0], Args: tail[1:], Env: sessionEnv(envs), Dir: *dir, Cols: w, Rows: h, StateChannel: *state, ExpectedSHA256: *expectSHA}
+		req := sessiond.CreateRequest{Operation: *op, Name: pos[0], Kind: *kind, Path: tail[0], Args: tail[1:], Env: sessionEnv(envs), Dir: *dir, Cols: w, Rows: h, StateChannel: *state, ExpectedSHA256: *expectSHA, PreservesInstallPath: *preserves}
 		var out sessiond.Created
 		if rc := call("POST", "/v1/sessions", req, &out); rc != 0 {
 			return rc

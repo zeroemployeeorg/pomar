@@ -32,7 +32,7 @@ func TestCheckExpectedSHA256ClosesItsFileAfterStart(t *testing.T) {
 	expected := sha256OfFile(t, path)
 
 	cmd := exec.Command(path)
-	closeAfterStart, err := checkExpectedSHA256(cmd, path, expected)
+	closeAfterStart, err := checkExpectedSHA256(cmd, path, expected, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -55,14 +55,24 @@ import (
 // the other bundled features) actually fails from a moved copy is a named
 // gap in this check, not verified end to end.
 //
+// Decided: rather than leave that gap live for whatever program turns out
+// to need it, preservesInstallPath (Command.PreservesInstallPath) refuses
+// the pin outright when set alongside expected, before any file is even
+// opened. A silently relocated copy that can't find its own resources
+// fails in a way that's hard to diagnose; refusing the combination fails
+// loudly instead, at the one point that knows both facts at once.
+//
 // closeAfterStart is always a no-op here: unlike the Linux version, this
 // never hands cmd an inherited descriptor (cmd.Path names a plain path,
 // the private copy, not a /proc/self/fd entry), so there is nothing left
 // open for the caller to close once Start returns. The signature matches
 // the Linux version's so host.go's call site is platform-agnostic.
-func checkExpectedSHA256(cmd *exec.Cmd, path, expected string) (closeAfterStart func(), err error) {
+func checkExpectedSHA256(cmd *exec.Cmd, path, expected string, preservesInstallPath bool) (closeAfterStart func(), err error) {
 	if expected == "" {
 		return nil, nil
+	}
+	if preservesInstallPath {
+		return nil, fmt.Errorf("%s resolves resources relative to its installed location; pinning it would run a copy with none of them, so the launch refuses rather than relocate it", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {

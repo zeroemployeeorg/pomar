@@ -332,6 +332,11 @@ type CreateRequest struct {
 	// is opened for exec (seatterm.Command.ExpectedSHA256's own doc notes
 	// exactly what window this does and doesn't close, by platform).
 	ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	// PreservesInstallPath declares Path resolves some of its own
+	// resources relative to its installed location: see
+	// seatterm.Command.PreservesInstallPath. Combined with ExpectedSHA256,
+	// the launch refuses rather than run a relocated copy.
+	PreservesInstallPath bool `json:"preserves_install_path,omitempty"`
 }
 
 // SessionView is a session as ls and show give it: the session host's
@@ -645,7 +650,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		env = append(env, StateEnv+"="+statePath)
 	}
 	spec := seatterm.SessionSpec{Name: req.Name, Kind: req.Kind, Cols: req.Cols, Rows: req.Rows,
-		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1, ExpectedSHA256: req.ExpectedSHA256}}
+		Command: seatterm.Command{Path: req.Path, Args: req.Args, Env: env, Dir: req.Dir, UID: -1, GID: -1, ExpectedSHA256: req.ExpectedSHA256, PreservesInstallPath: req.PreservesInstallPath}}
 	key := p + "\x00" + req.Operation
 	s.mu.Lock()
 	name, retry := s.creates[key]
@@ -891,8 +896,12 @@ func waitMS(ms int, def time.Duration) time.Duration {
 // awaitReady waits for the session's adapter to report it waiting for
 // input in a report no send has used, and claims that report, so two sends
 // never take one readiness. It gives up at the wait's end, or when the
-// program exits.
-func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) bool {
+// program exits. The claimed StateSeq is returned so the caller can give
+// it back with unclaimReady if the send goes on to be refused for some
+// other reason: the readiness itself was real and still holds, and must
+// stay available to whatever send comes next, not be spent on one that
+// never actually wrote anything (council P2).
+func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) (uint64, bool) {
 	timeout := time.After(wait)
 	for {
 		st, next := t.Agent()
@@ -901,17 +910,37 @@ func (s *Server) awaitReady(t *seatterm.TermSession, wait time.Duration) bool {
 			if s.readyUsed[t.ID] < st.StateSeq {
 				s.readyUsed[t.ID] = st.StateSeq
 				s.mu.Unlock()
-				return true
+				return st.StateSeq, true
 			}
 			s.mu.Unlock()
 		}
 		select {
 		case <-next:
 		case <-t.Done():
-			return false
+			return 0, false
 		case <-timeout:
-			return false
+			return 0, false
 		}
+	}
+}
+
+// unclaimReady gives back a readiness claim awaitReady made, but only if
+// nothing has claimed past it since: a newer report (a real state change)
+// must never be un-claimed by a late give-back racing behind it. t may be
+// nil in tests that exercise only the bookkeeping; a live caller always
+// has the session at hand to wake anyone else already waiting on it
+// (council P3 on #137: this used to update readyUsed without waking a
+// different when-ready send blocked in awaitReady's own select, leaving
+// it to sit out its whole wait bound instead of re-checking at once).
+func (s *Server) unclaimReady(t *seatterm.TermSession, id string, seq uint64) {
+	s.mu.Lock()
+	gaveBack := s.readyUsed[id] == seq
+	if gaveBack {
+		delete(s.readyUsed, id)
+	}
+	s.mu.Unlock()
+	if gaveBack && t != nil {
+		t.WakeAgentWaiters()
 	}
 }
 
@@ -1038,6 +1067,13 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	mode := "raw"
+	var readySeq uint64 // 0: nothing claimed, or already given back
+	giveBackReady := func() {
+		if readySeq != 0 {
+			s.unclaimReady(t, t.ID, readySeq)
+			readySeq = 0
+		}
+	}
 	if req.WhenReady {
 		mode = "when-ready"
 		if a == nil {
@@ -1045,12 +1081,15 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 			refuse(w, http.StatusConflict, KindUnsupported, "this session has no state channel, so nothing can say when it is ready for input; make it with -state, or send without -when-ready to write the text raw")
 			return
 		}
-		if !s.awaitReady(t, waitMS(req.ReadyWaitMS, defaultReadyWait)) {
+		seq, ok := s.awaitReady(t, waitMS(req.ReadyWaitMS, defaultReadyWait))
+		if !ok {
 			s.drop(res) // nothing was written: a retry decides afresh
 			refuse(w, http.StatusConflict, KindNotReady, "the session's adapter didn't report it waiting for input in time; nothing was written")
 			return
 		}
+		readySeq = seq
 		if why := stale(t, req); why != "" { // it may have changed while it waited
+			giveBackReady() // the readiness was real; only this send is refused
 			s.drop(res)
 			refuse(w, http.StatusConflict, KindStale, why)
 			return
@@ -1058,6 +1097,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	}
 	c, _, err := t.Attach(p)
 	if err != nil {
+		giveBackReady()
 		s.drop(res)
 		hostError(w, err)
 		return
@@ -1065,6 +1105,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	detach := sync.OnceFunc(c.Detach)
 	defer detach()
 	if _, err := c.Control(req.Take, "send "+req.Operation, req.Epoch); err != nil {
+		giveBackReady()
 		s.drop(res)
 		hostError(w, err)
 		return
@@ -1075,6 +1116,7 @@ func (s *Server) send(w http.ResponseWriter, r *http.Request) {
 	// Attach/Control (or, for when-ready, before the whole ready wait).
 	// detach() is already deferred above, and is itself once-only.
 	if heldRefusal() {
+		giveBackReady()
 		return
 	}
 	out := opResult{Session: t.ID, Mode: mode, InputID: req.Operation, Accepted: "unsupported"}

@@ -28,6 +28,17 @@ type Command struct {
 	// checkExpectedSHA256's platform files for exactly what window this
 	// does and doesn't close.
 	ExpectedSHA256 string
+	// PreservesInstallPath declares that Path resolves some of its own
+	// resources relative to its installed location, not a fixed path (a
+	// sibling directory of helper binaries, for one declared example).
+	// Pinning it with ExpectedSHA256 would run it from a different path —
+	// a private copy on Darwin, a /proc/self/fd entry on Linux — that has
+	// none of those siblings, which could make it fail in a way that's
+	// hard to diagnose rather than fail loudly. checkExpectedSHA256
+	// refuses the combination outright instead: a declared capability
+	// (Pomar is agent-agnostic; an adapter that knows its own program
+	// needs this sets it), not a name match on any particular program.
+	PreservesInstallPath bool
 }
 
 // Attach runs the command on a new pseudo-terminal sized cols x rows, and
