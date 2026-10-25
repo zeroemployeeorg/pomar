@@ -10,6 +10,26 @@ import (
 
 const testCommit = "0123456789abcdef0123456789abcdef01234567"
 
+// canonicalTempDir returns t.TempDir(), resolved via filepath.EvalSymlinks.
+// On macOS, t.TempDir() returns an unresolved path under /var/folders/...,
+// and /var -> private/var is itself a symlink (standard, permanent macOS
+// furniture, not a defect) -- secureDirectory's own ancestor walk (by
+// design) refuses any symlink component, so an unresolved prefix always
+// failed here, for a reason having nothing to do with the behavior under
+// test. This is a test-fixture fix only; secureDirectory and PrivateDir
+// are unchanged -- a prefix reached through a symlink must still be
+// refused, which is exactly what TestInstallFailsBeforeActivation's own
+// "prefix-link" case deliberately constructs and continues to rely on.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
 func fixture(t *testing.T, version string) string {
 	t.Helper()
 	root := t.TempDir()
@@ -35,7 +55,7 @@ func fixture(t *testing.T, version string) string {
 	return root
 }
 func TestInstallVersionsAndRollback(t *testing.T) {
-	prefix := filepath.Join(t.TempDir(), "install")
+	prefix := filepath.Join(canonicalTempDir(t), "install")
 	a := fixture(t, "v0.1.0")
 	b := fixture(t, "v0.2.0-rc.1")
 	for _, bundle := range []string{a, a, b, a} {
@@ -59,7 +79,7 @@ func TestAgentGuidesAreVerifiedBeforeActivation(t *testing.T) {
 	for _, name := range []string{"AGENTS.md", "docs/health-and-diagnostics.md", "docs/attempt-progress.md", "docs/job-failure-diagnostics.md", "docs/service-upgrade.md", "docs/sessions.md", "docs/sessions-protocol.md"} {
 		t.Run(name, func(t *testing.T) {
 			bundle := fixture(t, "v0.1.0")
-			prefix := filepath.Join(t.TempDir(), "install")
+			prefix := filepath.Join(canonicalTempDir(t), "install")
 			if _, err := Install(bundle, prefix); err != nil {
 				t.Fatal(err)
 			}
@@ -84,7 +104,7 @@ func TestInstallFailsBeforeActivation(t *testing.T) {
 	for _, kind := range []string{"tamper", "unexpected", "symlink", "missing", "mode", "manifest-path", "existing-version", "prefix-link", "existing-current", "locked"} {
 		t.Run(kind, func(t *testing.T) {
 			a := fixture(t, "v0.1.0")
-			prefix := filepath.Join(t.TempDir(), "install")
+			prefix := filepath.Join(canonicalTempDir(t), "install")
 			if _, err := Install(a, prefix); err != nil {
 				t.Fatal(err)
 			}

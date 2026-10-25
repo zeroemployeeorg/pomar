@@ -9,8 +9,25 @@ import (
 	"time"
 )
 
-func TestCrashedPublicationRetainsAndRecoversSameOneTimeEvent(t *testing.T) {
+// canonicalTempDir returns t.TempDir(), resolved via filepath.EvalSymlinks.
+// On macOS, t.TempDir() returns an unresolved path under /var/folders/...,
+// and /var -> private/var is itself a symlink (standard, permanent macOS
+// furniture) -- localclient.PrivateDir requires its argument to already
+// equal its own EvalSymlinks result, so an unresolved path always failed
+// here, for a reason having nothing to do with the behavior under test.
+// Test-fixture fix only; PrivateDir itself is unchanged.
+func canonicalTempDir(t *testing.T) string {
+	t.Helper()
 	dir := t.TempDir()
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
+}
+
+func TestCrashedPublicationRetainsAndRecoversSameOneTimeEvent(t *testing.T) {
+	dir := canonicalTempDir(t)
 	os.Chmod(dir, 0700)
 	event := Event{ID: "event-00000000001", Kind: "response", At: time.Now().UTC().Format(time.RFC3339Nano), Value: json.RawMessage(`{"one_time":"FIXTURE-ONLY"}`)}
 	b, _ := json.Marshal(event)
@@ -40,7 +57,7 @@ func TestCrashedPublicationRetainsAndRecoversSameOneTimeEvent(t *testing.T) {
 }
 func TestPartialOrWrongBindingIsNeverDeletedOrPromoted(t *testing.T) {
 	for _, b := range [][]byte{[]byte(`{"event_id":`), []byte(`{"event_id":"event-00000000001","kind":"response","observed_at":"2026-10-08T00:00:00Z","value":{"wrong":true}}`)} {
-		dir := t.TempDir()
+		dir := canonicalTempDir(t)
 		pending := filepath.Join(dir, ".pending-original")
 		os.WriteFile(pending, b, 0600)
 		if e := Recover(dir, func(Event) bool { return false }); e == nil {
