@@ -202,23 +202,31 @@ bounded_run() {
   # swept here, every time, regardless of why the leader exited or how
   # quickly. The common case (nothing left) costs nothing extra; only a
   # genuine straggler pays the short grace sleeps below.
-  if command -v ps >/dev/null 2>&1; then
-    if ps -o pid= -g "$pid" >/dev/null 2>&1; then
-      kill -TERM -"$pid" 2>/dev/null || true
+  #
+  # Council's review of 75b1d2f (B1): the original residual check here used
+  # `ps -o pid= -g "$pid"`, which is NOT portable -- on Linux (GNU/procps-ng
+  # ps, the real target for this script), a numeric `-g` selects by SESSION
+  # id, not process group id, so the sweep silently saw nothing even when a
+  # real residual existed. `kill -0 -- -"$pid"` (signal 0 to the negative
+  # process-group id) is the portable primitive instead: POSIX-specified
+  # kill(2) semantics for a negative pid are OS-independent, unlike any
+  # particular `ps`/`pgrep` flag's meaning, and this script already relies
+  # on exactly this same negative-pid addressing for its own TERM/KILL
+  # escalation above -- group_has_member reuses it for the query side too.
+  group_has_member() {
+    kill -0 -- -"$1" 2>/dev/null
+  }
+  if group_has_member "$pid"; then
+    kill -TERM -"$pid" 2>/dev/null || true
+    sleep 1
+    if group_has_member "$pid"; then
+      kill -KILL -"$pid" 2>/dev/null || true
       sleep 1
-      if ps -o pid= -g "$pid" >/dev/null 2>&1; then
-        kill -KILL -"$pid" 2>/dev/null || true
-        sleep 1
-      fi
     fi
   fi
   residual=none
-  if command -v ps >/dev/null 2>&1; then
-    if ps -o pid= -g "$pid" >/dev/null 2>&1; then
-      residual=present
-    fi
-  else
-    residual=UNKNOWN
+  if group_has_member "$pid"; then
+    residual=present
   fi
   # A real "we killed it" claim requires both the signal-range exit status
   # AND that our own escalation timeline had actually reached at least the
@@ -498,8 +506,26 @@ preflight() {
           "$uv_path" lock --check --directory "$head_snapshot"
         case "$BOUNDED_STATUS" in
           OK)
-            lock_consistency=VERIFIED
-            lock_reason=""
+            # Council's review of 75b1d2f (B2): a residual process-group
+            # member, or the sweep's own probe failing to determine one way
+            # or the other, must block VERIFIED -- a clean exit status alone
+            # does not mean the command's whole process tree is actually
+            # gone (exactly N2's scenario: a leader that exits 0 while a
+            # background job of its own keeps running).
+            case "$BOUNDED_RESIDUAL" in
+              none)
+                lock_consistency=VERIFIED
+                lock_reason=""
+                ;;
+              present)
+                lock_consistency=NOT-CONFIGURED
+                lock_reason=" (completed, but a residual process-group member was swept afterward -- not a clean run)"
+                ;;
+              *)
+                lock_consistency=UNKNOWN
+                lock_reason=" (completed, but the post-run process-group check itself could not be confirmed)"
+                ;;
+            esac
             ;;
           FAILED)
             lock_consistency=NOT-CONFIGURED

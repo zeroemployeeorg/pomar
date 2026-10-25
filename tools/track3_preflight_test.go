@@ -750,7 +750,16 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 // distinct pid via `$$` -- `( ... ) &` does NOT: confirmed directly on this
 // shell that `$$` inside a backgrounded subshell still reports the PARENT's
 // own pid, which silently makes a liveness check against it meaningless)
-// that records its own pid to pidFile before behaving as leaderBehavior.
+// and records that pid from the LEADER's own `$!` immediately after
+// backgrounding it, before doing anything else. This must not rely on the
+// grandchild's own script reaching its `echo $$ > pidfile` line: the real
+// script's sweep now checks group membership via `kill -0` (a builtin,
+// near-instant) rather than forking `ps`, and an earlier version of this
+// helper that had the grandchild self-report its pid raced against that --
+// confirmed directly, the sweep could (and, once kill -0 replaced ps -g,
+// reproducibly did) kill the grandchild before it ever executed far enough
+// to write its own pid file, failing the test for an unrelated timing
+// reason having nothing to do with the sweep's actual correctness.
 func recordGrandchildPIDScript(leaderTrapsTerm bool, leaderBehavior string) string {
 	leaderTrap := ""
 	if leaderTrapsTerm {
@@ -761,7 +770,8 @@ func recordGrandchildPIDScript(leaderTrapsTerm bool, leaderBehavior string) stri
 		"case \"$1\" in\n" +
 		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
 		"  lock)\n" +
-		"    sh -c 'trap \"\" TERM; echo $$ > \"'\"$GRANDCHILD_PID_FILE\"'\"; sleep 20' &\n" +
+		"    sh -c 'trap \"\" TERM; sleep 20' &\n" +
+		"    echo $! > \"$GRANDCHILD_PID_FILE\"\n" +
 		"    " + leaderBehavior + "\n" +
 		"    ;;\n" +
 		"esac\n"
