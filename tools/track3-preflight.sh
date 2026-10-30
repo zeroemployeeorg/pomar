@@ -251,7 +251,16 @@ run_bounded() {
   shift
   out=$(mktemp "$scratch_tmp/run.XXXXXX")
   report=$(bounded_run "$budget" "$out" "$@")
+  # zeocouncil's review of PR161: this is the only other unquoted split in
+  # the script (`set -- $report`). $report's words are internal (bounded_run's
+  # own kind/code/residual vocabulary) and hold no glob metacharacters
+  # today, so this was never exploitable the way lexically_canonical's split
+  # was -- but hardening it the same way costs nothing and removes any
+  # future risk if that vocabulary ever changes.
+  case $- in *f*) old_noglob=1 ;; *) old_noglob=0 ;; esac
+  set -f
   set -- $report
+  [ "$old_noglob" = 1 ] || set +f
   kind=${1:-UNKNOWN}
   code=${2:-}
   residual=${3:-none}
