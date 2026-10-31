@@ -438,3 +438,121 @@ func TestUnmarkedLegacyReconciliationRequiresFreshExplicitObservation(t *testing
 		t.Fatal(id, err)
 	}
 }
+
+func TestCrashDispatchingReconciliationRemainsIneligibleAfterStopAndReload(t *testing.T) {
+	for _, transition := range []string{"start", "replace"} {
+		t.Run(transition, func(t *testing.T) {
+			h, e, _, _ := reconciliationFixture(t)
+			h.config = e.Spec.HostConfig
+			h.config.MaxLive = 2
+			e.Phase = "stopped"
+			positiveProbe := h.probe
+			idA, err := h.ensurePredecessor(e)
+			if err != nil {
+				t.Fatal(err)
+			}
+			aRequest := e.Actions[idA].Reconciliation.Request
+			bRequest := aRequest
+			bRequest.OperationID = "00-crashed-observation"
+			var crashBytes []byte
+			h.probe = func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error) {
+				var err error
+				crashBytes, err = os.ReadFile(filepath.Join(e.Spec.Directory, "environment.json"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				var saved Environment
+				if err := json.Unmarshal(crashBytes, &saved); err != nil {
+					t.Fatal(err)
+				}
+				if saved.CurrentReconciliation != bRequest.OperationID || saved.Phase != "reconciling" || saved.Actions[bRequest.OperationID].State != "dispatching" {
+					t.Fatal("current marker not durable before native probe")
+				}
+				return FenceProbeEvidence{}, errors.New("probe interrupted")
+			}
+			if w := reconcileCall(h, bRequest); w.Code != 200 {
+				t.Fatal(w.Body.String())
+			}
+			if len(crashBytes) == 0 {
+				t.Fatal("did not observe dispatch journal")
+			}
+			// Recover exactly the disk snapshot from before B completed; no
+			// completed negative result or in-memory state is carried over.
+			if err := os.WriteFile(filepath.Join(e.Spec.Directory, "environment.json"), crashBytes, 0600); err != nil {
+				t.Fatal(err)
+			}
+			var recovered Environment
+			if err := json.Unmarshal(crashBytes, &recovered); err != nil {
+				t.Fatal(err)
+			}
+			e = &recovered
+			h = &Host{config: h.config, envs: map[string]*Environment{"env": e}, processes: processFixture{}, stopWait: time.Second}
+			h.probe = func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error) {
+				t.Fatal("cached fallback triggered another probe")
+				return FenceProbeEvidence{}, nil
+			}
+			if _, err := h.ensurePredecessor(e); err == nil {
+				t.Fatal("dispatching B reused A or deterministic automatic operation")
+			}
+			if w := reconcileCall(h, aRequest); w.Code != 200 {
+				t.Fatal(w.Body.String())
+			}
+			if e.CurrentReconciliation != bRequest.OperationID {
+				t.Fatal("historical replay promoted A")
+			}
+			status := []byte(`{"environment":"env","session":"session","incarnation":"actor","vm_stopped":"true"}`)
+			if err := os.WriteFile(filepath.Join(e.Spec.Directory, "vm-status.json"), status, 0600); err != nil {
+				t.Fatal(err)
+			}
+			h.mu.Lock()
+			err = h.stop(e)
+			h.mu.Unlock()
+			if err != nil || e.Phase != "stopped" {
+				t.Fatal(err, e.Phase)
+			}
+			e.Spec.EgressSocket = filepath.Join(e.Spec.Directory, "occupied")
+			if err := os.WriteFile(e.Spec.EgressSocket, []byte("occupied"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if transition == "start" {
+				if err := h.start(e); err == nil {
+					t.Fatal("started over dispatching B")
+				}
+			} else if w := hostActionCall(h, "env", "replace", "crash-blocked-replacement", "actor"); w.Code != 409 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			if e.Spec.Incarnation != "actor" || predecessorOperation(e, "actor") != "" {
+				t.Fatal("advanced over dispatching B")
+			}
+			h.probe = positiveProbe
+			cRequest := bRequest
+			cRequest.OperationID = "fresh-crash-recovery"
+			if w := reconcileCall(h, cRequest); w.Code != 200 {
+				t.Fatal(w.Body.String())
+			}
+			data, err := os.ReadFile(filepath.Join(e.Spec.Directory, "environment.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var afterC Environment
+			if err := json.Unmarshal(data, &afterC); err != nil {
+				t.Fatal(err)
+			}
+			e = &afterC
+			h.envs["env"] = e
+			if e.Actions[bRequest.OperationID].State != "dispatching" {
+				t.Fatal("historical crashed action rewritten")
+			}
+			if predecessorOperation(e, "actor") != cRequest.OperationID {
+				t.Fatal("positive C not retained after reload")
+			}
+			h.probe = func(context.Context, FenceProbeRequest) (FenceProbeEvidence, error) {
+				t.Fatal("positive C reprobed")
+				return FenceProbeEvidence{}, nil
+			}
+			if err := h.start(e); err == nil || e.Spec.Incarnation == "actor" || e.Phase != "launching" {
+				t.Fatal("C did not allow journaled advance", err, e.Phase)
+			}
+		})
+	}
+}
