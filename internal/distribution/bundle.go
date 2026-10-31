@@ -15,11 +15,14 @@ import (
 	"strings"
 )
 
-const Schema = "pomar.release/v1"
+const Schema = "pomar.release/v2"
+const LegacySchema = "pomar.release/v1"
+
+var LegacyFiles = []string{"bin/pomar", "bin/pomar-host", "bin/pomar-shim-linux-arm64", "bin/pomar-agent-owner", "bin/pomar-ci-caller", "LICENSE", "README.md", "CONTRIBUTING.md", "AGENTS.md", "docs/install.md", "docs/operations.md", "docs/releases.md", "docs/normal-clients.md", "docs/manager-classes.md", "docs/agent-environments.md", "docs/health-and-diagnostics.md", "docs/attempt-progress.md", "docs/job-failure-diagnostics.md", "docs/service-upgrade.md", "docs/sessions.md", "docs/sessions-protocol.md"}
 
 var versionPattern = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?$`)
 var commitPattern = regexp.MustCompile(`^[0-9a-f]{40}$`)
-var Files = []string{"bin/pomar", "bin/pomar-host", "bin/pomar-shim-linux-arm64", "bin/pomar-agent-owner", "bin/pomar-ci-caller", "LICENSE", "README.md", "CONTRIBUTING.md", "AGENTS.md", "docs/install.md", "docs/operations.md", "docs/releases.md", "docs/normal-clients.md", "docs/manager-classes.md", "docs/agent-environments.md", "docs/health-and-diagnostics.md", "docs/attempt-progress.md", "docs/job-failure-diagnostics.md", "docs/service-upgrade.md", "docs/sessions.md", "docs/sessions-protocol.md"}
+var Files = []string{"bin/pomar", "bin/pomar-host", "bin/pomar-shim-linux-arm64", "bin/pomar-agent-owner", "bin/pomar-ci-caller", "bin/pomar-agent-host", "bin/pomar-agent-login", "bin/pomar-agent-export", "bin/pomar-agent-guest-linux-arm64", "LICENSE", "README.md", "CONTRIBUTING.md", "AGENTS.md", "docs/install.md", "docs/operations.md", "docs/releases.md", "docs/normal-clients.md", "docs/manager-classes.md", "docs/agent-environments.md", "docs/health-and-diagnostics.md", "docs/attempt-progress.md", "docs/job-failure-diagnostics.md", "docs/service-upgrade.md", "docs/sessions.md", "docs/sessions-protocol.md"}
 
 type File struct {
 	SHA256 string `json:"sha256"`
@@ -110,11 +113,15 @@ func Verify(root string) (Manifest, error) {
 	if err = json.Unmarshal(raw, &m); err != nil {
 		return m, err
 	}
-	if m.Schema != Schema || m.Platform != "darwin-arm64" || m.MinimumMacOS != "26" || !ValidIdentity(m.Version, m.Commit) || len(m.Files) != len(Files) {
+	names := Files
+	if m.Schema == LegacySchema {
+		names = LegacyFiles
+	}
+	if (m.Schema != Schema && m.Schema != LegacySchema) || m.Platform != "darwin-arm64" || m.MinimumMacOS != "26" || !ValidIdentity(m.Version, m.Commit) || len(m.Files) != len(names) {
 		return m, fmt.Errorf("unsupported or incomplete release manifest")
 	}
 	allowed := map[string]bool{"release.json": true}
-	for _, n := range Files {
+	for _, n := range names {
 		allowed[n] = true
 	}
 	dirs := map[string]bool{".": true, "bin": true, "docs": true}
@@ -141,7 +148,7 @@ func Verify(root string) (Manifest, error) {
 	if err != nil {
 		return m, err
 	}
-	for _, name := range Files {
+	for _, name := range names {
 		want, ok := m.Files[name]
 		if !ok {
 			return m, fmt.Errorf("missing manifest entry %s", name)
@@ -225,7 +232,11 @@ func Install(bundle, prefix string) (Manifest, error) {
 				return m, e
 			}
 		}
-		names := append(append([]string{}, Files...), "release.json")
+		selected := Files
+		if m.Schema == LegacySchema {
+			selected = LegacyFiles
+		}
+		names := append(append([]string{}, selected...), "release.json")
 		sort.Strings(names)
 		for _, name := range names {
 			src, e := os.Open(filepath.Join(bundle, filepath.FromSlash(name)))

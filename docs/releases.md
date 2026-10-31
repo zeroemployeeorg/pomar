@@ -106,3 +106,14 @@ current setup. Login test fixtures now reap their own incomplete fake processes.
 These source changes are not a signed release or an installed/native-qualified
 Codex seat. Both source reviews and the guest security/lifecycle acceptance in
 [codex-seats.md](codex-seats.md) remain required before adoption.
+
+## Retained-agent release inventory (unreleased)
+
+Release manifest v2 adds the existing `pomar-agent-host`, `pomar-agent-login`,
+`pomar-agent-export` and Linux ARM64 `pomar-agent-guest` binaries to the
+verified distribution. The builder still pins the same source and toolchain.
+The verifier and installer also accept complete v1 releases for rollback; a
+v2 release missing any required agent tool is refused before activation.
+This source change does not install a host, start a service or move a seat.
+The host owner must bind the actual profile, guest image, credentials and
+resource reservation, then qualify the selected seat and rollback path.
