@@ -27,7 +27,9 @@ func TestStartRefusesUnentitledHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour})
+	// Reach the entitlement boundary independently of the live disk floor.
+	// Admission refusal remains covered by TestStartAdmission.
+	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour, Space: healthyFixtureSpace})
 	if err != nil {
 		t.Fatal(err)
 	}
