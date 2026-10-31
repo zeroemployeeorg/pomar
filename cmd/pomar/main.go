@@ -42,6 +42,8 @@ var sourceCommit = "unknown"
 
 const usage = `usage:
   pomar version
+  pomar actor-switch -root DIR -environment ID -session ID -incarnation ID -id OP -profile TARGET [-status]
+                                    replace a retained seat harness after fencing; inspect original with -status
   pomar seats [-root DIR] [-json] [-menu]  list the declared seats; -menu offers a numbered pick
   pomar session serve|new|ls|show|screen|send|attach|stop ...
                                     named programs on terminals that outlive every client; "pomar session" for its usage
@@ -128,6 +130,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 	switch {
 	case len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h":
 		return helpCmd(args, stdout, stderr)
+	case args[0] == "actor-switch":
+		return actorSwitchCmd(args[1:], stdout, stderr)
 	case args[0] == "doctor":
 		return doctorCmd(args[1:], stdout, stderr)
 	case args[0] == "health":

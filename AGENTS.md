@@ -142,3 +142,12 @@ See [docs/sessions.md](docs/sessions.md), and [docs/sessions-protocol.md](docs/s
 
 Contributors: see [CONTRIBUTING.md](CONTRIBUTING.md). The merge gate is
 `make verify`, run on the committed tree.
+
+## Cross-harness actor switching (unreleased source)
+
+`pomar actor-switch -root DIR -environment ID -session SESSION -incarnation OLD
+-id OP -profile TARGET` selects an owner-configured Claude/Codex profile after
+predecessor fencing, preserving the seat/session and retained disk. Inspect with
+`-status` and the ORIGINAL identities after response loss. No new ID bypass or
+cross-provider native transcript conversion. See [harness switching](docs/harness-switching.md).
+Integration source gates and live provider round-trip qualification remain NOT_RUN.

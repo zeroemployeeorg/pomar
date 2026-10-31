@@ -181,7 +181,7 @@ type VMSpec struct {
 }
 
 type Action struct {
-	Switch *HarnessSwitch `json:"harness_switch,omitempty"`
+	Switch               *HarnessSwitch  `json:"harness_switch,omitempty"`
 	Kind                 string          `json:"kind"`
 	Expected             string          `json:"expected_incarnation"`
 	State                string          `json:"state"`
@@ -792,9 +792,9 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/environments/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			OperationID string `json:"operation_id"`
-			Incarnation string `json:"expected_incarnation"`
-			SessionID string `json:"session_id,omitempty"`
+			OperationID   string `json:"operation_id"`
+			Incarnation   string `json:"expected_incarnation"`
+			SessionID     string `json:"session_id,omitempty"`
 			TargetProfile string `json:"target_profile,omitempty"`
 		}
 		if !decode(w, r, &req) {
