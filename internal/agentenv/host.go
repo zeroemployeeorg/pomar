@@ -546,6 +546,12 @@ func (h *Host) start(e *Environment) error {
 			return err
 		}
 	}
+	// Capture independent predecessor evidence before advancing its identity.
+	if e.Phase != "created" {
+		if _, err := h.ensurePredecessor(e); err != nil {
+			return err
+		}
+	}
 	e.Spec.Incarnation = randomID()
 	e.HelperExit = nil
 	// Adopt the current owner's immutable artifacts only after the previous
@@ -648,7 +654,7 @@ func (h *Host) stop(e *Environment) error {
 	for time.Now().Before(deadline) {
 		data, err := readVMStatus(e)
 		var status map[string]string
-		if err == nil && json.Unmarshal(data, &status) == nil && status["incarnation"] == e.Spec.Incarnation && status["vm_stopped"] == "true" && h.departed(e) {
+		if err == nil && json.Unmarshal(data, &status) == nil && status["environment"] == e.Spec.Environment && status["session"] == e.Spec.Session && status["incarnation"] == e.Spec.Incarnation && status["vm_stopped"] == "true" && h.departed(e) {
 			h.mu.Lock()
 			e.Phase = "stopped"
 			e.LastFence.WorkspaceWriteRevoked = true
@@ -709,6 +715,10 @@ func (h *Host) Handler() http.Handler {
 		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.fatal != nil {
+			failure(w, errors.New("owner journal durability uncertain; creation refused"))
+			return
+		}
 		if existing := h.envs[req.ID]; existing != nil {
 			action, ok := existing.Actions[req.OperationID]
 			if !ok || action.Kind != "create" || existing.Spec.Profile != req.Profile {
@@ -799,6 +809,10 @@ func (h *Host) Handler() http.Handler {
 		defer e.operationMu.Unlock()
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.fatal != nil {
+			failure(w, errors.New("owner journal durability uncertain; mutation refused"))
+			return
+		}
 		if existing, ok := e.Actions[req.OperationID]; ok {
 			if existing.Kind != kind || existing.Expected != req.Incarnation {
 				failure(w, ErrConflict)
@@ -828,7 +842,12 @@ func (h *Host) Handler() http.Handler {
 			err = h.stop(e)
 		case "replace":
 			if err = h.stop(e); err == nil {
-				err = h.start(e)
+				a := e.Actions[req.OperationID]
+				a.Fence = e.LastFence
+				e.Actions[req.OperationID] = a
+				if err = h.save(e); err == nil {
+					err = h.start(e)
+				}
 			}
 		}
 		a := e.Actions[req.OperationID]
