@@ -21,12 +21,13 @@ scratch=$(mktemp -d "$parent/pomar-build.XXXXXXXX")
 trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 export GOTOOLCHAIN=local GOFLAGS=-mod=readonly GOMAXPROCS=2
 mkdir "$scratch/bin"
-for command in pomar pomar-agent-owner pomar-ci-caller; do
+for command in pomar pomar-agent-owner pomar-ci-caller pomar-agent-host pomar-agent-login pomar-agent-export; do
  flags='-s -w'
  if [ "$command" = pomar ]; then flags="$flags -X main.version=$version -X main.sourceCommit=$commit"; fi
  CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags "$flags" -o "$scratch/bin/$command" "./cmd/$command"
 done
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags '-s -w' -o "$scratch/bin/pomar-shim-linux-arm64" ./cmd/pomar-shim
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -p 2 -trimpath -buildvcs=true -ldflags '-s -w' -o "$scratch/bin/pomar-agent-guest-linux-arm64" ./cmd/pomar-agent-guest
 # C/C++ dependencies also embed __FILE__; Swift-only maps leave those paths.
 swift_release() {
  swift build --package-path host --force-resolved-versions --configuration release --jobs 2 \

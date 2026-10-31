@@ -178,3 +178,74 @@ func TestIdentityRejectsPathsAndFloatingVersions(t *testing.T) {
 		t.Fatal("accepted abbreviated commit")
 	}
 }
+
+func TestLegacyReleaseRemainsVerifiableAfterToolExpansion(t *testing.T) {
+	root := t.TempDir()
+	m := Manifest{Schema: LegacySchema, Version: "v0.1.0", Commit: strings.Repeat("a", 40), Platform: "darwin-arm64", MinimumMacOS: "26", Files: map[string]File{}}
+	for _, name := range LegacyFiles {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		mode := os.FileMode(0644)
+		if strings.HasPrefix(name, "bin/") {
+			mode = 0755
+		}
+		if err := os.WriteFile(path, []byte("legacy"), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		f, err := HashFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m.Files[name] = f
+	}
+	b, _ := json.Marshal(m)
+	if err := os.WriteFile(filepath.Join(root, "release.json"), b, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Verify(root); err != nil {
+		t.Fatal("legacy rollback rejected", err)
+	}
+	prefix := filepath.Join(canonicalTempDir(t), "install")
+	current := fixture(t, "v0.2.0")
+	for _, bundle := range []string{root, current, root} {
+		m, err := Install(bundle, prefix)
+		if err != nil {
+			t.Fatal("cross-schema install/rollback rejected", err)
+		}
+		link, err := os.Readlink(filepath.Join(prefix, "current"))
+		if err != nil || link != filepath.Join("releases", m.Version) {
+			t.Fatal("wrong activated schema/version", link, err)
+		}
+		if _, err := Verify(filepath.Join(prefix, link)); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRetainedAgentToolInventoryRequiredBeforeActivation(t *testing.T) {
+	for _, name := range []string{"bin/pomar-agent-host", "bin/pomar-agent-login", "bin/pomar-agent-export", "bin/pomar-agent-guest-linux-arm64"} {
+		t.Run(name, func(t *testing.T) {
+			prefix := filepath.Join(canonicalTempDir(t), "install")
+			prior := fixture(t, "v0.1.0")
+			if _, err := Install(prior, prefix); err != nil {
+				t.Fatal(err)
+			}
+			candidate := fixture(t, "v0.2.0")
+			if err := os.Remove(filepath.Join(candidate, name)); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Install(candidate, prefix); err == nil {
+				t.Fatal("accepted incomplete retained-agent release")
+			}
+			link, err := os.Readlink(filepath.Join(prefix, "current"))
+			if err != nil || link != "releases/v0.1.0" {
+				t.Fatal("refusal changed active version", link, err)
+			}
+		})
+	}
+}

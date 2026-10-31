@@ -499,3 +499,15 @@ must still match and it is probed again. Absence completes only a previously
 fenced, durably tombstoned cleanup; it never proves an uncertain VM stopped.
 The directory and final journal are synced. Completed retries are inspection,
 not a second deletion. Host journal uncertainty holds further mutations.
+
+## Packaged retained-agent tools (unreleased)
+
+The v2 distribution includes the host-side `pomar-agent-host`,
+`pomar-agent-login` and `pomar-agent-export`, and the Linux ARM64 guest entry
+`pomar-agent-guest-linux-arm64`. They are hash-bound to the distribution source
+commit along with the Swift host and shim. Existing v1 distributions remain
+verifiable and installable for rollback. Installing bytes does not configure
+a guest, issue credentials, reserve capacity or authorize an actor launch.
+A native-seat move additionally needs the owning Runtime handoff, a positive
+source/backend fence, final native-history capture and exact target resume
+evidence; the inventory/plan command alone cannot perform that move.
