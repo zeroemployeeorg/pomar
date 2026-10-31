@@ -1,13 +1,20 @@
 # Unreleased actor-switch integration slice
 
-sow: pomar-SOW-87
-
 Owner-profile Claude/Codex switching now retains stable environment/session and
 native histories while fencing the predecessor before durable target selection.
 A missing retained disk refuses reseating instead of cloning a fresh disk.
 No prompt/tool replay or cross-vendor native thread conversion is performed.
-Source gates and live Claude→Codex→Claude qualification are NOT_RUN for this
-integration head. Nothing installs a service, creates credentials or swaps seats.
+The actor-switch source at `bc6a0f1f` passed full `make verify` on Apple silicon
+on 2026-10-31, including Go race checks and 89 Swift tests. Later changes
+require their own committed-tree gate. Live Claude→Codex→Claude qualification
+remains NOT_RUN. Installation must first check existing journals, report probe
+time and complete a native round trip.
+
+Predecessor eligibility now follows a durable current reconciliation operation.
+A later uncertain observation supersedes older positive evidence even after an
+ordinary stop or owner reload. Historical operation retries remain historical;
+recovery requires a fresh explicit positive reconciliation. Legacy journals
+without a current marker also require a fresh explicit observation.
 Retained actor budgets and remote backends remain separate integration work.
 
 # Release tools without coupling production to development

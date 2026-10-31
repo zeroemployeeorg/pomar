@@ -200,14 +200,17 @@ type Fence struct {
 	State                 string `json:"state"`
 }
 type Environment struct {
-	operationMu   sync.Mutex
-	Spec          VMSpec            `json:"spec"`
-	Phase         string            `json:"phase"`
-	Process       proc.Process      `json:"process"`
-	Actions       map[string]Action `json:"actions"`
-	LastFence     *Fence            `json:"last_fence,omitempty"`
-	LaunchRevoked []string          `json:"launch_revoked,omitempty"`
-	HelperExit    *HelperExit       `json:"helper_exit,omitempty"`
+	operationMu sync.Mutex
+	Spec        VMSpec            `json:"spec"`
+	Phase       string            `json:"phase"`
+	Process     proc.Process      `json:"process"`
+	Actions     map[string]Action `json:"actions"`
+	LastFence   *Fence            `json:"last_fence,omitempty"`
+	// CurrentReconciliation is set durably before probing. Historical actions
+	// remain inspectable but cannot supersede a later uncertain observation.
+	CurrentReconciliation string      `json:"current_reconciliation,omitempty"`
+	LaunchRevoked         []string    `json:"launch_revoked,omitempty"`
+	HelperExit            *HelperExit `json:"helper_exit,omitempty"`
 }
 
 // HelperExit is supervisor-observed process departure, never a VM stop receipt.

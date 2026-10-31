@@ -18,21 +18,18 @@ func syncDirectory(path string) error {
 	return f.Sync()
 }
 
-// predecessorOperation selects only a completed, fully bound observation.
-// Stable ordering makes inspection independent of Go map iteration order.
+// predecessorOperation accepts only the authoritative current observation.
+// Never order operation IDs or timestamps to infer which observation is newest.
 func predecessorOperation(e *Environment, incarnation string) string {
-	ids := make([]string, 0, len(e.Actions))
-	for id := range e.Actions {
-		ids = append(ids, id)
+	id := e.CurrentReconciliation
+	a, ok := e.Actions[id]
+	if !ok || id == "" {
+		return ""
 	}
-	sort.Strings(ids)
-	for _, id := range ids {
-		a := e.Actions[id]
-		r := a.Reconciliation
-		f := a.Fence
-		if a.Kind == "reconcile" && a.State == "completed" && a.Expected == incarnation && r != nil && f != nil && f.Incarnation == incarnation && f.NetworkRevoked && f.AdapterAccessRevoked && f.WorkspaceWriteRevoked && f.TerminationConfirmed && r.Request.OperationID == id && r.Request.SessionID == e.Spec.Session && r.Request.Incarnation == incarnation && r.CurrentScope == "fenced_now" && r.ReplacementEligible && len(r.Issues) == 0 {
-			return id
-		}
+	r := a.Reconciliation
+	f := a.Fence
+	if a.Kind == "reconcile" && a.State == "completed" && a.Expected == incarnation && r != nil && f != nil && f.Incarnation == incarnation && f.NetworkRevoked && f.AdapterAccessRevoked && f.WorkspaceWriteRevoked && f.TerminationConfirmed && r.Request.OperationID == id && r.Request.SessionID == e.Spec.Session && r.Request.Incarnation == incarnation && r.CurrentScope == "fenced_now" && r.ReplacementEligible && len(r.Issues) == 0 {
+		return id
 	}
 	return ""
 }
@@ -55,6 +52,21 @@ func (h *Host) ensurePredecessor(e *Environment) (string, error) {
 			return "", errors.New("predecessor evidence unavailable or changed")
 		}
 		return id, nil
+	}
+	// An ordinary stop is not a native access probe. It must not restore a
+	// superseded positive receipt, nor replay the deterministic automatic ID.
+	// Unmarked legacy observations have no reliable ordering: require a new
+	// explicit reconciliation instead of guessing from IDs or wall-clock time.
+	if id := e.CurrentReconciliation; id != "" {
+		a, ok := e.Actions[id]
+		if !ok || a.Kind != "reconcile" || a.Expected == e.Spec.Incarnation {
+			return "", errors.New("current predecessor reconciliation is not eligible; fresh explicit reconciliation required")
+		}
+	}
+	for _, a := range e.Actions {
+		if a.Kind == "reconcile" && a.Expected == e.Spec.Incarnation {
+			return "", errors.New("predecessor observation is not current; fresh explicit reconciliation required")
+		}
 	}
 	ids := make([]string, 0, len(e.Actions))
 	for id := range e.Actions {

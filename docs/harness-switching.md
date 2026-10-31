@@ -118,3 +118,17 @@ receipts, remove the journal or create a fresh disk to bypass that refusal.
 Predecessor probing runs under the host-wide lock; the native pilot must report
 probe duration and effects on concurrent control requests. No native-pilot timing
 or compatibility with existing live journals is claimed by source tests.
+
+A current positive predecessor reconciliation has no age limit. Reuse checks its
+original private evidence bytes and full binding; it does not perform a periodic
+refresh or prove that outside state remained unchanged. A later reconciliation
+becomes current durably before its probe: uncertainty or crash-dispatching
+invalidates older positives, including after an ordinary stop or owner reload.
+A new explicit positive observation is required for recovery.
+
+Rolling back to a binary from before this repair reopens the stale-positive
+reuse defect: that binary does not enforce the current-observation marker.
+An install or rollback packet must identify this compatibility limit. Keep
+execution stopped if recovering under a pre-repair binary; do not treat an old
+positive journal as permission to resume. Preserve journals and recover through
+a repaired owner with fresh explicit reconciliation.
