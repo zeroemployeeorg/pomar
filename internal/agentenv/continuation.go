@@ -298,6 +298,11 @@ func (h *Host) continuationHandler(w http.ResponseWriter, r *http.Request) {
 		failure(w, errors.New("continuation execution transition does not bind"))
 		return
 	}
+	if launch.Switch != nil && launch.Switch.FromAgent != launch.Switch.TargetAgent {
+		h.mu.Unlock()
+		failure(w, errors.New("native continuation cannot cross harness providers; resume the target harness history"))
+		return
+	}
 	binding := ContinuationBinding{Request: req, OriginalFence: *original.Reconciliation, PredecessorFence: *predecessor.Reconciliation}
 	encoded, _ := json.Marshal(req)
 	binding.RequestSHA256 = digest(encoded)

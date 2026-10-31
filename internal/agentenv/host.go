@@ -168,6 +168,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 
 // VMSpec's JSON keys also name the Swift VM owner's Codable options.
 type VMSpec struct {
+	RequireRetainedDisk bool `json:"requireRetainedDisk,omitempty"`
 	HostConfig
 	Environment   string `json:"environment"`
 	Profile       string `json:"profile,omitempty"`
@@ -180,6 +181,7 @@ type VMSpec struct {
 }
 
 type Action struct {
+	Switch *HarnessSwitch `json:"harness_switch,omitempty"`
 	Kind                 string          `json:"kind"`
 	Expected             string          `json:"expected_incarnation"`
 	State                string          `json:"state"`
@@ -530,6 +532,9 @@ func (h *Host) start(e *Environment) error {
 	if err != nil {
 		return err
 	}
+	if hasHarnessSwitch(e) && harnessBinding(cfg) != harnessBinding(e.Spec.HostConfig) {
+		return errors.New("selected harness profile changed; original selection held")
+	}
 	if cfg.SeatDeclarationSHA256 != e.Spec.SeatDeclarationSHA256 || !reflect.DeepEqual(cfg.SeatLaunch, e.Spec.SeatLaunch) {
 		return errors.New("retained seat declaration changed; original environment held")
 	}
@@ -548,6 +553,7 @@ func (h *Host) start(e *Environment) error {
 	}
 	// Capture independent predecessor evidence before advancing its identity.
 	if e.Phase != "created" {
+		e.Spec.RequireRetainedDisk = true
 		if _, err := h.ensurePredecessor(e); err != nil {
 			return err
 		}
@@ -788,6 +794,8 @@ func (h *Host) Handler() http.Handler {
 		var req struct {
 			OperationID string `json:"operation_id"`
 			Incarnation string `json:"expected_incarnation"`
+			SessionID string `json:"session_id,omitempty"`
+			TargetProfile string `json:"target_profile,omitempty"`
 		}
 		if !decode(w, r, &req) {
 			return
@@ -814,7 +822,7 @@ func (h *Host) Handler() http.Handler {
 			return
 		}
 		if existing, ok := e.Actions[req.OperationID]; ok {
-			if existing.Kind != kind || existing.Expected != req.Incarnation {
+			if existing.Kind != kind || existing.Expected != req.Incarnation || !sameHarnessRequest(existing.Switch, req.TargetProfile, req.SessionID) {
 				failure(w, ErrConflict)
 				return
 			}
@@ -829,7 +837,24 @@ func (h *Host) Handler() http.Handler {
 			failure(w, errors.New("invalid operation id"))
 			return
 		}
-		e.Actions[req.OperationID] = Action{Kind: kind, Expected: req.Incarnation, State: "dispatching"}
+		var target HostConfig
+		var switching *HarnessSwitch
+		if req.TargetProfile != "" {
+			if kind != "replace" {
+				failure(w, errors.New("target_profile is only valid on replacement"))
+				return
+			}
+			var err error
+			target, switching, err = h.prepareHarnessSwitch(e, req.TargetProfile, req.SessionID)
+			if err != nil {
+				failure(w, err)
+				return
+			}
+		} else if req.SessionID != "" {
+			failure(w, errors.New("session_id requires an explicit target_profile"))
+			return
+		}
+		e.Actions[req.OperationID] = Action{Kind: kind, Expected: req.Incarnation, State: "dispatching", Switch: switching}
 		if err := h.save(e); err != nil {
 			failure(w, err)
 			return
@@ -846,7 +871,12 @@ func (h *Host) Handler() http.Handler {
 				a.Fence = e.LastFence
 				e.Actions[req.OperationID] = a
 				if err = h.save(e); err == nil {
-					err = h.start(e)
+					if switching != nil {
+						err = h.selectHarness(e, req.OperationID, target)
+					}
+					if err == nil {
+						err = h.start(e)
+					}
 				}
 			}
 		}
