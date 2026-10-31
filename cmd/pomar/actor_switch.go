@@ -76,6 +76,7 @@ func actorSwitchCall(c *http.Client, environment string, body actorSwitchRequest
 		Actions map[string]agentenv.Action `json:"actions"`
 	}
 	if json.Unmarshal(data, &reply) != nil {
+		fmt.Fprintln(stderr, "switch response has an invalid receipt shape; inspect the original operation")
 		return 1
 	}
 	action := reply.Actions[body.Operation]
