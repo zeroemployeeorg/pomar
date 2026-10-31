@@ -220,3 +220,69 @@ func TestStartIncompletePredecessorDoesNotAdvanceIncarnation(t *testing.T) {
 		t.Fatal("advanced while predecessor unknown")
 	}
 }
+
+func TestStartAfterPrebootReconciliationAllowsFirstDiskCreation(t *testing.T) {
+	h, e, request := prebootFixture(t)
+	h.config = e.Spec.HostConfig
+	h.config.MaxLive = 2
+	if w := reconcileCall(h, request); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	// Stop at the production launch journal, before any native helper runs.
+	e.Spec.EgressSocket = filepath.Join(e.Spec.Directory, "occupied")
+	if err := os.WriteFile(e.Spec.EgressSocket, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.start(e); err == nil {
+		t.Fatal("expected occupied egress refusal")
+	}
+	if e.Phase != "launching" || e.Spec.RequireRetainedDisk {
+		t.Fatal("first disk creation was forbidden", e.Phase, e.Spec.RequireRetainedDisk)
+	}
+	if _, err := os.Lstat(e.Spec.Rootfs); !os.IsNotExist(err) {
+		t.Fatal("unexpected disk mutation", err)
+	}
+}
+
+func TestStartPreservesDiskRequirementAfterPrebootRefusal(t *testing.T) {
+	h, e, request := prebootFixture(t)
+	e.Spec.RequireRetainedDisk = true // A prior launch already required this disk.
+	h.config = e.Spec.HostConfig
+	h.config.MaxLive = 2
+	if w := reconcileCall(h, request); w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	e.Spec.EgressSocket = filepath.Join(e.Spec.Directory, "occupied")
+	if err := os.WriteFile(e.Spec.EgressSocket, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.start(e); err == nil {
+		t.Fatal("expected occupied egress refusal")
+	}
+	if e.Phase != "launching" || !e.Spec.RequireRetainedDisk {
+		t.Fatal("lost the existing disk retention requirement")
+	}
+}
+
+func TestStartRequiresPreviouslyObservedDiskEvenWhenRemoved(t *testing.T) {
+	h, e, _, _ := reconciliationFixture(t)
+	h.config = e.Spec.HostConfig
+	h.config.MaxLive = 2
+	e.Phase = "stopped"
+	if _, err := h.ensurePredecessor(e); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(e.Spec.Rootfs); err != nil {
+		t.Fatal(err)
+	}
+	e.Spec.EgressSocket = filepath.Join(e.Spec.Directory, "occupied")
+	if err := os.WriteFile(e.Spec.EgressSocket, []byte("occupied"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.start(e); err == nil {
+		t.Fatal("expected occupied egress refusal")
+	}
+	if e.Phase != "launching" || !e.Spec.RequireRetainedDisk {
+		t.Fatal("missing used disk allowed fresh cloning")
+	}
+}

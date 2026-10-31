@@ -101,3 +101,20 @@ A selected switch durably requires the retained disk on subsequent boots. If tha
 
 Same-vendor reseating also requires the retained disk. CPU and VM memory allocations remain unchanged across switches. Retained actor
 budget enforcement is a separate integration series and is not implemented by this slice.
+
+## Upgrade and recovery limits before installation
+
+After a selected switch, starts pin the selected harness binding. A changed client
+archive/version/profile is held; this source does not implement an in-place
+client upgrade. Keep the original installed profile to resume the retained seat.
+An upgrade needs a separately reviewed owner operation; do not switch away and
+back as a workaround or silently replace the pinned archive.
+
+Before installation, the owner must read real journals for launch-operation and
+current-incarnation fence coverage. Legacy journals with ambiguous multiple
+launches or no bound fence remain refused. Preserve the original journal and
+obtain owner reconciliation with positive process/disk evidence; never synthesize
+receipts, remove the journal or create a fresh disk to bypass that refusal.
+Predecessor probing runs under the host-wide lock; the native pilot must report
+probe duration and effects on concurrent control requests. No native-pilot timing
+or compatibility with existing live journals is claimed by source tests.

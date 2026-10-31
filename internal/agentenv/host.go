@@ -553,9 +553,15 @@ func (h *Host) start(e *Environment) error {
 	}
 	// Capture independent predecessor evidence before advancing its identity.
 	if e.Phase != "created" {
-		e.Spec.RequireRetainedDisk = true
-		if _, err := h.ensurePredecessor(e); err != nil {
+		predecessor, err := h.ensurePredecessor(e)
+		if err != nil {
 			return err
+		}
+		// A positively observed refusal before first boot has no disk yet.
+		// Preserve an existing retention requirement across later refusals;
+		// absence alone must never authorize replacing a previously used disk.
+		if e.Actions[predecessor].Reconciliation.HistoricalExecution != "preboot_refused" {
+			e.Spec.RequireRetainedDisk = true
 		}
 	}
 	e.Spec.Incarnation = randomID()
