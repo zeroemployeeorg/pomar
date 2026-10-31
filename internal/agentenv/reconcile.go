@@ -256,6 +256,7 @@ func (h *Host) reconcileLocked(e *Environment, req ReconcileRequest) (Action, er
 		receipt.HistoricalExecution = "preboot_refused"
 	}
 	e.Phase = "reconciling"
+	e.CurrentReconciliation = req.OperationID
 	e.LaunchRevoked = append(e.LaunchRevoked, req.Incarnation)
 	e.Actions[req.OperationID] = Action{Kind: "reconcile", Expected: req.Incarnation, State: "dispatching", Reconciliation: receipt}
 	if g := h.gates[e.Spec.Environment]; g != nil {

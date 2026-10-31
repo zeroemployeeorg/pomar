@@ -150,4 +150,10 @@ Contributors: see [CONTRIBUTING.md](CONTRIBUTING.md). The merge gate is
 predecessor fencing, preserving the seat/session and retained disk. Inspect with
 `-status` and the ORIGINAL identities after response loss. No new ID bypass or
 cross-provider native transcript conversion. See [harness switching](docs/harness-switching.md).
-Integration source gates and live provider round-trip qualification remain NOT_RUN.
+The actor-switch source at `bc6a0f1f` passed full `make verify` on Apple silicon
+on 2026-10-31, including Go race checks and 89 Swift tests. Later changes
+require their own committed-tree gate. Live provider round-trip qualification
+remains NOT_RUN.
+A later uncertain reconciliation invalidates older positive observations for
+launch authority; an ordinary stop cannot restore them. Recover with a fresh
+explicit reconciliation and inspect its original result.
