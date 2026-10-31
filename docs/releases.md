@@ -1,3 +1,15 @@
+# Unreleased actor-switch integration slice
+
+sow: pomar-SOW-87
+
+Owner-profile Claude/Codex switching now retains stable environment/session and
+native histories while fencing the predecessor before durable target selection.
+A missing retained disk refuses reseating instead of cloning a fresh disk.
+No prompt/tool replay or cross-vendor native thread conversion is performed.
+Source gates and live Claude→Codex→Claude qualification are NOT_RUN for this
+integration head. Nothing installs a service, creates credentials or swaps seats.
+Retained actor budgets and remote backends remain separate integration work.
+
 # Release tools without coupling production to development
 
 A release is an explicit version bound to a reviewed clean commit, complete

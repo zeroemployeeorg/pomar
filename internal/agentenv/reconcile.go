@@ -158,37 +158,44 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 	defer e.operationMu.Unlock()
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	a, err := h.reconcileLocked(e, req)
+	if err != nil {
+		failure(w, err)
+		return
+	}
+	respond(w, 200, map[string]any{"operation_id": req.OperationID, "action": a})
+}
+
+// reconcileLocked is shared by explicit reconciliation and predecessor capture.
+// Both the environment operation lock and h.mu must remain held throughout.
+func (h *Host) reconcileLocked(e *Environment, req ReconcileRequest) (Action, error) {
+	if h.fatal != nil {
+		return Action{}, errors.New("owner journal durability uncertain")
+	}
 	input, _ := json.Marshal(req)
 	hash := digest(input)
 	if a, ok := e.Actions[req.OperationID]; ok {
 		if a.Kind != "reconcile" || a.Reconciliation == nil || a.Reconciliation.InputSHA256 != hash {
-			failure(w, ErrConflict)
-			return
+			return Action{}, ErrConflict
 		}
-		respond(w, 200, map[string]any{"operation_id": req.OperationID, "action": a})
-		return
+		return a, nil
 	}
 	if req.Incarnation != e.Spec.Incarnation || req.SessionID != e.Spec.Session {
-		failure(w, ErrStale)
-		return
+		return Action{}, ErrStale
 	}
 	if h.fatal != nil {
-		failure(w, errors.New("owner journal durability uncertain"))
-		return
+		return Action{}, errors.New("owner journal durability uncertain")
 	}
 	if e.Phase != "execution_unknown" && e.Phase != "revoking" && e.Phase != "reconciling" && e.Phase != "stopped" && e.Phase != "fenced" {
-		failure(w, errors.New("reconciliation requires a held or stopped execution scope"))
-		return
+		return Action{}, errors.New("reconciliation requires a held or stopped execution scope")
 	}
 	launch, launchOK := e.Actions[req.LaunchOperation]
 	oldFence, fenceOK := e.Actions[req.FenceOperation]
 	if !launchOK || (launch.Kind != "start" && launch.Kind != "replace") || launch.State != "completed" || !fenceOK || oldFence.Fence == nil || oldFence.Expected != req.Incarnation || oldFence.Fence.Incarnation != req.Incarnation || !oldFence.Fence.NetworkRevoked || !oldFence.Fence.AdapterAccessRevoked {
-		failure(w, errors.New("original launch and retained scope revocation do not bind"))
-		return
+		return Action{}, errors.New("original launch and retained scope revocation do not bind")
 	}
 	if launch.ResultingIncarnation != "" && launch.ResultingIncarnation != req.Incarnation {
-		failure(w, ErrConflict)
-		return
+		return Action{}, ErrConflict
 	}
 	if launch.ResultingIncarnation == "" {
 		// Legacy journals did not store the output incarnation on a start action.
@@ -201,41 +208,34 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if count != 1 {
-			failure(w, errors.New("legacy launch ownership is ambiguous"))
-			return
+			return Action{}, errors.New("legacy launch ownership is ambiguous")
 		}
 	}
 	configFile := filepath.Join(e.Spec.Directory, "vm-config-"+req.Incarnation+".json")
 	configBytes, err := os.ReadFile(configFile)
 	if err != nil {
-		failure(w, errors.New("original launch config unavailable"))
-		return
+		return Action{}, errors.New("original launch config unavailable")
 	}
 	var original VMSpec
 	if json.Unmarshal(configBytes, &original) != nil || original.Environment != e.Spec.Environment || original.Session != req.SessionID || original.Incarnation != req.Incarnation || original.Rootfs != e.Spec.Rootfs || original.Helper != e.Spec.Helper || original.Directory != e.Spec.Directory || original.Store != e.Spec.Store {
-		failure(w, errors.New("original launch config identity mismatch"))
-		return
+		return Action{}, errors.New("original launch config identity mismatch")
 	}
 	args := strings.Fields(e.Process.Args)
 	if e.Process.UID != os.Getuid() || len(args) != 4 || args[0] != original.Helper || args[1] != "agent-environment" || args[2] != "--config" || args[3] != configFile {
-		failure(w, errors.New("retained process launch ownership mismatch"))
-		return
+		return Action{}, errors.New("retained process launch ownership mismatch")
 	}
 	birth, err := time.ParseInLocation("Mon Jan _2 15:04:05 2006", e.Process.Start, time.Local)
 	if err != nil || birth.Unix() <= 0 {
-		failure(w, errors.New("retained process birth unavailable"))
-		return
+		return Action{}, errors.New("retained process birth unavailable")
 	}
 	statusBytes, err := readVMStatus(e)
 	preboot := errors.Is(err, os.ErrNotExist) && observedPrebootRefusal(e, birth)
 	if err != nil && !preboot {
-		failure(w, errors.New("original VM receipt unavailable"))
-		return
+		return Action{}, errors.New("original VM receipt unavailable")
 	}
 	var originalStatus map[string]string
 	if !preboot && (json.Unmarshal(statusBytes, &originalStatus) != nil || originalStatus["incarnation"] != req.Incarnation || originalStatus["session"] != req.SessionID || originalStatus["environment"] != e.Spec.Environment) {
-		failure(w, errors.New("original VM receipt identity mismatch"))
-		return
+		return Action{}, errors.New("original VM receipt identity mismatch")
 	}
 	receipt := &Reconciliation{Request: req, InputSHA256: hash, HistoricalExecution: "unknown", CurrentScope: "unknown", OriginalConfigSHA256: digest(configBytes), OriginalStatusSHA256: digest(statusBytes), Issues: []string{}}
 	container := filepath.Join(original.Store, "containers", "agent-"+original.Environment+"-"+original.Incarnation)
@@ -243,13 +243,11 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 		// Exit 2 is the trusted native helper's reserved refusal before VM/disk
 		// effects. Missing files or process absence alone never enter this path.
 		if original.Rootfs != filepath.Join(original.Directory, "workspace.ext4") || original.Store == "" || !filepath.IsAbs(original.Store) {
-			failure(w, errors.New("preboot workspace/container binding incomplete"))
-			return
+			return Action{}, errors.New("preboot workspace/container binding incomplete")
 		}
 		for _, path := range []string{original.Rootfs, container} {
 			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-				failure(w, errors.New("preboot workspace/container absence unconfirmed"))
-				return
+				return Action{}, errors.New("preboot workspace/container absence unconfirmed")
 			}
 		}
 		exitBytes, _ := json.Marshal(e.HelperExit)
@@ -269,8 +267,7 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err = h.save(e); err != nil {
-		failure(w, err)
-		return
+		return Action{}, err
 	}
 	// The API guard, root ownership lock and operation lock are held through
 	// the probe AND both durable commits. No replacement or forwarded adapter
@@ -302,8 +299,7 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 	receipt.EvidenceSHA256 = digest(b)
 	if err = writeEvidence(filepath.Join(e.Spec.Directory, receipt.EvidenceFile), b); err != nil {
 		h.fatal = err
-		failure(w, err)
-		return
+		return Action{}, err
 	}
 	confirmed := probeErr == nil && evidence.Confirmed && len(receipt.Issues) == 0
 	fence := &Fence{Incarnation: req.Incarnation, ScopeID: "scope-" + req.Incarnation, NetworkRevoked: true, AdapterAccessRevoked: true, WorkspaceWriteRevoked: confirmed, TerminationConfirmed: confirmed, State: "execution_unknown"}
@@ -326,11 +322,10 @@ func (h *Host) reconcileHandler(w http.ResponseWriter, r *http.Request) {
 		e.Phase = "execution_unknown"
 		receipt.ReplacementEligible = false
 		h.fatal = err
-		failure(w, err)
-		return
+		return Action{}, err
 	}
 	// The old stop Action.Fence and vm-status bytes were never mutated.
-	respond(w, 200, map[string]any{"operation_id": req.OperationID, "action": a})
+	return a, nil
 }
 
 func observedPrebootRefusal(e *Environment, birth time.Time) bool {

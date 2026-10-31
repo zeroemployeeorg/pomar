@@ -168,6 +168,7 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 
 // VMSpec's JSON keys also name the Swift VM owner's Codable options.
 type VMSpec struct {
+	RequireRetainedDisk bool `json:"requireRetainedDisk,omitempty"`
 	HostConfig
 	Environment   string `json:"environment"`
 	Profile       string `json:"profile,omitempty"`
@@ -180,6 +181,7 @@ type VMSpec struct {
 }
 
 type Action struct {
+	Switch               *HarnessSwitch  `json:"harness_switch,omitempty"`
 	Kind                 string          `json:"kind"`
 	Expected             string          `json:"expected_incarnation"`
 	State                string          `json:"state"`
@@ -530,6 +532,9 @@ func (h *Host) start(e *Environment) error {
 	if err != nil {
 		return err
 	}
+	if hasHarnessSwitch(e) && harnessBinding(cfg) != harnessBinding(e.Spec.HostConfig) {
+		return errors.New("selected harness profile changed; original selection held")
+	}
 	if cfg.SeatDeclarationSHA256 != e.Spec.SeatDeclarationSHA256 || !reflect.DeepEqual(cfg.SeatLaunch, e.Spec.SeatLaunch) {
 		return errors.New("retained seat declaration changed; original environment held")
 	}
@@ -544,6 +549,19 @@ func (h *Host) start(e *Environment) error {
 		// third time as it copies the bytes in.
 		if err := ValidateFixture(h.config.Root, *f, cfg.Agent, os.Getuid()); err != nil {
 			return err
+		}
+	}
+	// Capture independent predecessor evidence before advancing its identity.
+	if e.Phase != "created" {
+		predecessor, err := h.ensurePredecessor(e)
+		if err != nil {
+			return err
+		}
+		// A positively observed refusal before first boot has no disk yet.
+		// Preserve an existing retention requirement across later refusals;
+		// absence alone must never authorize replacing a previously used disk.
+		if e.Actions[predecessor].Reconciliation.HistoricalExecution != "preboot_refused" {
+			e.Spec.RequireRetainedDisk = true
 		}
 	}
 	e.Spec.Incarnation = randomID()
@@ -648,7 +666,7 @@ func (h *Host) stop(e *Environment) error {
 	for time.Now().Before(deadline) {
 		data, err := readVMStatus(e)
 		var status map[string]string
-		if err == nil && json.Unmarshal(data, &status) == nil && status["incarnation"] == e.Spec.Incarnation && status["vm_stopped"] == "true" && h.departed(e) {
+		if err == nil && json.Unmarshal(data, &status) == nil && status["environment"] == e.Spec.Environment && status["session"] == e.Spec.Session && status["incarnation"] == e.Spec.Incarnation && status["vm_stopped"] == "true" && h.departed(e) {
 			h.mu.Lock()
 			e.Phase = "stopped"
 			e.LastFence.WorkspaceWriteRevoked = true
@@ -709,6 +727,10 @@ func (h *Host) Handler() http.Handler {
 		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.fatal != nil {
+			failure(w, errors.New("owner journal durability uncertain; creation refused"))
+			return
+		}
 		if existing := h.envs[req.ID]; existing != nil {
 			action, ok := existing.Actions[req.OperationID]
 			if !ok || action.Kind != "create" || existing.Spec.Profile != req.Profile {
@@ -776,8 +798,10 @@ func (h *Host) Handler() http.Handler {
 	})
 	mux.HandleFunc("POST /v1/environments/{id}/{action}", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			OperationID string `json:"operation_id"`
-			Incarnation string `json:"expected_incarnation"`
+			OperationID   string `json:"operation_id"`
+			Incarnation   string `json:"expected_incarnation"`
+			SessionID     string `json:"session_id,omitempty"`
+			TargetProfile string `json:"target_profile,omitempty"`
 		}
 		if !decode(w, r, &req) {
 			return
@@ -799,8 +823,12 @@ func (h *Host) Handler() http.Handler {
 		defer e.operationMu.Unlock()
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		if h.fatal != nil {
+			failure(w, errors.New("owner journal durability uncertain; mutation refused"))
+			return
+		}
 		if existing, ok := e.Actions[req.OperationID]; ok {
-			if existing.Kind != kind || existing.Expected != req.Incarnation {
+			if existing.Kind != kind || existing.Expected != req.Incarnation || !sameHarnessRequest(existing.Switch, req.TargetProfile, req.SessionID) {
 				failure(w, ErrConflict)
 				return
 			}
@@ -815,7 +843,24 @@ func (h *Host) Handler() http.Handler {
 			failure(w, errors.New("invalid operation id"))
 			return
 		}
-		e.Actions[req.OperationID] = Action{Kind: kind, Expected: req.Incarnation, State: "dispatching"}
+		var target HostConfig
+		var switching *HarnessSwitch
+		if req.TargetProfile != "" {
+			if kind != "replace" {
+				failure(w, errors.New("target_profile is only valid on replacement"))
+				return
+			}
+			var err error
+			target, switching, err = h.prepareHarnessSwitch(e, req.TargetProfile, req.SessionID)
+			if err != nil {
+				failure(w, err)
+				return
+			}
+		} else if req.SessionID != "" {
+			failure(w, errors.New("session_id requires an explicit target_profile"))
+			return
+		}
+		e.Actions[req.OperationID] = Action{Kind: kind, Expected: req.Incarnation, State: "dispatching", Switch: switching}
 		if err := h.save(e); err != nil {
 			failure(w, err)
 			return
@@ -828,7 +873,17 @@ func (h *Host) Handler() http.Handler {
 			err = h.stop(e)
 		case "replace":
 			if err = h.stop(e); err == nil {
-				err = h.start(e)
+				a := e.Actions[req.OperationID]
+				a.Fence = e.LastFence
+				e.Actions[req.OperationID] = a
+				if err = h.save(e); err == nil {
+					if switching != nil {
+						err = h.selectHarness(e, req.OperationID, target)
+					}
+					if err == nil {
+						err = h.start(e)
+					}
+				}
 			}
 		}
 		a := e.Actions[req.OperationID]

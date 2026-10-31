@@ -25,6 +25,7 @@ public enum AgentEnvironment {
         }
     }
     public struct Options: Codable, Sendable {
+        public var requireRetainedDisk: Bool? = nil
         public var seatLaunch: SeatLaunch? = nil
         public var environment: String
         public var session: String
@@ -241,6 +242,13 @@ public enum AgentEnvironment {
     }
 
     /// The broker's arguments: the Codex default, or Claude Code's actor.
+    static func ensureRootfs(_ o: Options) throws {
+        if !FileManager.default.fileExists(atPath: o.rootfs) {
+            guard o.requireRetainedDisk != true else { throw CocoaError(.fileNoSuchFile) }
+            _ = try Rootfs.clone(base: o.base, to: o.rootfs)
+        }
+    }
+
     public static func brokerArguments(_ o: Options) -> [String] {
         var args = ["/pomar/agent-guest", "-environment", o.environment, "-session", o.session, "-incarnation", o.incarnation, "-source-sha", o.sourceSHA,
                     "-controller-capabilities", (o.controllerCapabilities ?? []).joined(separator: ",")]
@@ -279,7 +287,7 @@ public enum AgentEnvironment {
             let initImage = try await manager.imageStore.get(reference: o.initRef)
             let image = try await manager.imageStore.get(reference: o.imageRef)
             guard initImage.digest == o.initDigest, image.digest == o.imageDigest else { throw CocoaError(.fileReadCorruptFile) }
-            if !FileManager.default.fileExists(atPath: o.rootfs) { _ = try Rootfs.clone(base: o.base, to: o.rootfs) }
+            try ensureRootfs(o)
             stage = "record-launch-custody"
             try AgentLaunchCustody.write(directory: o.directory, rootfs: o.rootfs,
                 environment: o.environment, session: o.session, incarnation: o.incarnation, sourceSHA: o.sourceSHA)

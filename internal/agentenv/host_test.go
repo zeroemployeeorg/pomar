@@ -33,8 +33,8 @@ func TestStopUncertaintyDoesNotPermitReplacement(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			dir := t.TempDir()
-			e := &Environment{Spec: VMSpec{Environment: "env", Incarnation: "actor", Directory: dir}, Phase: "running", Process: proc.Process{PID: 42, Start: "birth"}, Actions: map[string]Action{}}
-			data, _ := json.Marshal(map[string]string{"incarnation": test.receiptIncarnation, "vm_stopped": "true"})
+			e := &Environment{Spec: VMSpec{Environment: "env", Session: "session", Incarnation: "actor", Directory: dir}, Phase: "running", Process: proc.Process{PID: 42, Start: "birth"}, Actions: map[string]Action{}}
+			data, _ := json.Marshal(map[string]string{"environment": e.Spec.Environment, "session": e.Spec.Session, "incarnation": test.receiptIncarnation, "vm_stopped": "true"})
 			os.WriteFile(filepath.Join(dir, "vm-status.json"), data, 0o600)
 			g, _ := NewEgress([]string{"allowed.example"})
 			h := &Host{envs: map[string]*Environment{"env": e}, gates: map[string]*Egress{"env": g}, servers: map[string]*http.Server{}, processes: test.observer, stopWait: time.Millisecond}

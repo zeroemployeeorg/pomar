@@ -47,6 +47,7 @@ type catalogueFlag struct {
 
 func catalogueFlags() map[string][]catalogueFlag {
 	return map[string][]catalogueFlag{
+		"actor-switch":      {{"root", "path", "Owner host data root"}, {"environment", "string", "Retained environment ID"}, {"session", "string", "Stable seat session ID"}, {"incarnation", "string", "Original actor incarnation"}, {"id", "string", "Durable original replacement operation ID"}, {"profile", "string", "Owner-configured target harness profile"}, {"status", "bool", "Inspect original operation without dispatch"}},
 		"manager_selection": {{"socket", "path", "Explicit approved manager socket; POMAR_SOCKET is the environment fallback"}, {"root", "path", "Explicit local owner's root; not another seat's data"}},
 		"doctor":            {{"json", "bool", "Emit the diagnostic array instead of text"}},
 		"health":            {{"json", "bool", "Emit pomar.health/v1 instead of text"}, {"expected-key-id", "hex", "Independent SHA256 of manager result public key"}, {"timeout", "duration", "Total read deadline; default8s, range100ms..30s"}},

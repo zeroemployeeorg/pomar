@@ -276,3 +276,35 @@ import Foundation
     let (rev, _) = try shell("git -C \(work) rev-parse HEAD", cwd: root)
     #expect(rev == 0)
 }
+
+@Test func retainedDiskNeverFallsBackToFreshClone() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    var o = agentOptions(); o.rootfs = dir.appendingPathComponent("seat.ext4").path; o.requireRetainedDisk = true
+    #expect(throws: (any Error).self) { try AgentEnvironment.ensureRootfs(o) }
+    #expect(!FileManager.default.fileExists(atPath: o.rootfs))
+    let history = Data("synthetic retained histories".utf8)
+    try history.write(to: URL(fileURLWithPath: o.rootfs))
+    try AgentEnvironment.ensureRootfs(o)
+    #expect(try Data(contentsOf: URL(fileURLWithPath: o.rootfs)) == history)
+}
+
+@Test func firstDiskCanCloneAfterConfirmedPrebootRefusal() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    var o = agentOptions()
+    o.base = dir.appendingPathComponent("base.ext4").path
+    o.rootfs = dir.appendingPathComponent("seat.ext4").path
+    o.requireRetainedDisk = false
+    let base = Data("synthetic first boot base".utf8)
+    try base.write(to: URL(fileURLWithPath: o.base))
+    try AgentEnvironment.ensureRootfs(o)
+    #expect(try Data(contentsOf: URL(fileURLWithPath: o.rootfs)) == base)
+    // Once used, losing the disk must still refuse even though the base exists.
+    o.requireRetainedDisk = true
+    try FileManager.default.removeItem(atPath: o.rootfs)
+    #expect(throws: (any Error).self) { try AgentEnvironment.ensureRootfs(o) }
+    #expect(!FileManager.default.fileExists(atPath: o.rootfs))
+}

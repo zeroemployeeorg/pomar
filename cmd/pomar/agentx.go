@@ -130,6 +130,7 @@ func helpCatalogue() map[string]any {
 			"pomar result verify -reply FILE -public-key INDEPENDENT_KEY",
 		},
 		"commands": []command{
+			{Name: "actor-switch", Summary: "Switch a retained seat between owner-configured harness profiles after fencing", Usage: "pomar actor-switch -root DIR -environment ID -session ID -incarnation ID -id OP -profile TARGET [-status]", Output: "json"},
 			{"doctor", "Check this client, its bundled tools and the selected manager", "pomar doctor [-socket PATH] [-json]",
 				"text, or a JSON array of {name, ok, skipped, detail, next}", []string{"exit 0 when everything needed is usable, 1 otherwise"}},
 			{"health", "Explain manager reachability, known current fit and unknowns", "pomar health [-socket PATH] [-json] [-expected-key-id HEX] [-timeout D]",
