@@ -27,8 +27,12 @@ func TestClassCannotFetchAnotherProjectsMirror(t *testing.T) {
 	site.Class.Name = "site"
 	site.SourceRef, site.Command = "main", []string{"make", "verify"}
 	self, _ := os.Executable()
+	// This tests mirror authorization and the entitlement boundary, not the
+	// live build host's free disk. Keep the real shared-floor policy using the
+	// same healthy snapshot as sibling class tests; their filled snapshot
+	// still checks refusal at 85 percent.
 	m, err := Open(Config{Venue: v, HostBin: self, Procs: noProcs{}, UID: os.Getuid(), Poll: time.Hour,
-		Host: capacity.Host{CPUSlots: 8, MemoryBytes: 16 * capacity.GiB}, Classes: []JobClass{ci, site}, Mirrors: ms,
+		Space: healthyFixtureSpace, Host: capacity.Host{CPUSlots: 8, MemoryBytes: 16 * capacity.GiB}, Classes: []JobClass{ci, site}, Mirrors: ms,
 		MirrorURLs: map[string]string{"up": "file://" + up, "site": "file://" + up}})
 	if err != nil {
 		t.Fatal(err)
