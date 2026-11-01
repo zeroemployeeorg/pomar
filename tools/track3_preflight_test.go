@@ -871,6 +871,35 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 	}
 }
 
+// A command may handle the watchdog's TERM and exit zero. That is still a
+// timeout, even if its rounded elapsed time equals the budget. Exit status
+// and elapsed time alone must never turn this into a VERIFIED lock check.
+func TestTrack3PreflightTermHandlerExitZeroIsStillTimeout(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "term-observed")
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n --version) echo 'uv 0.0.0-fake' ;;\n lock) trap ': > \"$MARKER\"; exit 0' TERM; while :; do sleep 1; done ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	env := hermeticEnv(t, fakeBin, "MARKER="+marker, "TRACK3_UV_TIMEOUT=1")
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	if err == nil {
+		t.Fatalf("a command completing after watchdog TERM must fail the gate: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 1s, completed on its own before termination was confirmed") {
+		t.Fatalf("want a timeout without a false killed or VERIFIED claim: %s", line)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TERM handler did not run: %v", err)
+	}
+}
+
 // pomar's review of the previous fix (9098c0b8): "The present test only
 // checks a cooperative shell and immediately absent marker; it does not
 // prove later work cannot complete or descendants are gone." This fake uv
