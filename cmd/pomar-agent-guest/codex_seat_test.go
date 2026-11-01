@@ -7,7 +7,7 @@ import (
 )
 
 func TestCodexSeatUsesGuestOnlyEnvironmentAndItsOwnSupervisor(t *testing.T) {
-	env := strings.Join(codexSeatEnv(), "\n")
+	env := strings.Join(codexSeatEnv("example-seat"), "\n")
 	for _, bad := range []string{"GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "CLAUDE_CONFIG_DIR"} {
 		if strings.Contains(env, bad) {
 			t.Fatal("host or other provider config inherited")
@@ -15,6 +15,9 @@ func TestCodexSeatUsesGuestOnlyEnvironmentAndItsOwnSupervisor(t *testing.T) {
 	}
 	if !strings.Contains(env, "CODEX_HOME=/pomar/job/.codex") {
 		t.Fatal("guest home missing")
+	}
+	if !slices.Contains(codexSeatEnv("example-seat"), "ZMAIL_URL=http://127.0.0.1:7074") || !slices.Contains(codexSeatEnv("example-seat"), "ZMAIL_INSTANCE=example-seat") || !slices.Contains(codexSeatEnv("example-seat"), "NO_PROXY=127.0.0.1,localhost") || !slices.Contains(codexSeatEnv("example-seat"), "no_proxy=127.0.0.1,localhost") {
+		t.Fatal("mail client does not use the fixed local channel and seat")
 	}
 	args := codexTmuxEnsure("example", "/pomar/guest")
 	i := slices.Index(args, "--")

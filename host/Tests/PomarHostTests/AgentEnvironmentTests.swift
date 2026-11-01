@@ -13,6 +13,20 @@ func agentOptions() -> AgentEnvironment.Options {
         goProxySocket: "/tmp/agent-demo/go.sock", cpus: 2, memoryBytes: 4 * 1024 * 1024 * 1024)
 }
 
+@Test func mailSocketBelongsOnlyToTheSelectedSeatEnvironment() {
+    var o = agentOptions()
+    o.mailSocket = o.directory + "/mail.sock"
+    #expect(!AgentEnvironment.valid(o))
+    o.agent = "codex"; o.agentVersion = "0.160.0"; o.seat = "example"
+    o.seatLaunch = .init(sandbox: "workspace-write", approvals: "never", network_access: true,
+        model: "fixture-model", effort: "medium", cwd: "/work")
+    #expect(AgentEnvironment.valid(o))
+    o.mailSocket = "/another/mail.sock"
+    #expect(!AgentEnvironment.valid(o))
+    o.mailSocket = ""
+    #expect(!AgentEnvironment.valid(o))
+}
+
 @Test func agentAdmissionRejectsRedirectedWorkspaceAndUnsafeIdentity() {
     let valid = agentOptions()
     #expect(AgentEnvironment.valid(valid))
