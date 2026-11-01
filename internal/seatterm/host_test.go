@@ -81,7 +81,6 @@ func TestASessionOutlivesItsClients(t *testing.T) {
 	}
 	collect(t, c, snap.Data, "first")
 	c.Detach()
-	time.Sleep(900 * time.Millisecond)
 	if !s.Info().Running {
 		t.Fatal("detaching stopped the program")
 	}
@@ -90,6 +89,16 @@ func TestASessionOutlivesItsClients(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c2.Detach()
+	// The shell's own 0.5s sleep is measured from ITS process start, not
+	// from any fixed point this test controls; a fixed wait here (the
+	// previous 900ms) only has to be "long enough" under whatever host
+	// scheduling delay happens to apply to the CHILD's sleep specifically,
+	// which is not necessarily correlated with delay anywhere in the test
+	// itself. Poll for the real condition instead of guessing a margin
+	// that has to hold under arbitrary contention.
+	for end := time.Now().Add(5 * time.Second); !strings.Contains(string(snap2.Data), "firstsecond") && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		snap2 = c2.Resnapshot()
+	}
 	if !strings.Contains(string(snap2.Data), "firstsecond") || !snap2.Complete || snap2.From != 0 {
 		t.Fatalf("snapshot %+v %q", snap2, snap2.Data)
 	}
