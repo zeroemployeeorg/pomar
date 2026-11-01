@@ -5,6 +5,7 @@
 package tools
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -1580,19 +1581,39 @@ func TestTrack3PreflightReportsSourceRemote(t *testing.T) {
 
 // The final receipt_sha256 line must be a real sha256 over the report text
 // actually printed, computed after capture so the two can never drift.
+// pomar's review: the script's own receipt_sha256 is computed over
+// `report=$(preflight)`, a command substitution that captures ONLY
+// preflight()'s stdout -- never its stderr, which the script does write to
+// in at least one deliberate, legitimate path (lexically_canonical's own
+// safety-refusal diagnostic). This test used to reconstruct "what was
+// hashed" from CombinedOutput(), which merges stdout and stderr -- correct
+// only when the run happens to produce no stderr at all, and silently wrong
+// (a false failure, not a real receipt mismatch) whenever it does. Capture
+// stdout and stderr separately instead, and compare against stdout alone,
+// matching exactly what the script itself hashes.
 func TestTrack3PreflightReceiptMatchesReportSha256(t *testing.T) {
 	repo, head := zeocoreFixture(t, "3.1.3")
-	out, _ := runPreflight(t, repo, t.TempDir(), "3.11", head)
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", script, repo, t.TempDir(), "3.11", head)
+	cmd.Env = hermeticEnv(t, "")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+	out := stdout.String()
 
 	idx := strings.Index(out, "receipt_sha256: ")
 	if idx < 0 {
-		t.Fatalf("missing receipt_sha256 line: %s", out)
+		t.Fatalf("missing receipt_sha256 line in stdout: %s\nstderr: %s", out, stderr.String())
 	}
 	reportText := out[:idx]
 	receiptLine := strings.TrimSpace(out[idx:])
 	wantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(reportText))
 	if receiptLine != wantHash {
-		t.Fatalf("receipt does not match sha256 of the printed report:\nwant %s\ngot  %s", wantHash, receiptLine)
+		t.Fatalf("receipt does not match sha256 of the printed report:\nwant %s\ngot  %s\nstderr: %s", wantHash, receiptLine, stderr.String())
 	}
 }
 
