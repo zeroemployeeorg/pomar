@@ -2,12 +2,14 @@ package agentenv
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type mailTransport func(*http.Request) (*http.Response, error)
@@ -254,5 +256,139 @@ func TestMailRelayRevokesInflightAndFutureRequests(t *testing.T) {
 	m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
 	if w.Code != 503 {
 		t.Fatalf("revoked relay accepted another request: %d", w.Code)
+	}
+}
+
+func TestMailRelayWriteBudgetRefillsAndLeavesReadsIndependent(t *testing.T) {
+	var calls atomic.Int32
+	m, err := newMailRelay("example-seat", "guest-rate", "incarnation-1", "http://mail.example:7743", mailTransport(func(r *http.Request) (*http.Response, error) { calls.Add(1); return mailResponse(200, `{}`), nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var clock atomic.Int64
+	base := time.Now()
+	clock.Store(base.UnixNano())
+	m.writeRefill = base
+	m.now = func() time.Time { return time.Unix(0, clock.Load()) }
+	server := httptest.NewServer(m)
+	defer server.Close()
+	post := func(path string) (int, string) {
+		t.Helper()
+		req, _ := http.NewRequest("POST", server.URL+path, strings.NewReader(`{"body":"hello"}`))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := server.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Retry-After")
+	}
+	for i := 0; i < 8; i++ {
+		if code, _ := post("/v1/reply/message-one"); code != 200 {
+			t.Fatalf("burst %d: %d", i, code)
+		}
+	}
+	if code, retry := post("/v1/reply/message-one"); code != 429 || retry != "2" || calls.Load() != 8 {
+		t.Fatalf("exhaustion %d %s calls%d", code, retry, calls.Load())
+	}
+	resp, err := server.Client().Get(server.URL + "/v1/whoami")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 || calls.Load() != 9 {
+		t.Fatal("write exhaustion blocked read")
+	}
+	clock.Store(base.Add(2 * time.Second).UnixNano())
+	if code, _ := post("/v1/reply/message-one"); code != 200 {
+		t.Fatalf("refill %d", code)
+	}
+	if code, _ := post("/v1/reply/message-one"); code != 429 || calls.Load() != 10 {
+		t.Fatal("refill granted more than one write")
+	}
+	clock.Store(base.Add(time.Hour).UnixNano())
+	for i := 0; i < 8; i++ {
+		if code, _ := post("/v1/reply/message-one"); code != 200 {
+			t.Fatal("idle refill failed")
+		}
+	}
+	if code, _ := post("/v1/reply/message-one"); code != 429 {
+		t.Fatal("idle accumulated beyond burst")
+	}
+}
+
+func TestMailRelayAllGuestsShareUpstreamConcurrency(t *testing.T) {
+	entered := make(chan struct{}, 4)
+	release := make(chan struct{})
+	done := make(chan struct{}, 4)
+	defer close(release)
+	for i := 0; i < 4; i++ {
+		m, err := newMailRelay("example-seat", fmt.Sprintf("guest-%d", i), "incarnation-1", "http://mail.example:7743", mailTransport(func(r *http.Request) (*http.Response, error) {
+			entered <- struct{}{}
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+			return mailResponse(200, `{}`), nil
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			defer func() { done <- struct{}{} }()
+			m.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/whoami", nil))
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("upstream did not start")
+		}
+	}
+	var calls atomic.Int32
+	m, err := newMailRelay("example-seat", "guest-fifth", "incarnation-1", "http://mail.example:7743", mailTransport(func(r *http.Request) (*http.Response, error) { calls.Add(1); return mailResponse(200, `{}`), nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+	if w.Code != 503 || w.Header().Get("Retry-After") != "1" || calls.Load() != 0 {
+		t.Fatalf("shared bound %d %v calls%d", w.Code, w.Header(), calls.Load())
+	}
+	// Release every original before testing that the shared slots are reusable.
+	for i := 0; i < 4; i++ {
+		release <- struct{}{}
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("upstream did not drain")
+		}
+	}
+	w = httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+	if w.Code != 200 || calls.Load() != 1 {
+		t.Fatal("slot leaked")
+	}
+}
+
+func TestMailRelayPassesUpstreamBusyWithoutRetry(t *testing.T) {
+	var calls atomic.Int32
+	m, err := newMailRelay("example-seat", "guest-busy", "incarnation-1", "http://mail.example:7743", mailTransport(func(r *http.Request) (*http.Response, error) {
+		calls.Add(1)
+		resp := mailResponse(503, `{"exit":1,"output":"busy"}`)
+		resp.Header.Set("Retry-After", "7")
+		return resp, nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+	if w.Code != 503 || w.Header().Get("Retry-After") != "7" || calls.Load() != 1 || w.Body.String() != `{"exit":1,"output":"busy"}` {
+		t.Fatalf("busy changed/retried: %d %v %q calls%d", w.Code, w.Header(), w.Body.String(), calls.Load())
 	}
 }

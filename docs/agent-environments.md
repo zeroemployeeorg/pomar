@@ -535,3 +535,12 @@ This source transport does not establish service-side node registration, guest
 client installation, native channel qualification, or a completed seat cutover.
 The owner must prove real guest identity and refusal of another seat before
 adoption. General egress retains its shared-address-space refusal.
+
+The fixed mail relay permits a burst of eight validated POST send/reply calls per
+owner-created guest incarnation, replenishing one write every two seconds. An
+empty bucket returns 429 with Retry-After without calling Messenger; reads do not
+consume write tokens. Every relay in the owner process shares four concurrent
+upstream calls, including response-body receiving. At capacity it refuses with
+503 and Retry-After. Messenger's own 503 and Retry-After pass through without an
+internal retry. Only the owner can replace an incarnation; guests cannot reset
+these limits. These limits do not replace native identity and revocation proofs.

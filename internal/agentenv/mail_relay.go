@@ -22,6 +22,10 @@ import (
 const mailRequestLimit = 1 << 20
 const mailResponseLimit = 1 << 20
 
+// All relay instances in this owner process share the node's upstream budget.
+// A slow response holds its slot until its bounded body has been received.
+var mailUpstreamSlots = make(chan struct{}, 4)
+
 // mailRelay is bound by the owner to one guest incarnation. It is not a
 // general proxy. A dedicated local channel and Revoke on stop/replacement
 // are required before this component can be integrated into a host.
@@ -32,6 +36,9 @@ type mailRelay struct {
 	mu                       sync.Mutex
 	revoked                  bool
 	inflight                 map[*http.Request]context.CancelFunc
+	writeTokens              int
+	writeRefill              time.Time
+	now                      func() time.Time
 }
 
 var mailID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$`)
@@ -53,7 +60,7 @@ func newMailRelay(seat, guest, incarnation, upstream string, transport http.Roun
 	if transport == nil {
 		transport = &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, MaxIdleConnsPerHost: 4, ResponseHeaderTimeout: 5 * time.Second}
 	}
-	return &mailRelay{seat: seat, guest: guest, incarnation: incarnation, upstream: u, inflight: map[*http.Request]context.CancelFunc{}, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &mailRelay{seat: seat, guest: guest, incarnation: incarnation, upstream: u, inflight: map[*http.Request]context.CancelFunc{}, writeTokens: 8, writeRefill: time.Now(), now: time.Now, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 func (m *mailRelay) Revoke() {
@@ -189,6 +196,33 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Local admission never waits for shared capacity and never retries upstream.
+	select {
+	case mailUpstreamSlots <- struct{}{}:
+		defer func() { <-mailUpstreamSlots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "mail upstream busy", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method == "POST" {
+		m.mu.Lock()
+		now := m.now()
+		if refill := int(now.Sub(m.writeRefill) / (2 * time.Second)); refill > 0 {
+			m.writeTokens = min(8, m.writeTokens+refill)
+			m.writeRefill = m.writeRefill.Add(time.Duration(refill) * 2 * time.Second)
+		}
+		if m.writeTokens == 0 {
+			wait := 2*time.Second - now.Sub(m.writeRefill)
+			seconds := max(1, int((wait+time.Second-1)/time.Second))
+			m.mu.Unlock()
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			http.Error(w, "mail write rate exceeded", http.StatusTooManyRequests)
+			return
+		}
+		m.writeTokens--
+		m.mu.Unlock()
+	}
 	u := *m.upstream
 	u.Path += r.URL.Path
 	u.RawQuery = r.URL.RawQuery
@@ -214,6 +248,9 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil || len(b) > mailResponseLimit || resp.StatusCode >= 300 && resp.StatusCode < 400 || revoked {
 		http.Error(w, "mail upstream refused", http.StatusBadGateway)
 		return
+	}
+	if resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get("Retry-After") != "" {
+		w.Header().Set("Retry-After", resp.Header.Get("Retry-After"))
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
