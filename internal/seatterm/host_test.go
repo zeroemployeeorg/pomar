@@ -81,9 +81,42 @@ func TestASessionOutlivesItsClients(t *testing.T) {
 	}
 	collect(t, c, snap.Data, "first")
 	c.Detach()
-	time.Sleep(900 * time.Millisecond)
 	if !s.Info().Running {
 		t.Fatal("detaching stopped the program")
+	}
+	// pomar's review: attaching c2 immediately and polling ITS snapshot
+	// would let "second" arrive over c2's own live event stream while it
+	// is already attached, which no longer tests the actual premise here
+	// -- that the session retains output while NO client is attached at
+	// all. Poll the session's own retained state directly instead (same
+	// package: snapshotLocked, under its own s.mu), with nothing attached,
+	// and only attach c2 once that is already true. The shell's own 0.5s
+	// sleep is measured from ITS process start, not from any fixed point
+	// this test controls, so a fixed wait here only has to be "long
+	// enough" under whatever scheduling delay happens to apply to the
+	// CHILD specifically -- poll for the real condition instead of
+	// guessing a bigger margin that still has to hold under arbitrary
+	// contention.
+	var observedDetached bool
+	var lastRetained []byte
+	for end := time.Now().Add(5 * time.Second); !observedDetached && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		s.mu.Lock()
+		lastRetained = s.snapshotLocked().Data
+		s.mu.Unlock()
+		if strings.Contains(string(lastRetained), "firstsecond") {
+			observedDetached = true
+		}
+	}
+	// pomar's review: falling through to Attach regardless of whether the
+	// loop above actually observed the condition (vs merely expiring)
+	// would let output that only arrives in the gap between expiry and
+	// Attach satisfy c2's later snapshot without ever having proven the
+	// no-client-attached premise at all -- fail explicitly here instead.
+	if !observedDetached {
+		t.Fatalf("never observed retained output while no client was attached: %q", lastRetained)
+	}
+	if !s.Info().Running {
+		t.Fatal("waiting with no client attached stopped the program")
 	}
 	c2, snap2, err := s.Attach("operator")
 	if err != nil {
