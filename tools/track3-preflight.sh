@@ -185,10 +185,21 @@ bounded_run() {
   # instead of the substitution's pipe.
   (
     sleep "$budget"
-    : > "$timeout_marker" || exit 125
+    # pomar's review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-TERMINATION):
+    # the original `: > "$timeout_marker" || exit 125` exited the watchdog
+    # on a write failure BEFORE ever sending TERM/KILL, so a child that
+    # merely ignores or outlives TERM (exactly the case the group KILL below
+    # exists to bound) was never actually signaled -- the parent's `wait
+    # "$pid"` would then hang on it indefinitely. The witness write and the
+    # termination it reports on are independent concerns: capture whether it
+    # succeeded, but always run the kill/drain regardless, and only act on
+    # the write outcome (via watchdog_rc, mapped to UNKNOWN below) afterward.
+    marker_witnessed=1
+    : > "$timeout_marker" 2>/dev/null || marker_witnessed=0
     kill -TERM -"$pid" 2>/dev/null || true
     sleep 5
     kill -KILL -"$pid" 2>/dev/null || true
+    [ "$marker_witnessed" = 1 ] || exit 125
   ) >/dev/null 2>&1 &
   watchdog=$!
   # Under `set -e`, a bare failing `wait` would abort this function (and,

@@ -938,6 +938,97 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 	}
 }
 
+// pomar's review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-TERMINATION): the
+// watchdog's own `: > "$timeout_marker" || exit 125` exited BEFORE ever
+// sending TERM/KILL whenever the witness write itself failed, so a child
+// that ignores or outlives TERM was never actually signaled -- the parent's
+// `wait "$pid"` would then hang on it, exactly defeating the one guarantee
+// bounded_run exists to provide. This test forces that write to fail
+// deterministically (not via a timing race): the fake uv process itself,
+// which already knows the watchdog's scratch directory via FAKE_SCRATCH_DIR
+// (fed to a fake `mktemp` ahead of it on PATH so the directory's path is
+// fixed and known, instead of mktemp's own randomized name), makes that
+// directory read-only BEFORE the budget's sleep could possibly elapse, then
+// restores it a few seconds later so later script steps are unaffected.
+func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWitnessCannotBeWritten(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    chmod 0500 \"$FAKE_SCRATCH_DIR\"\n" +
+		"    ( sleep 4; chmod 0700 \"$FAKE_SCRATCH_DIR\" 2>/dev/null ) &\n" +
+		"    trap '' TERM\n" +
+		"    sleep 20\n" +
+		"    : > \"$MARKER\"\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(scratchDir, 0700) })
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if elapsed > 15*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (the watchdog must still kill a TERM-ignoring child even when it cannot persist its own timeout witness): %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose timeout witness could not be written must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a timeout whose witness could not be written must never be reported as VERIFIED: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("fake uv's completion marker exists -- the watchdog never sent TERM/KILL when its own timeout-marker write failed, so a TERM-ignoring child was not force-killed")
+	}
+}
+
 // recordGrandchildPIDScript returns a fake uv `lock` body that backgrounds a
 // genuinely separate process (`sh -c '...' &`, confirmed to report its own
 // distinct pid via `$$` -- `( ... ) &` does NOT: confirmed directly on this
