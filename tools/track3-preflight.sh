@@ -172,25 +172,40 @@ bounded_run() {
   # outfile is a fresh file in run_bounded's private scratch directory.
   # Record the watchdog event, rather than infer it from rounded wall time
   # or the command's exit status (a TERM handler may legitimately exit 0).
+  #
+  # pomar's third, independent review (AMEND THIRD-WITNESS-CHANNEL-FAILURE-01):
+  # the second fix's own fallback write -- `printf ... > "$marker" ||
+  # true` -- assumed a pre-created file can always be truncated even when
+  # its DIRECTORY is locked, which is true, but not when something ALSO
+  # revokes write permission on the marker FILE itself (their repro:
+  # scratch 0500 AND the marker chmod 0400). That combination makes BOTH
+  # writes fail, the `|| true` on each swallows it, and the watchdog's
+  # kill sequence still runs correctly -- but with no durable record that
+  # anything went wrong, the parent falls through to plain COMPLETED/OK:
+  # a THIRD path to the same false-VERIFIED bug this mechanism exists to
+  # prevent, this time regardless of how the child responds to TERM at
+  # all. Every version so far was fail-OPEN: success unless a specific
+  # negative fact got positively recorded, and recording that fact was
+  # itself a fallible write that could silently lose the one thing it
+  # existed to report.
+  #
+  # Fail-CLOSED fix: open the marker for writing HERE, before the child
+  # or the watchdog even exist, while its permissions and its directory's
+  # are still whatever bounded_run's own caller set up -- long before
+  # anything (adversarial or just unlucky) could have altered either.
+  # Permission checks happen at open(2), not on each later write(2): once
+  # this descriptor is open, writing to it via the SAME descriptor later
+  # succeeds regardless of any chmod -- on the file OR its directory --
+  # that happens afterward (POSIX; verified against this exact macOS
+  # /bin/bash, and unaffected by the bash version: `exec N>file` /
+  # `>&N` / `N>&-` are all plain, decades-old fixed-fd redirections, not
+  # the bash-4.1+ `{fd}` dynamic-allocation syntax). The watchdog
+  # subshell inherits this open descriptor at fork time and writes
+  # through it, never reopening the path. If even this initial open
+  # fails, that is itself recorded (fd_opened=0) and treated as never-OK,
+  # rather than silently proceeding as if nothing were wrong.
   timeout_marker=$outfile.timeout
-  # pomar's second review (independent repro, cooperative-TERM-exit-0 +
-  # witness-write-failure): a write-failure signal reported only via the
-  # WATCHDOG'S OWN exit status, checked at the very end of its subshell,
-  # races the parent below -- a child that cooperates with TERM and exits
-  # quickly makes the parent's `wait "$pid"` return before the watchdog's
-  # own grace-period sleep ends, so the parent's `kill "$watchdog"` can kill
-  # it before it ever reaches its own deferred exit, silently losing the
-  # failure and reporting a false COMPLETED/OK -- the exact original bug
-  # this whole witness mechanism exists to prevent. Pre-creating this second
-  # marker here, before anything is backgrounded, means the watchdog's later
-  # write to it (on failure) only needs to TRUNCATE an EXISTING file, which
-  # needs write permission on the file itself, not on its directory -- the
-  # same reason the primary marker write can fail in the first place. That
-  # write happens strictly before TERM is sent, so strictly before the
-  # parent's wait on the child can return, closing the race: the fact is on
-  # disk before the parent could possibly race past it.
-  witness_write_failed_marker=$outfile.timeout.write_failed
-  : > "$witness_write_failed_marker" 2>/dev/null || true
+  if exec 9>"$timeout_marker" 2>/dev/null; then fd_opened=1; else fd_opened=0; fi
   start=$(date +%s)
   set -m
   "$@" >"$outfile" 2>&1 &
@@ -203,13 +218,17 @@ bounded_run() {
   # instead of the substitution's pipe.
   (
     sleep "$budget"
-    # pomar's first review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-
-    # TERMINATION): the kill/drain sequence below must always run regardless
-    # of whether this write succeeds -- a child that merely ignores or
-    # outlives TERM must still be bounded even when the witness can't be
-    # recorded, or the parent's `wait "$pid"` would hang on it indefinitely.
-    if ! : > "$timeout_marker" 2>/dev/null; then
-      printf 'write-failed\n' > "$witness_write_failed_marker" 2>/dev/null || true
+    # The kill/drain sequence below always runs regardless of whether
+    # this write succeeds -- a child that merely ignores or outlives TERM
+    # must still be bounded even when the witness can't be recorded, or
+    # the parent's `wait "$pid"` would hang on it indefinitely (pomar's
+    # first review). Writing is now expected to succeed even when the
+    # directory or the file's own mode bits have since changed, since
+    # fd 9 was opened before either could have (see above); `|| true`
+    # remains only for the genuinely irreducible cases (disk full, the
+    # filesystem itself going away) that no fd trick can paper over.
+    if [ "$fd_opened" = 1 ]; then
+      printf 'timeout\n' >&9 2>/dev/null || true
     fi
     kill -TERM -"$pid" 2>/dev/null || true
     sleep 5
@@ -223,13 +242,15 @@ bounded_run() {
   if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
   kill "$watchdog" 2>/dev/null || true
   wait "$watchdog" 2>/dev/null || true
+  exec 9>&- 2>/dev/null || true
   timeout_observed=0
-  if [ -f "$timeout_marker" ]; then timeout_observed=1; fi
-  witness_write_failed=0
-  if [ -s "$witness_write_failed_marker" ] && grep -q write-failed "$witness_write_failed_marker" 2>/dev/null; then
-    witness_write_failed=1
+  witness_unavailable=0
+  if [ "$fd_opened" != 1 ]; then
+    witness_unavailable=1
+  elif [ -s "$timeout_marker" ]; then
+    timeout_observed=1
   fi
-  rm -f "$timeout_marker" "$witness_write_failed_marker"
+  rm -f "$timeout_marker"
   end=$(date +%s)
   elapsed=$((end - start))
 
@@ -273,7 +294,7 @@ bounded_run() {
     else
       echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
     fi
-  elif [ "$witness_write_failed" = 1 ]; then
+  elif [ "$witness_unavailable" = 1 ]; then
     # Failure to retain the deadline witness cannot produce an OK result.
     echo "UNKNOWN $rc $residual"
   elif [ "$elapsed" -gt "$budget" ]; then

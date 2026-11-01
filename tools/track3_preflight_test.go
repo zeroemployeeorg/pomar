@@ -1029,21 +1029,25 @@ func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWit
 	}
 }
 
-// pomar's second, independent review of ab61046 (cooperative-TERM-exit-0
-// counterexample): the previous fix recorded a witness-write failure only
-// via the WATCHDOG'S OWN exit status, checked at the very end of its
-// subshell, after its 5s grace sleep -- but a child that COOPERATES with
-// TERM (unlike the ignoring child above) exits almost immediately, so the
-// parent's `wait "$pid"` returns right away and its very next line,
-// `kill "$watchdog"`, kills the watchdog mid-grace-sleep, before it ever
-// reaches that deferred check. The failure signal was lost in that race,
-// falling through to plain COMPLETED/OK -- the exact false-VERIFIED bug
-// this whole witness mechanism exists to prevent, now reachable again via
-// a different path. The fix records the failure as a file fact the instant
-// it is known (before TERM is even sent), closing the race entirely; this
-// test reproduces pomar's exact scenario -- cooperative exit(0) on TERM,
-// combined with a witness write that cannot succeed -- deterministically.
-func TestTrack3PreflightCooperativeTermExitZeroStillUnknownWhenItsOwnTimeoutWitnessCannotBeWritten(t *testing.T) {
+// pomar's third, independent review (AMEND THIRD-WITNESS-CHANNEL-FAILURE-01):
+// the second fix's fallback write assumed a pre-created marker file can
+// always be truncated even when its directory is locked -- true, but not
+// when something ALSO revokes write permission on the marker FILE itself
+// (their repro: scratch 0500 AND the marker chmod 0400). Both writes then
+// fail, `|| true` on each swallows it, and the result falls through to
+// plain COMPLETED/OK: a false VERIFIED, with no durable record anything
+// went wrong -- the same bug via a third path, this time independent of
+// how the child responds to TERM at all. The fix opens the marker's file
+// descriptor before the child or watchdog even exist, while its
+// permissions are still whatever they started as; writing through that
+// SAME descriptor later succeeds regardless of any chmod afterward
+// (POSIX permission checks happen at open(2), not on each write(2)). This
+// test reproduces pomar's exact scenario: a cooperative exit(0) on TERM
+// (so the earlier race-closing fix alone wouldn't save it) combined with
+// BOTH the scratch directory and the marker file itself becoming
+// unwritable right as the command starts -- after bounded_run's own
+// descriptor is already open on it.
+func TestTrack3PreflightSurvivesScratchAndMarkerBothLockedAfterTheDescriptorIsAlreadyOpen(t *testing.T) {
 	repo, head := zeocoreFixture(t, "3.1.3")
 	root := t.TempDir()
 
@@ -1084,11 +1088,16 @@ func TestTrack3PreflightCooperativeTermExitZeroStillUnknownWhenItsOwnTimeoutWitn
 	}
 
 	marker := filepath.Join(root, "uv-finished")
+	// By the time this runs, bounded_run's own `exec 9>"$outfile.timeout"`
+	// has already succeeded (it happens before "$@" is even forked) --
+	// chmodding the marker file itself here, after the fact, is exactly
+	// pomar's scenario: proving the already-open descriptor doesn't care.
 	fakeUV := "#!/bin/sh\n" +
 		"case \"$1\" in\n" +
 		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
 		"  lock)\n" +
 		"    chmod 0500 \"$FAKE_SCRATCH_DIR\"\n" +
+		"    for f in \"$FAKE_SCRATCH_DIR\"/*.timeout*; do chmod 0400 \"$f\" 2>/dev/null; done\n" +
 		"    ( sleep 4; chmod 0700 \"$FAKE_SCRATCH_DIR\" 2>/dev/null ) &\n" +
 		"    trap ': > \"$MARKER\"; exit 0' TERM\n" +
 		"    sleep 20\n" +
@@ -1110,14 +1119,17 @@ func TestTrack3PreflightCooperativeTermExitZeroStillUnknownWhenItsOwnTimeoutWitn
 		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
 	}
 	if err == nil {
-		t.Fatalf("a command whose timeout witness could not be written must not report success: %s", out)
+		t.Fatalf("a command whose witness could not be written AFTER the fact must not report success: %s", out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
 	if strings.Contains(line, "VERIFIED") {
-		t.Fatalf("a witness-write failure raced past by a cooperative TERM-exit-0 child must never be reported as VERIFIED (false OK): %s", line)
+		t.Fatalf("a scratch dir and marker file both locked after bounded_run's own descriptor was already open must never be reported as VERIFIED (false OK): %s", line)
 	}
-	if !strings.Contains(line, "UNKNOWN") {
-		t.Fatalf("a witness-write failure must be reported as UNKNOWN, not silently treated as a clean completion: %s", line)
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 2s, completed on its own before termination was confirmed") {
+		t.Fatalf("the already-open descriptor should let the deadline witness write succeed regardless of the later chmod, producing a correct timeout report, not UNKNOWN: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("fake uv's cooperative TERM handler never ran: %v", statErr)
 	}
 }
 
