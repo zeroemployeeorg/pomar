@@ -1133,6 +1133,97 @@ func TestTrack3PreflightSurvivesScratchAndMarkerBothLockedAfterTheDescriptorIsAl
 	}
 }
 
+// pomar's fourth, independent review (AMEND PREOPENED-FD-PATH-READBACK-
+// LOST-EVENT-01): the fd-based write (above) survives a chmod, but the
+// PARENT's readback still went through the marker's PATH, which only ever
+// shows whatever is currently linked there. A command that unlinks the
+// marker by name (it has no fd to it any more -- bounded_run explicitly
+// closes 9 and 8 for the executed command itself -- but unlinking only
+// ever needs the path, never an fd) makes the watchdog's already-written
+// fd-9 content unreachable by that path, even though the data itself is
+// still there. This test reproduces exactly that: a cooperative TERM
+// handler that unlinks the marker (found by the same glob technique used
+// above, since it has no special knowledge of the real path) before
+// exiting 0.
+func TestTrack3PreflightSurvivesTheMarkerBeingUnlinkedAfterTheDescriptorIsAlreadyOpen(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    for f in \"$FAKE_SCRATCH_DIR\"/*.timeout; do rm -f \"$f\"; done\n" +
+		"    trap ': > \"$MARKER\"; exit 0' TERM\n" +
+		"    sleep 20\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose witness marker was unlinked must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a witness marker unlinked after the descriptor was already open must never be reported as VERIFIED (false OK): %s", line)
+	}
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 2s, completed on its own before termination was confirmed") {
+		t.Fatalf("reading back via the already-open descriptor should see the watchdog's write regardless of the unlink, producing a correct timeout report, not UNKNOWN: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("fake uv's cooperative TERM handler never ran: %v", statErr)
+	}
+}
+
 // recordGrandchildPIDScript returns a fake uv `lock` body that backgrounds a
 // genuinely separate process (`sh -c '...' &`, confirmed to report its own
 // distinct pid via `$$` -- `( ... ) &` does NOT: confirmed directly on this

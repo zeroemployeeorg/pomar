@@ -205,10 +205,37 @@ bounded_run() {
   # fails, that is itself recorded (fd_opened=0) and treated as never-OK,
   # rather than silently proceeding as if nothing were wrong.
   timeout_marker=$outfile.timeout
+  # pomar's fourth, independent review (AMEND PREOPENED-FD-PATH-READBACK-
+  # LOST-EVENT-01): the write side was fixed, but the READ side still went
+  # through the marker's PATH (`[ -s "$timeout_marker" ]`), not through an
+  # already-open descriptor of its own. A path lookup only ever sees
+  # whatever is CURRENTLY linked there -- if the path is unlinked (their
+  # repro: the executed command itself, which inherited fd 9 and the path
+  # both, unlinks the marker) or replaced, the write the watchdog already
+  # made via fd 9 is real but no longer reachable by name, and this read
+  # would wrongly see "nothing happened" -- a fourth path to the same
+  # false-VERIFIED bug, this time entirely independent of permissions.
+  # Fixed the same way as the write side: open a SECOND descriptor for
+  # READING here, at the same early, still-trustworthy moment. A regular
+  # file's data is shared across every open instance of it regardless of
+  # which fd wrote or reads it, and an open fd keeps referencing the same
+  # underlying data even after its path is unlinked or reused -- so
+  # reading via fd 8 later sees exactly what fd 9 wrote, regardless of
+  # what happened to the path in between.
   if exec 9>"$timeout_marker" 2>/dev/null; then fd_opened=1; else fd_opened=0; fi
+  if [ "$fd_opened" = 1 ] && exec 8<"$timeout_marker" 2>/dev/null; then
+    fd_readable=1
+  else
+    fd_readable=0
+  fi
   start=$(date +%s)
   set -m
-  "$@" >"$outfile" 2>&1 &
+  # Close both private descriptors in the executed command itself: it has
+  # no legitimate reason to touch this internal bookkeeping channel, and
+  # (per the same review) must not be left able to interfere with it --
+  # the watchdog subshell below, forked separately, still inherits both
+  # normally.
+  "$@" 9>&- 8>&- >"$outfile" 2>&1 &
   pid=$!
   set +m
   # The watchdog's own stdout/stderr must be redirected here, not inherited:
@@ -224,9 +251,12 @@ bounded_run() {
     # the parent's `wait "$pid"` would hang on it indefinitely (pomar's
     # first review). Writing is now expected to succeed even when the
     # directory or the file's own mode bits have since changed, since
-    # fd 9 was opened before either could have (see above); `|| true`
-    # remains only for the genuinely irreducible cases (disk full, the
-    # filesystem itself going away) that no fd trick can paper over.
+    # fd 9 was opened before either could have; `|| true` remains only
+    # for the genuinely irreducible cases (disk full, the filesystem
+    # itself going away) that no fd trick can paper over -- acknowledged,
+    # not claimed solved: that residual case still falls through to the
+    # pre-existing default rather than UNKNOWN, since there is no
+    # stronger software-only signal available for a storage-I/O failure.
     if [ "$fd_opened" = 1 ]; then
       printf 'timeout\n' >&9 2>/dev/null || true
     fi
@@ -242,14 +272,19 @@ bounded_run() {
   if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
   kill "$watchdog" 2>/dev/null || true
   wait "$watchdog" 2>/dev/null || true
-  exec 9>&- 2>/dev/null || true
   timeout_observed=0
   witness_unavailable=0
-  if [ "$fd_opened" != 1 ]; then
+  if [ "$fd_opened" != 1 ] || [ "$fd_readable" != 1 ]; then
+    # Could not open the witness, or could not open a way to read it back
+    # -- either way, never OK: an unreadable or unavailable event channel
+    # is never treated as "no timeout happened".
     witness_unavailable=1
-  elif [ -s "$timeout_marker" ]; then
-    timeout_observed=1
+  else
+    witness_read=$(cat <&8 2>/dev/null) || witness_unavailable=1
+    if [ -n "$witness_read" ]; then timeout_observed=1; fi
   fi
+  exec 9>&- 2>/dev/null || true
+  exec 8>&- 2>/dev/null || true
   rm -f "$timeout_marker"
   end=$(date +%s)
   elapsed=$((end - start))
