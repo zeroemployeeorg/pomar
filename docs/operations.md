@@ -116,3 +116,34 @@ vectors, class-specific `fits_current` and quantified refusal reasons.
 live output and registry activity as JSON. The existing authorized `get` response
 includes the same observation. See [build progress](attempt-progress.md) for
 phase markers, unknowns and the distinction from a final signed log.
+
+
+## Host disk fill policy
+
+`/etc/pomar/max-fill-percent` is the host owner's single setting for both
+heavy-work preparation (images, bases, mirrors and smoke) and the manager's
+shared-filesystem admission floor. It contains one ASCII decimal integer
+from 1 through 99, optionally followed by whitespace. The default is 85.
+A missing, unreadable, oversized or invalid setting falls back to 85; it never
+reuses a previously readable higher value. Each decision reads the setting.
+Refusals and venue status name the chosen percentage and its source.
+
+The setting is host-wide, independent of data root and user environment.
+The reader requires UID 0 and no group or world write bits on both the
+opened regular file and its parent directory. Unknown ownership or an unsafe
+parent/file falls back to 85 and names that reason. The host owner installs
+it root-owned and not writable by other accounts;
+it is not a job input or a guest setting. The reviewed high-fill example source
+profile is `config/host-policy/high-fill/max-fill-percent` (99). This file in the
+source repository is not an installed host policy. Installing it or changing
+a running service still follows the host owner's reviewed deployment route.
+
+Raising this floor does not change per-job disk peak plus headroom, actual
+available-byte checks, or the low-free-space response for running attempts.
+A 99% setting does not promise a new guest can fit.
+
+Host disk settings also require readable ACL metadata on the opened parent
+and file. macOS accepts only an absent ACL; any ACL, including a deny-only
+entry, or unknown metadata falls back to 85. Linux requires absence of a
+POSIX access ACL; other platforms fall back. This conservative rule avoids
+treating mode bits alone as evidence that a named principal cannot write.

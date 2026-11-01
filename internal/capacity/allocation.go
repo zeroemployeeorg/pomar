@@ -3,6 +3,8 @@ package capacity
 import (
 	"fmt"
 	"math"
+
+	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
 )
 
 // Resources uses checked integers: 1000 millicores is one logical/vCPU slot.
@@ -33,9 +35,10 @@ type Allocation struct {
 	Demand      Resources `json:"demand"`
 	FitsCurrent int       `json:"fits_current"`
 	Failures    []Failure `json:"failures"`
-	// DiskAllowance is Avail limited by the existing shared 85% fill floor.
-	DiskAllowance int64 `json:"disk_allowance_bytes"`
-	DiskFloor     int64 `json:"disk_floor_bytes"`
+	// DiskAllowance is Avail limited by the observed shared host fill policy.
+	DiskAllowance int64                `json:"disk_allowance_bytes"`
+	DiskFloor     int64                `json:"disk_floor_bytes"`
+	FillLimit     hostpolicy.DiskLimit `json:"fill_limit"`
 }
 
 func resources(c Class) (Resources, error) {
@@ -57,7 +60,7 @@ func add(a, b Resources) (Resources, error) {
 // It does not reserve anything; callers perform check + durable reservation under
 // their own admission mutex. A live job is not an exclusive-host predicate.
 func Evaluate(c Class, live []Class, h Host, d Disk) (Allocation, error) {
-	a := Allocation{Failures: []Failure{}}
+	a := Allocation{Failures: []Failure{}, FillLimit: d.FillLimit.Validated()}
 	var err error
 	if a.Demand, err = resources(c); err != nil {
 		return a, err
@@ -82,8 +85,9 @@ func Evaluate(c Class, live []Class, h Host, d Disk) (Allocation, error) {
 	floorAllowance := d.Avail
 	if d.Shared {
 		total := d.Used + d.Avail
-		// floor(total*85/100) without the overflow-prone multiplication.
-		maxUsed := (total/100)*MaxFillPercent + (total%100)*MaxFillPercent/100
+		// floor(total*limit/100) without the overflow-prone multiplication.
+		limit := int64(a.FillLimit.Percent)
+		maxUsed := (total/100)*limit + (total%100)*limit/100
 		a.DiskFloor = total - maxUsed
 		floorAllowance = maxUsed - d.Used
 		a.DiskAllowance = min(a.DiskAllowance, floorAllowance)

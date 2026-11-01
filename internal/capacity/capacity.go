@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+
+	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
 )
 
 // GiB is 2^30 bytes.
@@ -21,7 +23,7 @@ const HeadroomBytes = 10 * GiB
 
 // MaxFillPercent is the fill floor kept while the data root shares its
 // container with the operator's data.
-const MaxFillPercent = 85
+const MaxFillPercent = hostpolicy.DefaultMaxFillPercent
 
 // DiskFullBytes is the free space below which the data root's filesystem
 // counts as full. On the bounded test volume APFS stopped a guest's writes
@@ -143,7 +145,8 @@ type Disk struct {
 	Used, Avail int64
 	// Shared keeps the fill floor on: the data root's free space is also
 	// the operator's.
-	Shared bool
+	Shared    bool
+	FillLimit hostpolicy.DiskLimit
 }
 
 // ErrRefused wraps every admission refusal. The reason names the resource.
@@ -196,7 +199,12 @@ func Admit(c Class, live []Class, h Host, d Disk) error {
 		return err
 	}
 	f := a.Failures[0]
-	return &Refusal{Reason: f.Reason, Detail: fmt.Sprintf("%s: demand %d %s, available %d, deficit %d", f.Resource, f.Demand, f.Unit, f.Available, f.Deficit), Failures: a.Failures}
+	detail := fmt.Sprintf("%s: demand %d %s, available %d, deficit %d", f.Resource, f.Demand, f.Unit, f.Available, f.Deficit)
+	if f.Reason == ReasonFloor {
+		p := d.FillLimit.Validated()
+		detail += fmt.Sprintf("; fill limit %d%% from %s", p.Percent, p.Source)
+	}
+	return &Refusal{Reason: f.Reason, Detail: detail, Failures: a.Failures}
 }
 
 // Fits reports how many attempts of class c fit on an idle host: R-34's
