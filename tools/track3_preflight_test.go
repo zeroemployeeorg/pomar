@@ -1029,6 +1029,98 @@ func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWit
 	}
 }
 
+// pomar's second, independent review of ab61046 (cooperative-TERM-exit-0
+// counterexample): the previous fix recorded a witness-write failure only
+// via the WATCHDOG'S OWN exit status, checked at the very end of its
+// subshell, after its 5s grace sleep -- but a child that COOPERATES with
+// TERM (unlike the ignoring child above) exits almost immediately, so the
+// parent's `wait "$pid"` returns right away and its very next line,
+// `kill "$watchdog"`, kills the watchdog mid-grace-sleep, before it ever
+// reaches that deferred check. The failure signal was lost in that race,
+// falling through to plain COMPLETED/OK -- the exact false-VERIFIED bug
+// this whole witness mechanism exists to prevent, now reachable again via
+// a different path. The fix records the failure as a file fact the instant
+// it is known (before TERM is even sent), closing the race entirely; this
+// test reproduces pomar's exact scenario -- cooperative exit(0) on TERM,
+// combined with a witness write that cannot succeed -- deterministically.
+func TestTrack3PreflightCooperativeTermExitZeroStillUnknownWhenItsOwnTimeoutWitnessCannotBeWritten(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    chmod 0500 \"$FAKE_SCRATCH_DIR\"\n" +
+		"    ( sleep 4; chmod 0700 \"$FAKE_SCRATCH_DIR\" 2>/dev/null ) &\n" +
+		"    trap ': > \"$MARKER\"; exit 0' TERM\n" +
+		"    sleep 20\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(scratchDir, 0700) })
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if elapsed > 10*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose timeout witness could not be written must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a witness-write failure raced past by a cooperative TERM-exit-0 child must never be reported as VERIFIED (false OK): %s", line)
+	}
+	if !strings.Contains(line, "UNKNOWN") {
+		t.Fatalf("a witness-write failure must be reported as UNKNOWN, not silently treated as a clean completion: %s", line)
+	}
+}
+
 // recordGrandchildPIDScript returns a fake uv `lock` body that backgrounds a
 // genuinely separate process (`sh -c '...' &`, confirmed to report its own
 // distinct pid via `$$` -- `( ... ) &` does NOT: confirmed directly on this

@@ -173,6 +173,24 @@ bounded_run() {
   # Record the watchdog event, rather than infer it from rounded wall time
   # or the command's exit status (a TERM handler may legitimately exit 0).
   timeout_marker=$outfile.timeout
+  # pomar's second review (independent repro, cooperative-TERM-exit-0 +
+  # witness-write-failure): a write-failure signal reported only via the
+  # WATCHDOG'S OWN exit status, checked at the very end of its subshell,
+  # races the parent below -- a child that cooperates with TERM and exits
+  # quickly makes the parent's `wait "$pid"` return before the watchdog's
+  # own grace-period sleep ends, so the parent's `kill "$watchdog"` can kill
+  # it before it ever reaches its own deferred exit, silently losing the
+  # failure and reporting a false COMPLETED/OK -- the exact original bug
+  # this whole witness mechanism exists to prevent. Pre-creating this second
+  # marker here, before anything is backgrounded, means the watchdog's later
+  # write to it (on failure) only needs to TRUNCATE an EXISTING file, which
+  # needs write permission on the file itself, not on its directory -- the
+  # same reason the primary marker write can fail in the first place. That
+  # write happens strictly before TERM is sent, so strictly before the
+  # parent's wait on the child can return, closing the race: the fact is on
+  # disk before the parent could possibly race past it.
+  witness_write_failed_marker=$outfile.timeout.write_failed
+  : > "$witness_write_failed_marker" 2>/dev/null || true
   start=$(date +%s)
   set -m
   "$@" >"$outfile" 2>&1 &
@@ -185,21 +203,17 @@ bounded_run() {
   # instead of the substitution's pipe.
   (
     sleep "$budget"
-    # pomar's review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-TERMINATION):
-    # the original `: > "$timeout_marker" || exit 125` exited the watchdog
-    # on a write failure BEFORE ever sending TERM/KILL, so a child that
-    # merely ignores or outlives TERM (exactly the case the group KILL below
-    # exists to bound) was never actually signaled -- the parent's `wait
-    # "$pid"` would then hang on it indefinitely. The witness write and the
-    # termination it reports on are independent concerns: capture whether it
-    # succeeded, but always run the kill/drain regardless, and only act on
-    # the write outcome (via watchdog_rc, mapped to UNKNOWN below) afterward.
-    marker_witnessed=1
-    : > "$timeout_marker" 2>/dev/null || marker_witnessed=0
+    # pomar's first review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-
+    # TERMINATION): the kill/drain sequence below must always run regardless
+    # of whether this write succeeds -- a child that merely ignores or
+    # outlives TERM must still be bounded even when the witness can't be
+    # recorded, or the parent's `wait "$pid"` would hang on it indefinitely.
+    if ! : > "$timeout_marker" 2>/dev/null; then
+      printf 'write-failed\n' > "$witness_write_failed_marker" 2>/dev/null || true
+    fi
     kill -TERM -"$pid" 2>/dev/null || true
     sleep 5
     kill -KILL -"$pid" 2>/dev/null || true
-    [ "$marker_witnessed" = 1 ] || exit 125
   ) >/dev/null 2>&1 &
   watchdog=$!
   # Under `set -e`, a bare failing `wait` would abort this function (and,
@@ -208,10 +222,14 @@ bounded_run() {
   # the exit-status capture must stay inside an if-condition, exempt from -e.
   if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
   kill "$watchdog" 2>/dev/null || true
-  if wait "$watchdog" 2>/dev/null; then watchdog_rc=0; else watchdog_rc=$?; fi
+  wait "$watchdog" 2>/dev/null || true
   timeout_observed=0
   if [ -f "$timeout_marker" ]; then timeout_observed=1; fi
-  rm -f "$timeout_marker"
+  witness_write_failed=0
+  if [ -s "$witness_write_failed_marker" ] && grep -q write-failed "$witness_write_failed_marker" 2>/dev/null; then
+    witness_write_failed=1
+  fi
+  rm -f "$timeout_marker" "$witness_write_failed_marker"
   end=$(date +%s)
   elapsed=$((end - start))
 
@@ -255,7 +273,7 @@ bounded_run() {
     else
       echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
     fi
-  elif [ "$watchdog_rc" = 125 ]; then
+  elif [ "$witness_write_failed" = 1 ]; then
     # Failure to retain the deadline witness cannot produce an OK result.
     echo "UNKNOWN $rc $residual"
   elif [ "$elapsed" -gt "$budget" ]; then
