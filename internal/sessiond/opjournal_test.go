@@ -499,12 +499,18 @@ func TestAPendingOperationBecomesHeldOnExitAndSurvivesUnderTheSameName(t *testin
 	}
 	waitRunning("exit-held", false)
 
-	// Running (from the process's own exit status) and HeldOperations
-	// (from the adapter's op journal) are two separately-queried facts,
-	// not one atomic update -- waitRunning above only proves the former.
-	// "At once" means promptly once the exit is observed, not literally
-	// the same instant as the very first read after it; poll briefly
-	// rather than a single unretried GET with no margin at all.
+	// Running going false and the pending op converting to held are two
+	// INDEPENDENT reactions to the same t.Done() close, not one atomic
+	// update: adapter.start backgrounds `go func() { <-t.Done();
+	// a.close() }()`, and a.close is what calls ops.convertPending. Go
+	// gives no ordering guarantee between that goroutine running and
+	// whatever else observes t.Info().Running go false, so waitRunning
+	// above (which only proves the latter) can return before the former
+	// has happened. convertPending's own doc comment says this is meant
+	// to "show up as held immediately" -- that intent holds, but nothing
+	// in the code makes it synchronous, so the honest client-side check
+	// is a short, bounded poll, not a single unretried read with no
+	// margin for an inherent (if normally fast) scheduling gap.
 	var v SessionView
 	for end := time.Now().Add(2 * time.Second); len(v.HeldOperations) != 1 && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
 		v = SessionView{}

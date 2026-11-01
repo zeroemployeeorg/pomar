@@ -77,24 +77,25 @@ func TestARefusedWhenReadySendGivesBackTheReadinessItClaimed(t *testing.T) {
 		t.Fatal("the second client never actually released control")
 	}
 
-	// The adapter has not reported anything new. A when-ready send with a
-	// short bound must still succeed immediately: the earlier refusal must
-	// not have consumed the one real "waiting-input" report there is.
+	// The adapter has not reported anything new, and never will before
+	// this call returns. That makes success itself the deterministic
+	// proof, with no wall clock involved: the ONLY report "waiting-input"
+	// there is was already consumed by the first (refused) send above, so
+	// a second when-ready send can succeed within its bound only by using
+	// the readiness that refusal gave back. If the give-back were broken,
+	// this would time out and come back as a refusal (KindNotReady)
+	// instead of succeeding -- a different, host-speed-independent
+	// outcome, not a slower version of the same one. ReadyWaitMS is
+	// generous only so a genuinely slow host can't manufacture a false
+	// refusal; it is not what proves the give-back (a prior version of
+	// this test asserted elapsed < 150ms against a 200ms bound, a margin
+	// host scheduling contention could blur into a false failure).
 	var out OpResult
-	start := time.Now()
-	// ReadyWaitMS and the elapsed assertion below are deliberately far
-	// apart (2s vs 1s), not just scaled up from the original 200ms/150ms:
-	// a margin that narrow is exactly what let host scheduling contention
-	// blur "used the readiness immediately" and "waited out the whole
-	// bound" into false failures. The real property under test -- using
-	// an already-claimed-then-given-back readiness without waiting for a
-	// fresh one -- only needs "clearly well under the full bound", not a
-	// specific millisecond figure.
-	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "giveback-2", Text: "hi\r", WhenReady: true, ReadyWaitMS: 2000}, &out); err != nil {
-		t.Fatalf("a when-ready send on the same still-current readiness should succeed, not refuse: %v", err)
+	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "giveback-2", Text: "hi\r", WhenReady: true, ReadyWaitMS: 5000}, &out); err != nil {
+		t.Fatalf("a when-ready send on the same still-current readiness should succeed, not refuse (the give-back must have been lost): %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Fatalf("this send waited %s instead of using the already-claimed-then-given-back readiness immediately", elapsed)
+	if out.Outcome != "written" {
+		t.Fatalf("expected the send to be written using the given-back readiness: %+v", out)
 	}
 	waitScreen(t, c, "agent", "got:hi")
 }
