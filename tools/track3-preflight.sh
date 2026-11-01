@@ -251,12 +251,12 @@ bounded_run() {
     # the parent's `wait "$pid"` would hang on it indefinitely (pomar's
     # first review). Writing is now expected to succeed even when the
     # directory or the file's own mode bits have since changed, since
-    # fd 9 was opened before either could have; `|| true` remains only
-    # for the genuinely irreducible cases (disk full, the filesystem
-    # itself going away) that no fd trick can paper over -- acknowledged,
-    # not claimed solved: that residual case still falls through to the
-    # pre-existing default rather than UNKNOWN, since there is no
-    # stronger software-only signal available for a storage-I/O failure.
+    # fd 9 was opened before either could have. Storage I/O can still
+    # fail (disk full, the filesystem itself going away) -- `|| true`
+    # keeps termination independent of that, rather than papering over
+    # it: with no positive event recorded, the parent below reports
+    # UNKNOWN instead of treating the absent witness as proof of a clean
+    # completion (pomar's conservative-fallback review).
     if [ "$fd_opened" = 1 ]; then
       printf 'timeout\n' >&9 2>/dev/null || true
     fi
@@ -332,8 +332,21 @@ bounded_run() {
   elif [ "$witness_unavailable" = 1 ]; then
     # Failure to retain the deadline witness cannot produce an OK result.
     echo "UNKNOWN $rc $residual"
-  elif [ "$elapsed" -gt "$budget" ]; then
-    echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
+  elif [ "$elapsed" -ge "$budget" ]; then
+    # pomar's review and conservative-fallback proposal: a write to an
+    # already-open, permission-valid descriptor can still fail for a
+    # genuinely irreducible reason (disk full, the filesystem itself
+    # going away) that no fd trick closes -- inability to record a
+    # durable witness must never default to OK, and must never be
+    # upgraded to a positively observed timeout either, since the clock
+    # alone cannot distinguish "the deadline fired and the witness write
+    # failed" from "wall-clock measurement was merely delayed by
+    # unrelated host load" -- both show the same elapsed>=budget, no
+    # marker. Only elapsed strictly LESS than budget -- unambiguously too
+    # early for the deadline to have mattered at all -- still reports OK;
+    # anything at or past it, with no positive witness, is unresolved,
+    # not guessed either way.
+    echo "UNKNOWN $rc $residual"
   else
     echo "COMPLETED $rc $residual"
   fi
