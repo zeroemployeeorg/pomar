@@ -263,7 +263,16 @@ func TestAnAdaptersStateGatesWhenReadySends(t *testing.T) {
 	}
 	ad.report(t, AdapterReport{Accepted: "w-1"})
 	var v SessionView
+	// Detail is `json:",omitempty"`: once the server-side value genuinely
+	// clears to "", the response omits the key entirely, and decoding into
+	// an already-populated v would silently leave its PRIOR non-empty
+	// value in place (encoding/json only sets fields present in the
+	// payload) -- exactly the stale "Detail:prompt" false failure this
+	// loop produced intermittently. Each poll must decode into a fresh,
+	// zero-valued struct so a field that legitimately went empty is seen
+	// as empty, not as whatever it last was.
 	for end := time.Now().Add(5 * time.Second); v.Agent.Accepted != "w-1" && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		v = SessionView{}
 		c.Do("GET", "/v1/sessions/agent", nil, &v)
 	}
 	if v.Agent.Accepted != "w-1" || v.Agent.State != "waiting-input" || v.Agent.Detail != "" || v.Agent.Seq != 3 {
