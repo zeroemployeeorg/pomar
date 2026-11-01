@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,14 +96,14 @@ func TestIntentPrecedesEveryObjectAndOnlyStaticCachesAreCreated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if intents != 3 {
+	if intents != 4 {
 		t.Fatalf("intents = %d", intents)
 	}
 	v, err := venue.Open(f.root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(v.OpenObjects()) != 3 {
+	if len(v.OpenObjects()) != 4 {
 		t.Fatalf("unexpected objects: %+v", v.OpenObjects())
 	}
 	for _, object := range v.OpenObjects() {
@@ -269,7 +270,130 @@ func TestConcurrentAttemptsCannotShareAFreshVenue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(v.OpenObjects()) != 3 {
+	if len(v.OpenObjects()) != 4 {
 		t.Fatalf("concurrent ledger changed: %+v", v.OpenObjects())
+	}
+}
+
+func TestSecondCacheFailureLeavesNoCompletionAndConsumerRefuses(t *testing.T) {
+	f := newFixture(t)
+	err := prepareFixture(f, func(c cache) error {
+		if c.id == "debs" {
+			return errors.New("injected second-group failure")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("accepted failed second group")
+	}
+	assertAbsent(t, filepath.Join(f.root, receiptPath))
+	if err := verifyPrepared(f.root, f.packet, f.pin); err == nil {
+		t.Fatal("consumer accepted partial seed")
+	}
+	v, e := venue.Open(f.root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	store, ok := v.ObjectState(venue.KindImage, "image-store")
+	if !ok || store.Last != venue.OpCreated {
+		t.Fatal("real completed first cache lost")
+	}
+	debs, ok := v.ObjectState(venue.KindDownload, "debs")
+	if !ok || debs.Last != venue.OpFailed {
+		t.Fatal("failed cache custody lost")
+	}
+	if _, ok := v.ObjectState(venue.KindDownload, receiptID); ok {
+		t.Fatal("completion was attempted before all caches")
+	}
+}
+
+func TestCompletionIntentWithoutCommitRefusesConsumer(t *testing.T) {
+	f := newFixture(t)
+	err := prepareFixture(f, func(c cache) error {
+		if c.id == receiptID {
+			return errors.New("stop before receipt bytes")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected failed completion")
+	}
+	assertAbsent(t, filepath.Join(f.root, receiptPath))
+	if err := verifyPrepared(f.root, f.packet, f.pin); err == nil {
+		t.Fatal("consumer accepted missing completion")
+	}
+}
+
+func TestReadOnlyCompletionGateRejectsMissingDriftOrWrongRoot(t *testing.T) {
+	for _, kind := range []string{"missing", "receipt-drift", "target-drift", "ledger-failed", "root-moved"} {
+		t.Run(kind, func(t *testing.T) {
+			f := newFixture(t)
+			if err := prepareFixture(f, nil); err != nil {
+				t.Fatal(err)
+			}
+			if err := verifyPrepared(f.root, f.packet, f.pin); err != nil {
+				t.Fatal(err)
+			}
+			receipt := filepath.Join(f.root, receiptPath)
+			switch kind {
+			case "missing":
+				if err := os.Remove(receipt); err != nil {
+					t.Fatal(err)
+				}
+			case "receipt-drift":
+				raw, e := os.ReadFile(receipt)
+				if e != nil {
+					t.Fatal(e)
+				}
+				var r completion
+				if e = json.Unmarshal(raw, &r); e != nil {
+					t.Fatal(e)
+				}
+				r.ManifestSHA256 = strings.Repeat("0", 64)
+				raw, _ = json.Marshal(r)
+				if e = os.Chmod(receipt, 0600); e != nil {
+					t.Fatal(e)
+				}
+				if e = os.WriteFile(receipt, raw, 0444); e != nil {
+					t.Fatal(e)
+				}
+			case "target-drift":
+				p := filepath.Join(f.root, f.m.Files[1].Target)
+				if e := os.Chmod(p, 0600); e != nil {
+					t.Fatal(e)
+				}
+				if e := os.WriteFile(p, []byte("oops"), 0600); e != nil {
+					t.Fatal(e)
+				}
+				if e := os.Chmod(p, 0444); e != nil {
+					t.Fatal(e)
+				}
+			case "ledger-failed":
+				v, e := venue.Open(f.root)
+				if e != nil {
+					t.Fatal(e)
+				}
+				if e = v.Failed(venue.KindDownload, receiptID, "uncertain final observation"); e != nil {
+					t.Fatal(e)
+				}
+			case "root-moved":
+				newRoot := filepath.Join(f.parent, "moved-venue")
+				if e := os.Rename(f.root, newRoot); e != nil {
+					t.Fatal(e)
+				}
+				f.root = newRoot
+			}
+			before, e := os.ReadFile(filepath.Join(f.root, "ledger.jsonl"))
+			if e != nil {
+				t.Fatal(e)
+			}
+			if e := verifyPrepared(f.root, f.packet, f.pin); e == nil {
+				t.Fatal("consumer accepted invalid completion")
+			}
+			after, e := os.ReadFile(filepath.Join(f.root, "ledger.jsonl"))
+			if e != nil || string(before) != string(after) {
+				t.Fatal("verification changed ledger")
+			}
+		})
 	}
 }

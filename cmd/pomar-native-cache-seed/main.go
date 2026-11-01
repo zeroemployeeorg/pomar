@@ -23,6 +23,8 @@ import (
 )
 
 const maxManifest = 64 << 10
+const receiptPath = "downloads/native-cache-seed-receipt.json"
+const receiptID = "native-cache-seed-receipt"
 
 var digest = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
@@ -36,6 +38,23 @@ type inputFile struct {
 type manifest struct {
 	Schema string      `json:"schema"`
 	Files  []inputFile `json:"files"`
+}
+
+type receiptFile struct {
+	Target string `json:"target"`
+	Bytes  int64  `json:"bytes"`
+	SHA256 string `json:"sha256"`
+	Mode   uint32 `json:"mode"`
+}
+
+type completion struct {
+	Schema         string        `json:"schema"`
+	ManifestSHA256 string        `json:"manifest_sha256"`
+	Root           string        `json:"root"`
+	UID            int           `json:"uid"`
+	Device         uint64        `json:"device"`
+	Inode          uint64        `json:"inode"`
+	Files          []receiptFile `json:"files"`
 }
 
 type cache struct {
@@ -55,14 +74,131 @@ func main() {
 	inputs := fs.String("inputs", "", "absolute owner-received input directory, without symlink parents")
 	packet := fs.String("manifest", "", "bounded input manifest; obtain its expected digest independently")
 	pin := fs.String("manifest-sha256", "", "independently retained exact manifest SHA256")
-	if fs.Parse(os.Args[1:]) != nil || fs.NArg() != 0 || *root == "" || *inputs == "" || *packet == "" || !digest.MatchString(*pin) {
+	check := fs.Bool("verify", false, "read-only completion/ledger/full target verification; REQUIRED immediately before base build")
+	if fs.Parse(os.Args[1:]) != nil || fs.NArg() != 0 || *root == "" || (!*check && *inputs == "") || *packet == "" || !digest.MatchString(*pin) {
 		os.Exit(2)
 	}
-	if err := prepare(*root, *inputs, *packet, *pin, nil); err != nil {
+	operation := func() error { return prepare(*root, *inputs, *packet, *pin, nil) }
+	if *check {
+		operation = func() error { return verifyPrepared(*root, *packet, *pin) }
+	}
+	if err := operation(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	fmt.Println(`{"stage":"static_cache_inputs_created","base_built":false,"boot_verified":false,"vm_started":false}`)
+	stage := "static_cache_inputs_created"
+	if *check {
+		stage = "static_cache_inputs_verified"
+	}
+	json.NewEncoder(os.Stdout).Encode(map[string]any{"stage": stage, "base_built": false, "boot_verified": false, "vm_started": false})
+}
+
+func loadManifest(packet, pin string) ([]cache, error) {
+	f, err := os.OpenFile(packet, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > maxManifest {
+		return nil, errors.New("manifest must be a bounded regular file")
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxManifest+1))
+	if err != nil || len(raw) > maxManifest {
+		return nil, errors.New("manifest read failed or exceeded limit")
+	}
+	return decode(raw, pin)
+}
+
+func expectedCompletion(root, pin string, groups []cache) (completion, error) {
+	s, err := os.Stat(root)
+	if err != nil {
+		return completion{}, err
+	}
+	st, ok := s.Sys().(*syscall.Stat_t)
+	if !ok {
+		return completion{}, errors.New("root identity unavailable")
+	}
+	r := completion{Schema: "pomar.native-cache-seed-complete/v1", ManifestSHA256: pin, Root: root, UID: os.Getuid(), Device: uint64(st.Dev), Inode: st.Ino}
+	for _, group := range groups {
+		for _, f := range group.files {
+			r.Files = append(r.Files, receiptFile{Target: f.Target, Bytes: f.Bytes, SHA256: f.SHA256, Mode: 0444})
+		}
+	}
+	return r, nil
+}
+
+// verifyPrepared never creates ledger objects, repairs a partial seed, or
+// promotes a failed root. P3 must run it immediately before consuming caches.
+func verifyPrepared(root, packet, pin string) error {
+	if os.Getuid() == 0 {
+		return errors.New("use the existing unprivileged owner")
+	}
+	if err := checkedDirectory(root); err != nil {
+		return err
+	}
+	groups, err := loadManifest(packet, pin)
+	if err != nil {
+		return err
+	}
+	v, err := venue.Open(root)
+	if err != nil {
+		return err
+	}
+	for _, group := range append(groups, cache{kind: venue.KindDownload, id: receiptID, path: receiptPath}) {
+		state, ok := v.ObjectState(group.kind, group.id)
+		if !ok || state.Last != venue.OpCreated || state.Class != venue.ClassCache || state.Path != group.path {
+			return errors.New("static cache completion or ledger is missing, failed or unresolved")
+		}
+	}
+	dir, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	f, err := openInput(dir, receiptPath)
+	if err != nil {
+		return err
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxManifest+1))
+	f.Close()
+	if err != nil || len(raw) > maxManifest {
+		return errors.New("completion read failed or exceeded limit")
+	}
+	want, err := expectedCompletion(root, pin, groups)
+	if err != nil {
+		return err
+	}
+	var got completion
+	d := json.NewDecoder(bytes.NewReader(raw))
+	d.DisallowUnknownFields()
+	if d.Decode(&got) != nil || d.Decode(new(any)) != io.EOF {
+		return errors.New("invalid completion receipt")
+	}
+	a, _ := json.Marshal(got)
+	b, _ := json.Marshal(want)
+	if !bytes.Equal(a, b) {
+		return errors.New("completion receipt does not bind this root, manifest and target pins")
+	}
+	for _, group := range groups {
+		for _, pin := range group.files {
+			f, err := openInput(dir, pin.Target)
+			if err != nil {
+				return err
+			}
+			s, err := f.Stat()
+			if err != nil || s.Mode().Perm() != 0444 {
+				f.Close()
+				return errors.New("target mode drift")
+			}
+			err = verify(f, pin, io.Discard)
+			f.Close()
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func local(name string) bool {
@@ -197,21 +333,7 @@ func prepare(root, inputs, packet, pin string, hooks *testHooks) error {
 	if err := checkedDirectory(inputs); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(packet, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
-	if err != nil {
-		return err
-	}
-	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxManifest {
-		f.Close()
-		return errors.New("manifest must be a bounded regular file")
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, maxManifest+1))
-	closeErr := f.Close()
-	if err != nil || closeErr != nil || len(raw) > maxManifest {
-		return errors.New("manifest read failed or exceeded limit")
-	}
-	groups, err := decode(raw, pin)
+	groups, err := loadManifest(packet, pin)
 	if err != nil {
 		return err
 	}
@@ -327,5 +449,55 @@ func prepare(root, inputs, packet, pin string, hooks *testHooks) error {
 			return err
 		}
 	}
-	return nil
+	// Receipt publication is last, after all three real caches completed.
+	if err := v.Intent(venue.KindDownload, venue.ClassCache, receiptID, receiptPath, "complete static seed; no base, boot or VM claim"); err != nil {
+		return err
+	}
+	if err := syncDirectory(root); err != nil {
+		return err
+	}
+	finish := func() error {
+		if hooks != nil && hooks.afterIntent != nil {
+			if err := hooks.afterIntent(cache{kind: venue.KindDownload, id: receiptID, path: receiptPath}); err != nil {
+				return err
+			}
+		}
+		receipt, err := expectedCompletion(root, pin, groups)
+		if err != nil {
+			return err
+		}
+		raw, err := json.Marshal(receipt)
+		if err != nil {
+			return err
+		}
+		f, err := dst.OpenFile(receiptPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+		if err != nil {
+			return err
+		}
+		_, err = f.Write(append(raw, '\n'))
+		if err == nil {
+			err = f.Chmod(0444)
+		}
+		if err == nil {
+			err = f.Sync()
+		}
+		closeErr := f.Close()
+		if err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			return err
+		}
+		if err = syncDirectory(filepath.Join(root, "downloads")); err != nil {
+			return err
+		}
+		return syncDirectory(root)
+	}
+	if err := finish(); err != nil {
+		return errors.Join(err, v.Failed(venue.KindDownload, receiptID, err.Error()))
+	}
+	if err := v.Created(venue.KindDownload, receiptID); err != nil {
+		return err
+	}
+	return verifyPrepared(root, packet, pin)
 }
