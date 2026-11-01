@@ -437,7 +437,15 @@ preflight() {
   repo_root_status=UNKNOWN
   repo_root=""
   requested_canonical=$(cd -P "$repo" 2>/dev/null && pwd -P) || requested_canonical=""
-  run_bounded 5 git -C "$repo" rev-parse --show-toplevel
+  # Bounded to 15s (architect's standing up-to-3x-under-host-load policy,
+  # the same widening already applied to the uv-lock check): this is local
+  # git plumbing against an already-present checkout, never the network, but
+  # a heavily loaded host can still make it exceed the original 5s budget,
+  # which would otherwise falsely report repo_root_status=UNKNOWN and
+  # cascade into every downstream fact (source_head, pandoc floor/pin,
+  # python requirement) reporting NOT-INSPECTED/DOES-NOT-EXIST even though
+  # the repo itself is fine.
+  run_bounded 15 git -C "$repo" rev-parse --show-toplevel
   if [ "$BOUNDED_STATUS" = OK ]; then
     repo_root=$(printf '%s' "$BOUNDED_OUTPUT" | tr -d '\n')
     if [ -n "$requested_canonical" ] && [ "$repo_root" = "$requested_canonical" ]; then
@@ -454,17 +462,21 @@ preflight() {
   source_remote=NOT-INSPECTED
   working_tree_status=UNKNOWN
   if [ "$repo_root_status" = VERIFIED ]; then
-    run_bounded 5 git -C "$repo_root" rev-parse HEAD
+    # Same 5s-to-15s widening as repo_root_status above, same reason: local
+    # git plumbing against an already-present checkout, bounded against a
+    # genuine hang, but tolerant of host contention up to the architect's
+    # authorized 3x ceiling.
+    run_bounded 15 git -C "$repo_root" rev-parse HEAD
     if [ "$BOUNDED_STATUS" = OK ]; then
       source_head=$(printf '%s' "$BOUNDED_OUTPUT" | tr -d '\n')
     fi
-    run_bounded 5 git -C "$repo_root" remote get-url origin
+    run_bounded 15 git -C "$repo_root" remote get-url origin
     if [ "$BOUNDED_STATUS" = OK ]; then
       source_remote=$(printf '%s' "$BOUNDED_OUTPUT" | tr -d '\n')
     else
       source_remote=NOT-CONFIGURED
     fi
-    run_bounded 5 git -C "$repo_root" status --porcelain
+    run_bounded 15 git -C "$repo_root" status --porcelain
     if [ "$BOUNDED_STATUS" = OK ]; then
       if [ -z "$BOUNDED_OUTPUT" ]; then working_tree_status=CLEAN; else working_tree_status=DIRTY; fi
     fi
@@ -503,21 +515,22 @@ preflight() {
   # (a concurrent checkout or commit on $repo_root), which would otherwise
   # let these facts come from a different revision than the one reported.
   if [ "$repo_root_status" = VERIFIED ] && [ "$source_head" != NOT-INSPECTED ]; then
-    run_bounded 5 git -C "$repo_root" show "$source_head:$floor_path"
+    # Same 5s-to-15s widening as above, same reason.
+    run_bounded 15 git -C "$repo_root" show "$source_head:$floor_path"
     if [ "$BOUNDED_STATUS" = OK ]; then
       floor_version=$(printf '%s' "$BOUNDED_OUTPUT" | sed -n 's/.*MIN_PANDOC_VERSION[^(]*(\([0-9][0-9]*\)[^0-9]*\([0-9][0-9]*\)).*/\1.\2/p' | head -n 1)
       [ -n "$floor_version" ] || floor_version=DOES-NOT-EXIST
     else
       floor_version=DOES-NOT-EXIST
     fi
-    run_bounded 5 git -C "$repo_root" show "$source_head:$pin_path"
+    run_bounded 15 git -C "$repo_root" show "$source_head:$pin_path"
     if [ "$BOUNDED_STATUS" = OK ]; then
       ci_pin_version=$(printf '%s' "$BOUNDED_OUTPUT" | awk -F'"' '/^VERSION=/{print $2; exit}')
       [ -n "$ci_pin_version" ] || ci_pin_version=DOES-NOT-EXIST
     else
       ci_pin_version=DOES-NOT-EXIST
     fi
-    run_bounded 5 git -C "$repo_root" show "$source_head:$pyproject_path"
+    run_bounded 15 git -C "$repo_root" show "$source_head:$pyproject_path"
     if [ "$BOUNDED_STATUS" = OK ]; then
       required_python=$(printf '%s' "$BOUNDED_OUTPUT" | awk -F'"' '/^requires-python/{print $2; exit}')
       [ -n "$required_python" ] || required_python=DOES-NOT-EXIST
