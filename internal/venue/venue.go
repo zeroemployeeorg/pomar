@@ -23,10 +23,12 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
 )
 
 // DefaultMaxFillPercent is the fill level above which heavy work is refused.
-const DefaultMaxFillPercent = 85
+const DefaultMaxFillPercent = hostpolicy.DefaultMaxFillPercent
 
 // Kind names the class of object a ledger entry is about.
 type Kind string
@@ -94,13 +96,14 @@ type Object struct {
 
 // Venue is an open data root.
 type Venue struct {
-	root      string
-	mu        sync.Mutex
-	seq       int
-	objs      map[string]*Object // key: kind/id
-	teardowns map[string]string  // reserved object key -> relative path during removal
-	now       func() time.Time
-	statfs    func(string, *syscall.Statfs_t) error
+	root          string
+	mu            sync.Mutex
+	seq           int
+	objs          map[string]*Object // key: kind/id
+	teardowns     map[string]string  // reserved object key -> relative path during removal
+	now           func() time.Time
+	statfs        func(string, *syscall.Statfs_t) error
+	readDiskLimit func() hostpolicy.DiskLimit
 }
 
 const ledgerName = "ledger.jsonl"
@@ -112,10 +115,11 @@ func Open(root string) (*Venue, error) {
 }
 
 // Options supplies trusted host dependencies. A nil Statfs uses the real
-// filesystem. Tests can inject counters without depending on host disk use;
-// this does not change any caller's fill limit.
+// filesystem; a nil ReadDiskLimit samples the host-wide policy file. Tests
+// inject both dependencies to avoid inheriting host occupancy or policy.
 type Options struct {
-	Statfs func(string, *syscall.Statfs_t) error
+	Statfs        func(string, *syscall.Statfs_t) error
+	ReadDiskLimit func() hostpolicy.DiskLimit
 }
 
 // OpenWithOptions opens the same ledgered data root as Open, with explicit
@@ -142,7 +146,11 @@ func OpenWithOptions(root string, opts Options) (*Venue, error) {
 	if statfs == nil {
 		statfs = syscall.Statfs
 	}
-	v := &Venue{root: real, objs: map[string]*Object{}, now: time.Now, statfs: statfs}
+	readDiskLimit := opts.ReadDiskLimit
+	if readDiskLimit == nil {
+		readDiskLimit = hostpolicy.LoadDiskLimit
+	}
+	v := &Venue{root: real, objs: map[string]*Object{}, now: time.Now, statfs: statfs, readDiskLimit: readDiskLimit}
 	if err := v.replay(); err != nil {
 		return nil, err
 	}
@@ -472,6 +480,21 @@ func cstr(b []int8) string {
 
 // ErrDiskFull is returned by CheckHeavy when the fill limit is exceeded.
 var ErrDiskFull = errors.New("venue: data root filesystem above fill limit")
+
+// DiskLimit observes the host-wide limit. Both manager admission and heavy
+// work use this source, including the same fallback when it cannot be read.
+func (v *Venue) DiskLimit() hostpolicy.DiskLimit { return v.readDiskLimit().Validated() }
+
+// CheckHostDisk refuses heavy work using the observed host policy and names
+// the exact limit/source in a refusal. The low-level CheckHeavy remains for
+// callers explicitly checking another bound.
+func (v *Venue) CheckHostDisk() error {
+	p := v.DiskLimit()
+	if err := v.CheckHeavy(p.Percent); err != nil {
+		return fmt.Errorf("%w (fill limit %d%% from %s)", err, p.Percent, p.Source)
+	}
+	return nil
+}
 
 // CheckHeavy refuses heavy work when the filesystem is above maxPercent full.
 func (v *Venue) CheckHeavy(maxPercent int) error {

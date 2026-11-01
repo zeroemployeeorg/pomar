@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
 	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
@@ -56,7 +57,7 @@ func upstream(t *testing.T, env []string) (string, string) {
 func setup(t *testing.T) (*Mirrors, []string, string, string) {
 	env := isolatedEnv(t)
 	up, sha := upstream(t, env)
-	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{Statfs: func(_ string, s *syscall.Statfs_t) error {
+	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{ReadDiskLimit: hostpolicy.DefaultDiskLimit, Statfs: func(_ string, s *syscall.Statfs_t) error {
 		*s = syscall.Statfs_t{Bsize: 4096, Blocks: 200 << 18, Bfree: 100 << 18, Bavail: 100 << 18}
 		return nil
 	}})
@@ -420,7 +421,7 @@ func TestShow(t *testing.T) {
 }
 
 func TestSyncRefusesInjectedFullDiskBeforeFetching(t *testing.T) {
-	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{Statfs: func(_ string, s *syscall.Statfs_t) error {
+	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{ReadDiskLimit: hostpolicy.DefaultDiskLimit, Statfs: func(_ string, s *syscall.Statfs_t) error {
 		*s = syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 14, Bavail: 14}
 		return nil
 	}})

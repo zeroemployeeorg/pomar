@@ -2,7 +2,10 @@ package capacity
 
 import (
 	"errors"
+	"strings"
 	"testing"
+
+	"github.com/zeroemployeeorg/pomar/internal/hostpolicy"
 )
 
 func reason(err error) string {
@@ -180,5 +183,30 @@ func TestCIClassHasALogCap(t *testing.T) {
 	c.LogCapBytes = -1
 	if err := c.validate(); err == nil {
 		t.Fatal("a negative log cap was accepted")
+	}
+}
+
+func TestHostDiskLimitControlsFloorButKeepsClaims(t *testing.T) {
+	h := Host{CPUSlots: 4, MemoryBytes: 8 * GiB}
+	d := Disk{Used: 900 * GiB, Avail: 100 * GiB, Shared: true}
+	if err := Admit(CI, nil, h, d); reason(err) != ReasonFloor || !strings.Contains(err.Error(), "85%") || !strings.Contains(err.Error(), "built-in default") {
+		t.Fatalf("default: %v", err)
+	}
+	d.FillLimit = hostpolicy.DiskLimit{Percent: 99, Source: "/fixture/host-setting"}
+	if err := Admit(CI, nil, h, d); err != nil {
+		t.Fatalf("99%% should fit: %v", err)
+	}
+	a, err := Evaluate(CI, nil, h, d)
+	if err != nil || a.FillLimit != d.FillLimit || a.DiskFloor != 10*GiB {
+		t.Fatalf("allocation %+v %v", a, err)
+	}
+	d.Used, d.Avail = 980*GiB, 20*GiB
+	if err := Admit(CI, nil, h, d); reason(err) != ReasonFloor || !strings.Contains(err.Error(), "99% from /fixture/host-setting") {
+		t.Fatalf("floor: %v", err)
+	}
+	d.Shared = false
+	d.Avail = 1 * GiB
+	if err := Admit(CI, nil, h, d); reason(err) != ReasonDisk {
+		t.Fatalf("real claim still required: %v", err)
 	}
 }

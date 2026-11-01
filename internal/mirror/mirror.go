@@ -89,7 +89,7 @@ func (m *Mirrors) Sync(ctx context.Context, name, url string) error {
 		}
 		return fmt.Errorf("mirror: %s is ledgered but missing on disk; tear it down first", name)
 	}
-	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
+	if err := v.CheckHostDisk(); err != nil {
 		return err
 	}
 	if err := v.Intent(venue.KindVolume, venue.ClassCache, id(name), rel(name), "source mirror"); err != nil {
