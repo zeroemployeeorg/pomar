@@ -97,13 +97,23 @@ func TestASessionOutlivesItsClients(t *testing.T) {
 	// CHILD specifically -- poll for the real condition instead of
 	// guessing a bigger margin that still has to hold under arbitrary
 	// contention.
-	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+	var observedDetached bool
+	var lastRetained []byte
+	for end := time.Now().Add(5 * time.Second); !observedDetached && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
 		s.mu.Lock()
-		retained := s.snapshotLocked().Data
+		lastRetained = s.snapshotLocked().Data
 		s.mu.Unlock()
-		if strings.Contains(string(retained), "firstsecond") {
-			break
+		if strings.Contains(string(lastRetained), "firstsecond") {
+			observedDetached = true
 		}
+	}
+	// pomar's review: falling through to Attach regardless of whether the
+	// loop above actually observed the condition (vs merely expiring)
+	// would let output that only arrives in the gap between expiry and
+	// Attach satisfy c2's later snapshot without ever having proven the
+	// no-client-attached premise at all -- fail explicitly here instead.
+	if !observedDetached {
+		t.Fatalf("never observed retained output while no client was attached: %q", lastRetained)
 	}
 	if !s.Info().Running {
 		t.Fatal("waiting with no client attached stopped the program")
