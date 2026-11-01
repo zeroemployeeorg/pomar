@@ -28,29 +28,32 @@ import (
 // HostConfig is supplied by the service owner, never by a guest. A dedicated
 // development data root is required; CI manager state is not opened here.
 type HostConfig struct {
-	SeatLaunch             *SeatLaunch                   `json:"seatLaunch,omitempty"`
-	ControllerCapabilities []string                      `json:"controllerCapabilities,omitempty"`
-	Root                   string                        `json:"root"`
-	Helper                 string                        `json:"helper"`
-	Store                  string                        `json:"store"`
-	Base                   string                        `json:"base"`
-	Kernel                 string                        `json:"kernel"`
-	InitRef                string                        `json:"initRef"`
-	InitDigest             string                        `json:"initDigest"`
-	ImageRef               string                        `json:"imageRef"`
-	ImageDigest            string                        `json:"imageDigest"`
-	GuestBinary            string                        `json:"guestBinary"`
-	ShimBinary             string                        `json:"shimBinary"`
-	CodexArchive           string                        `json:"codexArchive"`
-	CodexArchiveSHA256     string                        `json:"codexArchiveSHA256"`
-	SourceBundle           string                        `json:"sourceBundle"`
-	SourceSHA              string                        `json:"sourceSHA"`
-	GoProxySocket          string                        `json:"goProxySocket"`
-	AllowedHosts           []string                      `json:"allowedHosts"`
-	MaxLive                int                           `json:"maxLive"`
-	CPUs                   int                           `json:"cpus"`
-	MemoryBytes            uint64                        `json:"memoryBytes"`
-	Profiles               map[string]EnvironmentProfile `json:"profiles,omitempty"`
+	SeatLaunch             *SeatLaunch `json:"seatLaunch,omitempty"`
+	ControllerCapabilities []string    `json:"controllerCapabilities,omitempty"`
+	Root                   string      `json:"root"`
+	Helper                 string      `json:"helper"`
+	Store                  string      `json:"store"`
+	Base                   string      `json:"base"`
+	Kernel                 string      `json:"kernel"`
+	InitRef                string      `json:"initRef"`
+	InitDigest             string      `json:"initDigest"`
+	ImageRef               string      `json:"imageRef"`
+	ImageDigest            string      `json:"imageDigest"`
+	GuestBinary            string      `json:"guestBinary"`
+	ShimBinary             string      `json:"shimBinary"`
+	CodexArchive           string      `json:"codexArchive"`
+	CodexArchiveSHA256     string      `json:"codexArchiveSHA256"`
+	SourceBundle           string      `json:"sourceBundle"`
+	SourceSHA              string      `json:"sourceSHA"`
+	GoProxySocket          string      `json:"goProxySocket"`
+	AllowedHosts           []string    `json:"allowedHosts"`
+	// MailOrigin is an owner-selected upstream, never a guest destination.
+	// Only a seat profile explicitly enabling Mail receives its local relay.
+	MailOrigin  string                        `json:"mailOrigin,omitempty"`
+	MaxLive     int                           `json:"maxLive"`
+	CPUs        int                           `json:"cpus"`
+	MemoryBytes uint64                        `json:"memoryBytes"`
+	Profiles    map[string]EnvironmentProfile `json:"profiles,omitempty"`
 	// Agent is the coding agent: empty or "codex" (the default), or "claude";
 	// CodexArchive is then that agent's pinned package. AgentVersion pins
 	// Claude Code's version, and is required for it.
@@ -80,6 +83,7 @@ type HostConfig struct {
 // EnvironmentProfile selects project inputs supplied by the service owner.
 // Creation accepts only a name; a controller cannot supply filesystem paths.
 type EnvironmentProfile struct {
+	Mail                   bool        `json:"mail,omitempty"`
 	SeatLaunch             *SeatLaunch `json:"seatLaunch,omitempty"`
 	ControllerCapabilities []string    `json:"controllerCapabilities,omitempty"`
 	Base                   string      `json:"base"`
@@ -159,6 +163,9 @@ func (h *Host) profileConfig(name string) (HostConfig, error) {
 	c.QualificationFixture = nil
 	c.Seat, c.SeatDeclarationSHA256 = p.Seat, p.SeatDeclarationSHA256
 	c.SeatLaunch = p.SeatLaunch
+	if !p.Mail {
+		c.MailOrigin = ""
+	}
 	if p.Qualification && p.QualificationFixture != nil {
 		f := *p.QualificationFixture
 		c.QualificationFixture = &f
@@ -178,6 +185,7 @@ type VMSpec struct {
 	Rootfs        string `json:"rootfs"`
 	ControlSocket string `json:"controlSocket"`
 	EgressSocket  string `json:"egressSocket"`
+	MailSocket    string `json:"mailSocket,omitempty"`
 }
 
 type Action struct {
@@ -266,6 +274,14 @@ func OpenHost(config HostConfig) (*Host, error) {
 		return nil, errors.New("a qualification fixture belongs to a qualification profile, not the host configuration")
 	}
 	for name, p := range config.Profiles {
+		if p.Mail {
+			if p.Seat == "" {
+				return nil, errors.New("mail belongs to an owner-bound seat profile")
+			}
+			if _, err := newMailRelay(p.Seat, "validation", "validation", config.MailOrigin, nil); err != nil {
+				return nil, fmt.Errorf("profile %s mail: %w", name, err)
+			}
+		}
 		if p.QualificationFixture != nil {
 			agent := config.Agent
 			if p.Agent != "" {
@@ -439,11 +455,36 @@ func (h *Host) processList() ([]proc.Process, error) {
 	return (proc.PS{}).List()
 }
 
-func (h *Host) gate(e *Environment) error {
+func (h *Host) gate(e *Environment) (err error) {
+	// start established the predecessor fence before replacing channels.
+	if old := h.gates[e.Spec.Environment]; old != nil {
+		old.Revoke()
+		delete(h.gates, e.Spec.Environment)
+	}
+	for _, suffix := range []string{"", "-go", "-mail"} {
+		if old := h.servers[e.Spec.Environment+suffix]; old != nil {
+			old.Close()
+			delete(h.servers, e.Spec.Environment+suffix)
+		}
+	}
 	g, err := NewEgress(e.Spec.AllowedHosts)
 	if err != nil {
 		return err
 	}
+	// A failed setup must not leave any of this incarnation's channels live.
+	defer func() {
+		if err != nil {
+			g.Revoke()
+			for _, suffix := range []string{"", "-go", "-mail"} {
+				if s := h.servers[e.Spec.Environment+suffix]; s != nil {
+					s.Close()
+					delete(h.servers, e.Spec.Environment+suffix)
+				}
+			}
+			delete(h.gates, e.Spec.Environment)
+			e.Spec.MailSocket = ""
+		}
+	}()
 	if fi, err := os.Lstat(e.Spec.EgressSocket); err == nil {
 		if fi.Mode()&os.ModeSocket == 0 {
 			return errors.New("egress path occupied")
@@ -512,6 +553,42 @@ func (h *Host) gate(e *Environment) error {
 	h.servers[e.Spec.Environment+"-go"] = gs
 	go gs.Serve(gl)
 	e.Spec.GoProxySocket = goSocket
+	e.Spec.MailSocket = ""
+	if e.Spec.Seat != "" && e.Spec.MailOrigin != "" {
+		mail, err := newMailRelay(e.Spec.Seat, e.Spec.Environment, e.Spec.Incarnation, e.Spec.MailOrigin, nil)
+		if err != nil {
+			return err
+		}
+		g.mu.Lock()
+		if g.revoked {
+			g.mu.Unlock()
+			mail.Revoke()
+			return errors.New("mail network already revoked")
+		}
+		g.onRevoke = mail.Revoke
+		g.mu.Unlock()
+		socket := filepath.Join(e.Spec.Directory, "mail.sock")
+		if fi, err := os.Lstat(socket); err == nil {
+			if fi.Mode()&os.ModeSocket == 0 {
+				return errors.New("mail relay path occupied")
+			}
+			if err := os.Remove(socket); err != nil {
+				return err
+			}
+		}
+		ln, err := net.Listen("unix", socket)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(socket, 0o600); err != nil {
+			ln.Close()
+			return err
+		}
+		server := &http.Server{Handler: mail, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 20 * time.Second, MaxHeaderBytes: 8192}
+		h.servers[e.Spec.Environment+"-mail"] = server
+		e.Spec.MailSocket = socket
+		go server.Serve(ln)
+	}
 	return nil
 }
 
@@ -540,6 +617,9 @@ func (h *Host) start(e *Environment) error {
 	}
 	if cfg.SeatDeclarationSHA256 != e.Spec.SeatDeclarationSHA256 || !reflect.DeepEqual(cfg.SeatLaunch, e.Spec.SeatLaunch) {
 		return errors.New("retained seat declaration changed; original environment held")
+	}
+	if cfg.MailOrigin != e.Spec.MailOrigin || cfg.Seat != e.Spec.Seat {
+		return errors.New("retained mail binding changed; original environment held")
 	}
 	if cfg.SourceSHA != e.Spec.SourceSHA || cfg.SourceBundle != e.Spec.SourceBundle || cfg.Base != e.Spec.Base || cfg.ImageDigest != e.Spec.ImageDigest || cfg.ImageRef != e.Spec.ImageRef {
 		return errors.New("retained project inputs changed; use a distinct environment")
@@ -679,6 +759,9 @@ func (h *Host) stop(e *Environment) error {
 				s.Close()
 			}
 			if s := h.servers[e.Spec.Environment+"-go"]; s != nil {
+				s.Close()
+			}
+			if s := h.servers[e.Spec.Environment+"-mail"]; s != nil {
 				s.Close()
 			}
 			err := h.save(e)

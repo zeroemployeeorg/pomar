@@ -48,6 +48,7 @@ public enum AgentEnvironment {
         public var controlSocket: String
         public var egressSocket: String
         public var goProxySocket: String
+        public var mailSocket: String? = nil
         public var cpus: Int
         public var memoryBytes: UInt64
         public var controllerCapabilities: [String]? = nil
@@ -167,6 +168,7 @@ public enum AgentEnvironment {
             && o.rootfs == o.directory + "/workspace.ext4"
             && o.controlSocket == o.directory + "/agent.sock"
             && o.egressSocket == o.directory + "/egress.sock"
+            && (o.mailSocket == nil || (o.mailSocket == o.directory + "/mail.sock" && !(o.seat ?? "").isEmpty))
     }
 
     public static func validControllerCapabilities(_ names: [String]) -> Bool {
@@ -311,6 +313,10 @@ public enum AgentEnvironment {
                         UnixSocketConfiguration(source: URL(fileURLWithPath: o.goProxySocket),
                             destination: URL(fileURLWithPath: Helper.proxySocket), permissions: .init(rawValue: 0o600), direction: .into),
                     ]
+                    if let mail = o.mailSocket {
+                        config.sockets.append(UnixSocketConfiguration(source: URL(fileURLWithPath: mail),
+                            destination: URL(fileURLWithPath: "/run/pomar/mail.sock"), permissions: .init(rawValue: 0o600), direction: .into))
+                    }
                 }
             ownedContainer = container
             stage = "create-vm"
@@ -359,6 +365,10 @@ public enum AgentEnvironment {
                 listen: "127.0.0.1:7072", socket: "/run/pomar/egress.sock", ready: "/pomar/egress.ready")
             _ = try await Helper.startProxyShim(container, shim: o.shimBinary, output: out, name: "agent-go-shim",
                 listen: Helper.proxyListen, socket: Helper.proxySocket, ready: "/pomar/go.ready", copy: false)
+            if o.mailSocket != nil {
+                _ = try await Helper.startProxyShim(container, shim: o.shimBinary, output: out, name: "agent-mail-shim",
+                    listen: "127.0.0.1:7074", socket: "/run/pomar/mail.sock", ready: "/pomar/mail.ready", copy: false)
+            }
             let broker = try await container.exec("agent-broker") { config in
                 config.arguments = brokerArguments(o)
                 config.stdout = out; config.stderr = out

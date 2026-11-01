@@ -51,8 +51,8 @@ func codexCustodianEnv() []string {
 func codexTmuxHas() []string {
 	return []string{seatTmux, "-f", codexTmuxConfig, "-S", codexTmuxSocket, "has-session", "-t", seatSession}
 }
-func codexSeatEnv() []string {
-	return []string{"HOME=" + seatHome, "CODEX_HOME=" + seatHome + "/.codex", "PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TERM=xterm-256color", "LANG=C.UTF-8", "HTTPS_PROXY=http://127.0.0.1:7072", "HTTP_PROXY=http://127.0.0.1:7072", "ALL_PROXY=http://127.0.0.1:7072", "GOPROXY=http://127.0.0.1:7070", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly"}
+func codexSeatEnv(seat string) []string {
+	return []string{"HOME=" + seatHome, "CODEX_HOME=" + seatHome + "/.codex", "PATH=/opt/pomar-codex/codex-path:/pomar/job/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "TERM=xterm-256color", "LANG=C.UTF-8", "HTTPS_PROXY=http://127.0.0.1:7072", "HTTP_PROXY=http://127.0.0.1:7072", "ALL_PROXY=http://127.0.0.1:7072", "GOPROXY=http://127.0.0.1:7070", "GOTOOLCHAIN=local", "GOFLAGS=-mod=readonly", "ZMAIL_URL=http://127.0.0.1:7074", "ZMAIL_INSTANCE=" + seat, "NO_PROXY=127.0.0.1,localhost", "no_proxy=127.0.0.1,localhost"}
 }
 
 func codexTmuxEnsure(seat, self string) []string {
@@ -109,7 +109,7 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 	if err = os.Chmod(codexConsoleSocket, 0660); err != nil {
 		return err
 	}
-	supervisor := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+	supervisor := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv(seat)}
 	consoleErr := make(chan error, 1)
 	go func() { consoleErr <- supervisor.ServeConsole(console) }()
 	ensure := func() error {
@@ -147,7 +147,7 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 	handler := http.NewServeMux()
 	handler.Handle("/", seatHandler(store, route, func() bool { return false }))
 	handler.HandleFunc("GET /v1/codex/startup", func(w http.ResponseWriter, r *http.Request) {
-		s := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+		s := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv(seat)}
 		info, e := s.InspectStartup()
 		if e != nil {
 			http.Error(w, "startup inspection held", 409)
@@ -174,7 +174,7 @@ func runCodexSeat(store *agentenv.Store, seat, binary, version, workspace, socke
 			http.Error(w, "invalid reset request", 400)
 			return
 		}
-		launchRecord := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv()}
+		launchRecord := codexseat.Supervisor{Seat: seat, Binary: binary, Home: seatHome + "/.codex", StateDir: codexStateDir, Workspace: workspace, Launch: launch, Env: codexSeatEnv(seat)}
 		receipt, e := launchRecord.AbandonStart(req, "/var/lib/pomar-agent/codex-start-resets")
 		if e != nil {
 			http.Error(w, "original unbound startup remains held", 409)
