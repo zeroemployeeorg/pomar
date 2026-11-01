@@ -169,6 +169,10 @@ bounded_run() {
   budget=$1
   outfile=$2
   shift 2
+  # outfile is a fresh file in run_bounded's private scratch directory.
+  # Record the watchdog event, rather than infer it from rounded wall time
+  # or the command's exit status (a TERM handler may legitimately exit 0).
+  timeout_marker=$outfile.timeout
   start=$(date +%s)
   set -m
   "$@" >"$outfile" 2>&1 &
@@ -181,6 +185,7 @@ bounded_run() {
   # instead of the substitution's pipe.
   (
     sleep "$budget"
+    : > "$timeout_marker" || exit 125
     kill -TERM -"$pid" 2>/dev/null || true
     sleep 5
     kill -KILL -"$pid" 2>/dev/null || true
@@ -190,10 +195,12 @@ bounded_run() {
   # since this runs inside a command-substitution subshell, silently
   # truncate the caller's output) before the report below is ever printed --
   # the exit-status capture must stay inside an if-condition, exempt from -e.
-  escalation_window_end=$((start + budget + 5))
   if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
   kill "$watchdog" 2>/dev/null || true
-  wait "$watchdog" 2>/dev/null || true
+  if wait "$watchdog" 2>/dev/null; then watchdog_rc=0; else watchdog_rc=$?; fi
+  timeout_observed=0
+  if [ -f "$timeout_marker" ]; then timeout_observed=1; fi
+  rm -f "$timeout_marker"
   end=$(date +%s)
   elapsed=$((end - start))
 
@@ -228,13 +235,18 @@ bounded_run() {
   if group_has_member "$pid"; then
     residual=present
   fi
-  # A real "we killed it" claim requires both the signal-range exit status
-  # AND that our own escalation timeline had actually reached at least the
-  # TERM point by the time the child exited -- a process that happens to die
-  # from an unrelated signal in, say, its first second is not something this
-  # check terminated, even though its exit status lands in the same range.
-  if [ "$rc" -ge 128 ] && [ "$end" -ge "$((start + budget))" ]; then
-    echo "TIMED_OUT_KILLED $rc $residual"
+  # A signal-range status alone cannot prove our watchdog fired. Conversely,
+  # a command that exits zero in its TERM handler is still a timeout, even
+  # when integer wall-clock elapsed time equals (rather than exceeds) budget.
+  if [ "$timeout_observed" = 1 ]; then
+    if [ "$rc" -ge 128 ]; then
+      echo "TIMED_OUT_KILLED $rc $residual"
+    else
+      echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
+    fi
+  elif [ "$watchdog_rc" = 125 ]; then
+    # Failure to retain the deadline witness cannot produce an OK result.
+    echo "UNKNOWN $rc $residual"
   elif [ "$elapsed" -gt "$budget" ]; then
     echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
   else
