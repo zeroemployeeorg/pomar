@@ -197,24 +197,6 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if r.Method == "POST" {
-		m.mu.Lock()
-		now := m.now()
-		if refill := int(now.Sub(m.writeRefill) / (2 * time.Second)); refill > 0 {
-			m.writeTokens = min(8, m.writeTokens+refill)
-			m.writeRefill = m.writeRefill.Add(time.Duration(refill) * 2 * time.Second)
-		}
-		if m.writeTokens == 0 {
-			wait := 2*time.Second - now.Sub(m.writeRefill)
-			seconds := max(1, int((wait+time.Second-1)/time.Second))
-			m.mu.Unlock()
-			w.Header().Set("Retry-After", strconv.Itoa(seconds))
-			http.Error(w, "mail write rate exceeded", http.StatusTooManyRequests)
-			return
-		}
-		m.writeTokens--
-		m.mu.Unlock()
-	}
 	u := *m.upstream
 	u.Path += r.URL.Path
 	u.RawQuery = r.URL.RawQuery
@@ -245,6 +227,25 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Retry-After", "1")
 		http.Error(w, "mail upstream busy", http.StatusServiceUnavailable)
 		return
+	}
+	if r.Method == "POST" {
+		m.mu.Lock()
+		now := m.now()
+		if refill := int(now.Sub(m.writeRefill) / (2 * time.Second)); refill > 0 {
+			m.writeTokens = min(8, m.writeTokens+refill)
+			m.writeRefill = m.writeRefill.Add(time.Duration(refill) * 2 * time.Second)
+		}
+		if m.writeTokens == 0 {
+			wait := 2*time.Second - now.Sub(m.writeRefill)
+			seconds := max(1, int((wait+time.Second-1)/time.Second))
+			m.mu.Unlock()
+			releaseUpstream()
+			w.Header().Set("Retry-After", strconv.Itoa(seconds))
+			http.Error(w, "mail write rate exceeded", http.StatusTooManyRequests)
+			return
+		}
+		m.writeTokens--
+		m.mu.Unlock()
 	}
 	resp, err := m.client.Do(out)
 	if err != nil {

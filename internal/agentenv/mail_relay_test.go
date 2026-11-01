@@ -529,3 +529,99 @@ func TestMailRelayRetryHeaders(t *testing.T) {
 		})
 	}
 }
+
+func TestMailRelayCapacityRefusalsDoNotSpendWrites(t *testing.T) {
+	for _, shared := range []bool{false, true} {
+		t.Run(fmt.Sprint(shared), func(t *testing.T) {
+			entered := make(chan struct{}, 4)
+			release := make(chan struct{})
+			done := make(chan struct{}, 4)
+			transport := mailTransport(func(r *http.Request) (*http.Response, error) {
+				if r.Method == "GET" {
+					entered <- struct{}{}
+					select {
+					case <-release:
+					case <-r.Context().Done():
+					}
+				}
+				return mailResponse(200, `{}`), nil
+			})
+			makeRelay := func(guest string) *mailRelay {
+				m, err := newMailRelay("example-seat", guest, "incarnation-1", "http://mail.example:7743", transport)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return m
+			}
+			target := makeRelay("target-guest")
+			holders := []*mailRelay{target, target}
+			if shared {
+				a, b := makeRelay("holder-a"), makeRelay("holder-b")
+				holders = []*mailRelay{a, a, b, b}
+			}
+			defer func() {
+				close(release)
+				for range holders {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("holder did not drain")
+					}
+				}
+			}()
+			for _, m := range holders {
+				go func() {
+					defer func() { done <- struct{}{} }()
+					m.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/whoami", nil))
+				}()
+			}
+			for range holders {
+				select {
+				case <-entered:
+				case <-time.After(5 * time.Second):
+					t.Fatal("holder did not enter")
+				}
+			}
+			server := httptest.NewServer(target)
+			defer server.Close()
+			post := func() int {
+				req, _ := http.NewRequest("POST", server.URL+"/v1/reply/message-one", strings.NewReader(`{"body":"hello"}`))
+				req.Header.Set("Content-Type", "application/json")
+				resp, err := server.Client().Do(req)
+				if err != nil {
+					t.Fatal(err)
+				}
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				return resp.StatusCode
+			}
+			for i := 0; i < 9; i++ {
+				if code := post(); code != 503 {
+					t.Fatalf("capacity response%d: %d", i, code)
+				}
+			}
+			for range holders {
+				release <- struct{}{}
+			}
+			for range holders {
+				select {
+				case <-done:
+				case <-time.After(5 * time.Second):
+					t.Fatal("holder did not finish")
+				}
+			}
+			// Replenish done for the cleanup barrier without leaving blocked goroutines.
+			for range holders {
+				done <- struct{}{}
+			}
+			for i := 0; i < 8; i++ {
+				if code := post(); code != 200 {
+					t.Fatalf("refusal spent write%d: %d", i, code)
+				}
+			}
+			if code := post(); code != 429 {
+				t.Fatalf("burst after capacity: %d", code)
+			}
+		})
+	}
+}
