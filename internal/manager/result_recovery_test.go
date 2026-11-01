@@ -328,7 +328,7 @@ func TestCompletionProcessBoundary(t *testing.T) {
 		return
 	}
 	root := os.Getenv("POMAR_FINALIZER_FIXTURE_ROOT")
-	v, err := venue.Open(root)
+	v, err := openFixtureVenue(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -400,7 +400,7 @@ func TestCompletionStartupRecoversOriginalAcrossProcessBoundaries(t *testing.T) 
 			if err := os.Chmod(root, 0700); err != nil {
 				t.Fatal(err)
 			}
-			v, err := venue.Open(root)
+			v, err := openFixtureVenue(root)
 			if err != nil {
 				t.Fatal(err)
 			}

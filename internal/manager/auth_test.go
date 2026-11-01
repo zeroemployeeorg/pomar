@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // The kernel's account of the peer is the connecting process's uid.
@@ -83,7 +82,7 @@ func openNamedClassSockets(t *testing.T, ciName string) (*Manager, *Client, *Cli
 	base := shortDir(t)
 	root := filepath.Join(base, "root")
 	os.Mkdir(root, 0o700)
-	v, err := venue.Open(root)
+	v, err := openFixtureVenue(root)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,6 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/proc"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // seqProcs returns its listings in turn, then the last one forever. before
@@ -28,7 +27,7 @@ func (s *seqProcs) List() ([]proc.Process, error) {
 
 func openWatch(t *testing.T, procs *seqProcs) *Manager {
 	t.Helper()
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

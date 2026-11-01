@@ -17,7 +17,6 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // npmFixture is an upstream repository, a fake npm registry serving one
@@ -36,7 +35,7 @@ func npmFixture(t *testing.T, shim string) (*Manager, *mirror.Mirrors, []string,
 	env := gitEnv(t)
 	up := t.TempDir()
 	git(t, env, up, "init", "--quiet", "--initial-branch=main")
-	v, err := venue.Open(shortDir(t))
+	v, err := openFixtureVenue(shortDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +170,7 @@ func TestNPMRegistryServesTheLockOnItsSocket(t *testing.T) {
 // A class's lock path is checked when the manager opens: only on an npm
 // class, and only a clean relative path naming a package-lock.json.
 func TestNPMLockPathIsCheckedAtOpen(t *testing.T) {
-	v, err := venue.Open(shortDir(t))
+	v, err := openFixtureVenue(shortDir(t))
 	if err != nil {
 		t.Fatal(err)
 	}

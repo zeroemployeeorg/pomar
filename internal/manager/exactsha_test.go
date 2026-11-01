@@ -8,13 +8,12 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // A start that names an exact commit must name a full SHA; anything else is
 // refused before anything is synced, resolved or created.
 func TestStartRefusesAMalformedExactSHA(t *testing.T) {
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

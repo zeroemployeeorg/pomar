@@ -16,7 +16,7 @@ import (
 // The manager verifies each class's base once, when it opens (before it
 // serves), survives a failure, and records both in its events.
 func TestOpenVerifiesEachBaseOnce(t *testing.T) {
-	v, _ := venue.Open(t.TempDir())
+	v, _ := openFixtureVenue(t.TempDir())
 	v.Init()
 	self, _ := os.Executable()
 	calls := map[string]int{}
@@ -42,7 +42,7 @@ func TestOpenVerifiesEachBaseOnce(t *testing.T) {
 // A class whose base is not verified since this boot is refused at
 // admission with base-unverified, and nothing is created.
 func TestStartRefusesAnUnverifiedBase(t *testing.T) {
-	v, _ := venue.Open(t.TempDir())
+	v, _ := openFixtureVenue(t.TempDir())
 	v.Init()
 	self, _ := os.Executable()
 	hashed := false

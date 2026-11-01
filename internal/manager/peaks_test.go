@@ -29,7 +29,7 @@ func vmProc(pid int, start string, cpu time.Duration) proc.Process {
 
 func openPeaks(t *testing.T, fp Footprinter, avail func() int64) *Manager {
 	t.Helper()
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

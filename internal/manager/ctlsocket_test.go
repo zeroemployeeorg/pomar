@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // shortDir is a temporary directory with a short path: a Unix socket's path is
@@ -43,7 +42,7 @@ func serveWithCtl(t *testing.T, ctlMode os.FileMode) (owner, ctl *Client, ctlSoc
 	if err := os.Mkdir(filepath.Join(base, "root"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	v, err := venue.Open(filepath.Join(base, "root"))
+	v, err := openFixtureVenue(filepath.Join(base, "root"))
 	if err != nil {
 		t.Fatal(err)
 	}

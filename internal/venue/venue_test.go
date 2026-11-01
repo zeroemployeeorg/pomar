@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -368,5 +369,52 @@ func TestSpaceReadsTheFilesystem(t *testing.T) {
 	}
 	if sp.Avail <= 0 || sp.Used <= 0 || !strings.HasPrefix(sp.Device, "/dev/") {
 		t.Fatalf("Space() = %+v", sp)
+	}
+}
+
+// Heavy-work refusal uses injected readings, not the machine running tests.
+// The real default reader is separately exercised by TestSpaceReadsTheFilesystem.
+func TestInjectedFilesystemFillBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		used     uint64
+		wantFull bool
+	}{
+		{"at limit", 85, false},
+		{"above limit", 86, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v, err := OpenWithOptions(t.TempDir(), Options{Statfs: func(_ string, s *syscall.Statfs_t) error {
+				*s = syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 100 - tc.used, Bavail: 100 - tc.used}
+				return nil
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got, err := v.Fill(); err != nil || got != int(tc.used) {
+				t.Fatalf("Fill = %d, %v; want %d", got, err, tc.used)
+			}
+			if err := v.CheckHeavy(DefaultMaxFillPercent); errors.Is(err, ErrDiskFull) != tc.wantFull || (err != nil && !tc.wantFull) {
+				t.Fatalf("CheckHeavy = %v; full=%v", err, tc.wantFull)
+			}
+			sp, err := v.Space()
+			if err != nil || sp.Used != int64(tc.used)*4096 || sp.Avail != int64(100-tc.used)*4096 {
+				t.Fatalf("Space = %+v, %v", sp, err)
+			}
+		})
+	}
+}
+
+func TestInjectedFilesystemReadFailureRefusesHeavyWork(t *testing.T) {
+	broken := errors.New("fixture statfs unavailable")
+	v, err := OpenWithOptions(t.TempDir(), Options{Statfs: func(string, *syscall.Statfs_t) error { return broken }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.CheckHeavy(DefaultMaxFillPercent); !errors.Is(err, broken) {
+		t.Fatalf("CheckHeavy = %v", err)
+	}
+	if _, err := v.Space(); !errors.Is(err, broken) {
+		t.Fatalf("Space = %v", err)
 	}
 }

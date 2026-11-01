@@ -16,7 +16,7 @@ import (
 
 func openFull(t *testing.T, procs proc.Lister, avail int64, stall time.Duration) *Manager {
 	t.Helper()
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

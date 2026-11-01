@@ -19,7 +19,7 @@ func (noProcs) List() ([]proc.Process, error) { return nil, nil }
 // The test binary is ad-hoc signed without the Virtualization entitlement,
 // so using it as the helper must be refused before anything is created.
 func TestStartRefusesUnentitledHelper(t *testing.T) {
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +51,7 @@ func TestStartRefusesUnentitledHelper(t *testing.T) {
 
 func openAdmission(t *testing.T, h capacity.Host, sp venue.Space, classes ...JobClass) (*Manager, *venue.Venue) {
 	t.Helper()
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

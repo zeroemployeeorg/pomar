@@ -36,7 +36,7 @@ func put(t *testing.T, v *venue.Venue, k venue.Kind, c venue.Class, id, rel stri
 }
 
 func TestCachesEvictOldestFirstThroughTheLedger(t *testing.T) {
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
