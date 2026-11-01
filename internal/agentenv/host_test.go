@@ -46,8 +46,11 @@ func TestHostMailChannelBindsSeatAndRevokesWithNetwork(t *testing.T) {
 	if err != nil || fi.Mode().Perm() != 0600 || fi.Mode()&os.ModeSocket == 0 {
 		t.Fatal("mail socket custody", fi, err)
 	}
+	// A transport may finish dialing asynchronously while replacement updates Spec.
+	// Bind this client to the original channel rather than mutable owner state.
+	mailSocket := e.Spec.MailSocket
 	transport := &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return (&net.Dialer{}).DialContext(ctx, "unix", e.Spec.MailSocket)
+		return (&net.Dialer{}).DialContext(ctx, "unix", mailSocket)
 	}}
 	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: time.Second}
