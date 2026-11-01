@@ -82,10 +82,18 @@ func TestARefusedWhenReadySendGivesBackTheReadinessItClaimed(t *testing.T) {
 	// not have consumed the one real "waiting-input" report there is.
 	var out OpResult
 	start := time.Now()
-	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "giveback-2", Text: "hi\r", WhenReady: true, ReadyWaitMS: 200}, &out); err != nil {
+	// ReadyWaitMS and the elapsed assertion below are deliberately far
+	// apart (2s vs 1s), not just scaled up from the original 200ms/150ms:
+	// a margin that narrow is exactly what let host scheduling contention
+	// blur "used the readiness immediately" and "waited out the whole
+	// bound" into false failures. The real property under test -- using
+	// an already-claimed-then-given-back readiness without waiting for a
+	// fresh one -- only needs "clearly well under the full bound", not a
+	// specific millisecond figure.
+	if err := c.Do("POST", "/v1/sessions/agent/send", SendRequest{Operation: "giveback-2", Text: "hi\r", WhenReady: true, ReadyWaitMS: 2000}, &out); err != nil {
 		t.Fatalf("a when-ready send on the same still-current readiness should succeed, not refuse: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 150*time.Millisecond {
+	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Fatalf("this send waited %s instead of using the already-claimed-then-given-back readiness immediately", elapsed)
 	}
 	waitScreen(t, c, "agent", "got:hi")

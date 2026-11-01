@@ -499,9 +499,18 @@ func TestAPendingOperationBecomesHeldOnExitAndSurvivesUnderTheSameName(t *testin
 	}
 	waitRunning("exit-held", false)
 
+	// Running (from the process's own exit status) and HeldOperations
+	// (from the adapter's op journal) are two separately-queried facts,
+	// not one atomic update -- waitRunning above only proves the former.
+	// "At once" means promptly once the exit is observed, not literally
+	// the same instant as the very first read after it; poll briefly
+	// rather than a single unretried GET with no margin at all.
 	var v SessionView
-	if err := c.Do("GET", "/v1/sessions/exit-held", nil, &v); err != nil {
-		t.Fatal(err)
+	for end := time.Now().Add(2 * time.Second); len(v.HeldOperations) != 1 && time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		v = SessionView{}
+		if err := c.Do("GET", "/v1/sessions/exit-held", nil, &v); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if len(v.HeldOperations) != 1 || v.HeldOperations[0].ID != "held-exit-1" {
 		t.Fatalf("a pending operation whose program exited should show as held at once, no restart needed: %+v", v.HeldOperations)
