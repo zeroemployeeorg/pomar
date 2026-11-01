@@ -115,6 +115,13 @@ func hostActionCall(h *Host, env, action, operationID, incarnation string) *http
 // gate() derives its own socket paths (egress, go.sock) from e.Spec.Directory
 // directly -- so the whole environment directory needs a short root, not
 // just the explicit socket fields.
+// pomar's review, 2026-11-01: os.MkdirTemp("", ...) returns an unresolved
+// path under /var/folders/... on macOS, and /var -> private/var is itself a
+// symlink -- PrivateDir's own EvalSymlinks(path) == path check (by design,
+// not a defect) refuses that alias, breaking any receipt or custody check
+// that passes this directory through. Resolving it here, once, is the same
+// fix already applied to internal/distribution and internal/calljournal's
+// fixtures for the identical host-environment quirk.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "pcc")
@@ -122,7 +129,11 @@ func shortTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(dir) })
-	return dir
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resolved
 }
 
 // TestPublicHostStartLaunchesARealLocatableProcess is step 1: confirm the
