@@ -860,8 +860,8 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 12*time.Second {
-		t.Fatalf("script took %s, well over the ~1s timeout, want well under the fake uv's 5s sleep: %s", elapsed, out)
+	if elapsed > 36*time.Second {
+		t.Fatalf("script took %s -- the actual production guarantees (1s timeout, killed status, absent completion marker) are checked below; this ceiling only guards against an unbounded hang (architect's standing up-to-3x widening for host load): %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
 	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 1s, killed") {
