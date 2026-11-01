@@ -22,7 +22,9 @@ func TestHostDiskSettingFeedsHeavyWorkAndAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{
-		ReadDiskLimit: func() hostpolicy.DiskLimit { return hostpolicy.ReadDiskLimit(path) },
+		ReadDiskLimit: func() hostpolicy.DiskLimit {
+			return hostpolicy.ReadDiskLimitWithOptions(path, hostpolicy.ReadOptions{OwnerUID: func(os.FileInfo) (uint32, bool) { return 0, true }})
+		},
 		Statfs: func(_ string, s *syscall.Statfs_t) error {
 			*s = syscall.Statfs_t{Bsize: 4096, Blocks: 1000 << 18, Bfree: 100 << 18, Bavail: 100 << 18}
 			return nil

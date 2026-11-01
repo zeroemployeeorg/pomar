@@ -129,7 +129,10 @@ reuses a previously readable higher value. Each decision reads the setting.
 Refusals and venue status name the chosen percentage and its source.
 
 The setting is host-wide, independent of data root and user environment.
-The host owner installs it root-owned and not writable by other accounts;
+The reader requires UID 0 and no group or world write bits on both the
+opened regular file and its parent directory. Unknown ownership or an unsafe
+parent/file falls back to 85 and names that reason. The host owner installs
+it root-owned and not writable by other accounts;
 it is not a job input or a guest setting. The reviewed high-fill example source
 profile is `config/host-policy/high-fill/max-fill-percent` (99). This file in the
 source repository is not an installed host policy. Installing it or changing
