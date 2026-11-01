@@ -84,21 +84,35 @@ func TestASessionOutlivesItsClients(t *testing.T) {
 	if !s.Info().Running {
 		t.Fatal("detaching stopped the program")
 	}
+	// pomar's review: attaching c2 immediately and polling ITS snapshot
+	// would let "second" arrive over c2's own live event stream while it
+	// is already attached, which no longer tests the actual premise here
+	// -- that the session retains output while NO client is attached at
+	// all. Poll the session's own retained state directly instead (same
+	// package: snapshotLocked, under its own s.mu), with nothing attached,
+	// and only attach c2 once that is already true. The shell's own 0.5s
+	// sleep is measured from ITS process start, not from any fixed point
+	// this test controls, so a fixed wait here only has to be "long
+	// enough" under whatever scheduling delay happens to apply to the
+	// CHILD specifically -- poll for the real condition instead of
+	// guessing a bigger margin that still has to hold under arbitrary
+	// contention.
+	for end := time.Now().Add(5 * time.Second); time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
+		s.mu.Lock()
+		retained := s.snapshotLocked().Data
+		s.mu.Unlock()
+		if strings.Contains(string(retained), "firstsecond") {
+			break
+		}
+	}
+	if !s.Info().Running {
+		t.Fatal("waiting with no client attached stopped the program")
+	}
 	c2, snap2, err := s.Attach("operator")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c2.Detach()
-	// The shell's own 0.5s sleep is measured from ITS process start, not
-	// from any fixed point this test controls; a fixed wait here (the
-	// previous 900ms) only has to be "long enough" under whatever host
-	// scheduling delay happens to apply to the CHILD's sleep specifically,
-	// which is not necessarily correlated with delay anywhere in the test
-	// itself. Poll for the real condition instead of guessing a margin
-	// that has to hold under arbitrary contention.
-	for end := time.Now().Add(5 * time.Second); !strings.Contains(string(snap2.Data), "firstsecond") && time.Now().Before(end); time.Sleep(20 * time.Millisecond) {
-		snap2 = c2.Resnapshot()
-	}
 	if !strings.Contains(string(snap2.Data), "firstsecond") || !snap2.Complete || snap2.From != 0 {
 		t.Fatalf("snapshot %+v %q", snap2, snap2.Data)
 	}
