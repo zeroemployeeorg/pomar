@@ -36,6 +36,7 @@ type mailRelay struct {
 	mu                       sync.Mutex
 	revoked                  bool
 	inflight                 map[*http.Request]context.CancelFunc
+	upstreamSlots            chan struct{}
 	writeTokens              int
 	writeRefill              time.Time
 	now                      func() time.Time
@@ -60,7 +61,7 @@ func newMailRelay(seat, guest, incarnation, upstream string, transport http.Roun
 	if transport == nil {
 		transport = &http.Transport{DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext, MaxIdleConnsPerHost: 4, ResponseHeaderTimeout: 5 * time.Second}
 	}
-	return &mailRelay{seat: seat, guest: guest, incarnation: incarnation, upstream: u, inflight: map[*http.Request]context.CancelFunc{}, writeTokens: 8, writeRefill: time.Now(), now: time.Now, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
+	return &mailRelay{seat: seat, guest: guest, incarnation: incarnation, upstream: u, inflight: map[*http.Request]context.CancelFunc{}, upstreamSlots: make(chan struct{}, 2), writeTokens: 8, writeRefill: time.Now(), now: time.Now, client: &http.Client{Transport: transport, Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}}, nil
 }
 
 func (m *mailRelay) Revoke() {
@@ -196,15 +197,6 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Local admission never waits for shared capacity and never retries upstream.
-	select {
-	case mailUpstreamSlots <- struct{}{}:
-		defer func() { <-mailUpstreamSlots }()
-	default:
-		w.Header().Set("Retry-After", "1")
-		http.Error(w, "mail upstream busy", http.StatusServiceUnavailable)
-		return
-	}
 	if r.Method == "POST" {
 		m.mu.Lock()
 		now := m.now()
@@ -235,13 +227,35 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		out.Header.Set("Content-Type", "application/json")
 	}
+	// Local admission never waits for shared capacity and never retries upstream.
+	select {
+	case m.upstreamSlots <- struct{}{}:
+		defer func() { <-m.upstreamSlots }()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "guest mail share busy", http.StatusServiceUnavailable)
+		return
+	}
+	var releaseOnce sync.Once
+	releaseUpstream := func() { releaseOnce.Do(func() { <-mailUpstreamSlots }) }
+	select {
+	case mailUpstreamSlots <- struct{}{}:
+		defer releaseUpstream()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "mail upstream busy", http.StatusServiceUnavailable)
+		return
+	}
 	resp, err := m.client.Do(out)
 	if err != nil {
+		releaseUpstream()
 		http.Error(w, "mail upstream unavailable", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, mailResponseLimit+1))
+	resp.Body.Close()
+	releaseUpstream()
 	m.mu.Lock()
 	revoked := m.revoked
 	m.mu.Unlock()
@@ -249,8 +263,16 @@ func (m *mailRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "mail upstream refused", http.StatusBadGateway)
 		return
 	}
-	if resp.StatusCode == http.StatusServiceUnavailable && resp.Header.Get("Retry-After") != "" {
-		w.Header().Set("Retry-After", resp.Header.Get("Retry-After"))
+	// Upstream work is complete. A guest that stops reading must not hold
+	// the process budget while the local response writer blocks.
+	if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+		retry := resp.Header.Get("Retry-After")
+		if retry == "" && resp.StatusCode == http.StatusServiceUnavailable {
+			retry = "5"
+		}
+		if retry != "" {
+			w.Header().Set("Retry-After", retry)
+		}
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)

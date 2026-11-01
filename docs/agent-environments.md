@@ -540,7 +540,8 @@ The fixed mail relay permits a burst of eight validated POST send/reply calls pe
 owner-created guest incarnation, replenishing one write every two seconds. An
 empty bucket returns 429 with Retry-After without calling Messenger; reads do not
 consume write tokens. Every relay in the owner process shares four concurrent
-upstream calls, including response-body receiving. At capacity it refuses with
-503 and Retry-After. Messenger's own 503 and Retry-After pass through without an
-internal retry. Only the owner can replace an incarnation; guests cannot reset
+upstream calls, including response-body receiving, with at most two upstream calls per guest.
+The shared slot is released before writing the buffered response to the guest. At capacity it refuses with
+503 and Retry-After. Messenger's 429/503 Retry-After passes through without an
+internal retry; a 503 without that header receives Retry-After: 5. Only the owner can replace an incarnation; guests cannot reset
 these limits. These limits do not replace native identity and revocation proofs.

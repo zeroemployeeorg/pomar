@@ -392,3 +392,140 @@ func TestMailRelayPassesUpstreamBusyWithoutRetry(t *testing.T) {
 		t.Fatalf("busy changed/retried: %d %v %q calls%d", w.Code, w.Header(), w.Body.String(), calls.Load())
 	}
 }
+
+type blockedMailWriter struct {
+	header  http.Header
+	entered chan struct{}
+	release <-chan struct{}
+}
+
+func (w *blockedMailWriter) Header() http.Header { return w.header }
+func (w *blockedMailWriter) WriteHeader(int)     {}
+func (w *blockedMailWriter) Write(b []byte) (int, error) {
+	w.entered <- struct{}{}
+	<-w.release
+	return len(b), nil
+}
+
+func TestMailRelaySlowGuestDoesNotHoldSharedUpstream(t *testing.T) {
+	release := make(chan struct{})
+	done := make(chan struct{}, 4)
+	entered := make(chan struct{}, 4)
+	defer func() {
+		close(release)
+		for i := 0; i < 4; i++ {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("slow writer did not drain")
+			}
+		}
+	}()
+	for i := 0; i < 4; i++ {
+		m, err := newMailRelay("example-seat", fmt.Sprintf("slow-%d", i), "incarnation-1", "http://mail.example:7743", mailTransport(func(*http.Request) (*http.Response, error) { return mailResponse(200, `{}`), nil }))
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func() {
+			defer func() { done <- struct{}{} }()
+			m.ServeHTTP(&blockedMailWriter{header: http.Header{}, entered: entered, release: release}, httptest.NewRequest("GET", "/v1/whoami", nil))
+		}()
+	}
+	for i := 0; i < 4; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("writer did not reach response")
+		}
+	}
+	m, err := newMailRelay("example-seat", "healthy-guest", "incarnation-1", "http://mail.example:7743", mailTransport(func(*http.Request) (*http.Response, error) { return mailResponse(200, `{}`), nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+	if w.Code != 200 {
+		t.Fatalf("slow guests exhausted upstream: %d", w.Code)
+	}
+}
+
+func TestMailRelayOneGuestCannotHoldAllUpstreamSlots(t *testing.T) {
+	release := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	done := make(chan struct{}, 2)
+	m, err := newMailRelay("example-seat", "one-reader", "incarnation-1", "http://mail.example:7743", mailTransport(func(r *http.Request) (*http.Response, error) {
+		entered <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		return mailResponse(200, `{}`), nil
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		close(release)
+		for i := 0; i < 2; i++ {
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Error("reader did not drain")
+			}
+		}
+	}()
+	for i := 0; i < 2; i++ {
+		go func() {
+			defer func() { done <- struct{}{} }()
+			m.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/v1/whoami", nil))
+		}()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("read did not enter")
+		}
+	}
+	w := httptest.NewRecorder()
+	m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+	if w.Code != 503 {
+		t.Fatalf("guest exceeded share: %d", w.Code)
+	}
+	other, err := newMailRelay("example-seat", "other-reader", "incarnation-1", "http://mail.example:7743", mailTransport(func(*http.Request) (*http.Response, error) { return mailResponse(200, `{}`), nil }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	other.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+	if w.Code != 200 {
+		t.Fatal("one guest denied another's share")
+	}
+}
+
+func TestMailRelayRetryHeaders(t *testing.T) {
+	for _, tc := range []struct {
+		code           int
+		supplied, want string
+	}{{503, "", "5"}, {503, "7", "7"}, {429, "11", "11"}} {
+		t.Run(fmt.Sprintf("%d-%s", tc.code, tc.supplied), func(t *testing.T) {
+			var calls atomic.Int32
+			m, err := newMailRelay("example-seat", "retry-guest", "incarnation-1", "http://mail.example:7743", mailTransport(func(*http.Request) (*http.Response, error) {
+				calls.Add(1)
+				resp := mailResponse(tc.code, `{}`)
+				if tc.supplied != "" {
+					resp.Header.Set("Retry-After", tc.supplied)
+				}
+				return resp, nil
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			w := httptest.NewRecorder()
+			m.ServeHTTP(w, httptest.NewRequest("GET", "/v1/whoami", nil))
+			if w.Code != tc.code || w.Header().Get("Retry-After") != tc.want || calls.Load() != 1 {
+				t.Fatalf("retry contract %d %v calls%d", w.Code, w.Header(), calls.Load())
+			}
+		})
+	}
+}
