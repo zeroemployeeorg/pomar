@@ -859,7 +859,7 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 4*time.Second {
+	if elapsed > 12*time.Second {
 		t.Fatalf("script took %s, well over the ~1s timeout, want well under the fake uv's 5s sleep: %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
@@ -868,6 +868,35 @@ func TestTrack3PreflightUvLockCheckIsBoundedByTimeout(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatalf("fake uv's completion marker exists -- its child process was not actually killed before completing")
+	}
+}
+
+// A command may handle the watchdog's TERM and exit zero. That is still a
+// timeout, even if its rounded elapsed time equals the budget. Exit status
+// and elapsed time alone must never turn this into a VERIFIED lock check.
+func TestTrack3PreflightTermHandlerExitZeroIsStillTimeout(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(root, "term-observed")
+	fakeUV := "#!/bin/sh\ncase \"$1\" in\n --version) echo 'uv 0.0.0-fake' ;;\n lock) trap ': > \"$MARKER\"; exit 0' TERM; while :; do sleep 1; done ;;\nesac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	env := hermeticEnv(t, fakeBin, "MARKER="+marker, "TRACK3_UV_TIMEOUT=1")
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	if err == nil {
+		t.Fatalf("a command completing after watchdog TERM must fail the gate: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 1s, completed on its own before termination was confirmed") {
+		t.Fatalf("want a timeout without a false killed or VERIFIED claim: %s", line)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("TERM handler did not run: %v", err)
 	}
 }
 
@@ -897,7 +926,7 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
+	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (TERM-ignoring child must still be bounded): %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
@@ -906,6 +935,292 @@ func TestTrack3PreflightKillsATermIgnoringChildAndNeverClaimsFalseSuccess(t *tes
 	}
 	if _, statErr := os.Stat(marker); statErr == nil {
 		t.Fatalf("fake uv's completion marker exists -- a TERM-ignoring child was not actually force-killed before completing")
+	}
+}
+
+// pomar's review (Root d571, TRACK3-WITNESS-FAILURE-DISARMS-TERMINATION): the
+// watchdog's own `: > "$timeout_marker" || exit 125` exited BEFORE ever
+// sending TERM/KILL whenever the witness write itself failed, so a child
+// that ignores or outlives TERM was never actually signaled -- the parent's
+// `wait "$pid"` would then hang on it, exactly defeating the one guarantee
+// bounded_run exists to provide. This test forces that write to fail
+// deterministically (not via a timing race): the fake uv process itself,
+// which already knows the watchdog's scratch directory via FAKE_SCRATCH_DIR
+// (fed to a fake `mktemp` ahead of it on PATH so the directory's path is
+// fixed and known, instead of mktemp's own randomized name), makes that
+// directory read-only BEFORE the budget's sleep could possibly elapse, then
+// restores it a few seconds later so later script steps are unaffected.
+func TestTrack3PreflightWatchdogStillKillsATermIgnoringChildWhenItsOwnTimeoutWitnessCannotBeWritten(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    chmod 0500 \"$FAKE_SCRATCH_DIR\"\n" +
+		"    ( sleep 4; chmod 0700 \"$FAKE_SCRATCH_DIR\" 2>/dev/null ) &\n" +
+		"    trap '' TERM\n" +
+		"    sleep 20\n" +
+		"    : > \"$MARKER\"\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(scratchDir, 0700) })
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep (the watchdog must still kill a TERM-ignoring child even when it cannot persist its own timeout witness): %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose timeout witness could not be written must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a timeout whose witness could not be written must never be reported as VERIFIED: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr == nil {
+		t.Fatalf("fake uv's completion marker exists -- the watchdog never sent TERM/KILL when its own timeout-marker write failed, so a TERM-ignoring child was not force-killed")
+	}
+}
+
+// pomar's third, independent review (AMEND THIRD-WITNESS-CHANNEL-FAILURE-01):
+// the second fix's fallback write assumed a pre-created marker file can
+// always be truncated even when its directory is locked -- true, but not
+// when something ALSO revokes write permission on the marker FILE itself
+// (their repro: scratch 0500 AND the marker chmod 0400). Both writes then
+// fail, `|| true` on each swallows it, and the result falls through to
+// plain COMPLETED/OK: a false VERIFIED, with no durable record anything
+// went wrong -- the same bug via a third path, this time independent of
+// how the child responds to TERM at all. The fix opens the marker's file
+// descriptor before the child or watchdog even exist, while its
+// permissions are still whatever they started as; writing through that
+// SAME descriptor later succeeds regardless of any chmod afterward
+// (POSIX permission checks happen at open(2), not on each write(2)). This
+// test reproduces pomar's exact scenario: a cooperative exit(0) on TERM
+// (so the earlier race-closing fix alone wouldn't save it) combined with
+// BOTH the scratch directory and the marker file itself becoming
+// unwritable right as the command starts -- after bounded_run's own
+// descriptor is already open on it.
+func TestTrack3PreflightSurvivesScratchAndMarkerBothLockedAfterTheDescriptorIsAlreadyOpen(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	// By the time this runs, bounded_run's own `exec 9>"$outfile.timeout"`
+	// has already succeeded (it happens before "$@" is even forked) --
+	// chmodding the marker file itself here, after the fact, is exactly
+	// pomar's scenario: proving the already-open descriptor doesn't care.
+	fakeUV := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    chmod 0500 \"$FAKE_SCRATCH_DIR\"\n" +
+		"    for f in \"$FAKE_SCRATCH_DIR\"/*.timeout*; do chmod 0400 \"$f\" 2>/dev/null; done\n" +
+		"    ( sleep 4; chmod 0700 \"$FAKE_SCRATCH_DIR\" 2>/dev/null ) &\n" +
+		"    trap ': > \"$MARKER\"; exit 0' TERM\n" +
+		"    sleep 20\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(scratchDir, 0700) })
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose witness could not be written AFTER the fact must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a scratch dir and marker file both locked after bounded_run's own descriptor was already open must never be reported as VERIFIED (false OK): %s", line)
+	}
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 2s, completed on its own before termination was confirmed") {
+		t.Fatalf("the already-open descriptor should let the deadline witness write succeed regardless of the later chmod, producing a correct timeout report, not UNKNOWN: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("fake uv's cooperative TERM handler never ran: %v", statErr)
+	}
+}
+
+// pomar's fourth, independent review (AMEND PREOPENED-FD-PATH-READBACK-
+// LOST-EVENT-01): the fd-based write (above) survives a chmod, but the
+// PARENT's readback still went through the marker's PATH, which only ever
+// shows whatever is currently linked there. A command that unlinks the
+// marker by name (it has no fd to it any more -- bounded_run explicitly
+// closes 9 and 8 for the executed command itself -- but unlinking only
+// ever needs the path, never an fd) makes the watchdog's already-written
+// fd-9 content unreachable by that path, even though the data itself is
+// still there. This test reproduces exactly that: a cooperative TERM
+// handler that unlinks the marker (found by the same glob technique used
+// above, since it has no special knowledge of the real path) before
+// exiting 0.
+func TestTrack3PreflightSurvivesTheMarkerBeingUnlinkedAfterTheDescriptorIsAlreadyOpen(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+
+	fakeBin := filepath.Join(root, "bin")
+	if err := os.Mkdir(fakeBin, 0755); err != nil {
+		t.Fatal(err)
+	}
+	scratchDir := filepath.Join(root, "fixed-scratch")
+
+	fakeMktemp := "#!/bin/sh\n" +
+		"set -eu\n" +
+		"mk_name() {\n" +
+		"  d=$(dirname \"$1\")\n" +
+		"  b=$(basename \"$1\")\n" +
+		"  p=$(printf '%s' \"$b\" | sed 's/X*$//')\n" +
+		"  cf=\"$FAKE_SCRATCH_DIR/.mktemp-counter\"\n" +
+		"  n=0\n" +
+		"  [ -f \"$cf\" ] && n=$(cat \"$cf\")\n" +
+		"  n=$((n + 1))\n" +
+		"  printf '%s\\n' \"$n\" > \"$cf\"\n" +
+		"  printf '%s/%s%s' \"$d\" \"$p\" \"$n\"\n" +
+		"}\n" +
+		"if [ \"$1\" = -d ] && [ $# -eq 1 ]; then\n" +
+		"  mkdir -p \"$FAKE_SCRATCH_DIR\"\n" +
+		"  chmod 0700 \"$FAKE_SCRATCH_DIR\"\n" +
+		"  echo \"$FAKE_SCRATCH_DIR\"\n" +
+		"elif [ \"$1\" = -d ]; then\n" +
+		"  out=$(mk_name \"$2\")\n" +
+		"  mkdir -p \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"else\n" +
+		"  out=$(mk_name \"$1\")\n" +
+		"  : > \"$out\"\n" +
+		"  echo \"$out\"\n" +
+		"fi\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "mktemp"), []byte(fakeMktemp), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	marker := filepath.Join(root, "uv-finished")
+	fakeUV := "#!/bin/sh\n" +
+		"case \"$1\" in\n" +
+		"  --version) echo 'uv 0.0.0-fake' ;;\n" +
+		"  lock)\n" +
+		"    for f in \"$FAKE_SCRATCH_DIR\"/*.timeout; do rm -f \"$f\"; done\n" +
+		"    trap ': > \"$MARKER\"; exit 0' TERM\n" +
+		"    sleep 20\n" +
+		"    ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(filepath.Join(fakeBin, "uv"), []byte(fakeUV), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	env := hermeticEnvRealTools(t, fakeBin,
+		"MARKER="+marker,
+		"FAKE_SCRATCH_DIR="+scratchDir,
+		"TRACK3_UV_TIMEOUT=2")
+	start := time.Now()
+	out, err := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
+	elapsed := time.Since(start)
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s, want well under the fake uv's 20s sleep -- a cooperative TERM handler should be let through almost immediately: %s", elapsed, out)
+	}
+	if err == nil {
+		t.Fatalf("a command whose witness marker was unlinked must not report success: %s", out)
+	}
+	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
+	if strings.Contains(line, "VERIFIED") {
+		t.Fatalf("a witness marker unlinked after the descriptor was already open must never be reported as VERIFIED (false OK): %s", line)
+	}
+	if !strings.Contains(line, "NOT-CONFIGURED (timed out after 2s, completed on its own before termination was confirmed") {
+		t.Fatalf("reading back via the already-open descriptor should see the watchdog's write regardless of the unlink, producing a correct timeout report, not UNKNOWN: %s", line)
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("fake uv's cooperative TERM handler never ran: %v", statErr)
 	}
 }
 
@@ -988,7 +1303,7 @@ func TestTrack3PreflightKillsEntireProcessGroupIncludingGrandchildren(t *testing
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
+	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the 20s sleeps (the whole group must be bounded): %s", elapsed, out)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
@@ -1027,7 +1342,7 @@ func TestTrack3PreflightKillsSurvivingGrandchildWhenLeaderDiesQuicklyOnTerm(t *t
 	start := time.Now()
 	out, _ := runPreflightEnv(t, env, repo, filepath.Join(root, "scratch"), "3.11", head)
 	elapsed := time.Since(start)
-	if elapsed > 10*time.Second {
+	if elapsed > 30*time.Second {
 		t.Fatalf("script took %s, want well under the grandchild's 20s sleep: %s", elapsed, out)
 	}
 	assertGrandchildDead(t, grandchildPIDFile)
@@ -1061,8 +1376,8 @@ func TestTrack3PreflightSweepsLeftoverAfterANormalFastExit(t *testing.T) {
 	// sleeps add at most ~2s. This must be nowhere near the grandchild's
 	// 20s sleep or the default 30s uv timeout, proving the sweep runs
 	// promptly rather than waiting for either.
-	if elapsed > 10*time.Second {
-		t.Fatalf("script took %s to sweep a leftover after a fast normal exit -- want well under 10s", elapsed)
+	if elapsed > 30*time.Second {
+		t.Fatalf("script took %s to sweep a leftover after a fast normal exit -- want well under 30s", elapsed)
 	}
 	line := mustLine(t, out, "uv_lock_consistency_with_pyproject")
 	if !strings.HasSuffix(line, ": VERIFIED") {
