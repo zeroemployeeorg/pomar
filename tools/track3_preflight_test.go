@@ -1617,6 +1617,75 @@ func TestTrack3PreflightReceiptMatchesReportSha256(t *testing.T) {
 	}
 }
 
+// pomar's review: a deterministic, hermetic regression for the stream-split
+// fix above, not a one-off manual probe. BASH_ENV is sourced by bash at the
+// start of every non-interactive invocation (including this script's own
+// top-level process) -- setting it in the EXPLICIT hermetic env (never
+// inherited) to a tiny file that writes one diagnostic line to stderr
+// reliably injects real, independent stderr noise into a run, without
+// touching the script's own source. This proves the general bug class
+// (stream-split correctness), not the exact native CI cause (a specific
+// ancestor-resolution failure this fixture doesn't reproduce) -- the two
+// are deliberately kept distinct here.
+func TestTrack3PreflightReceiptSurvivesInjectedStderrNoise(t *testing.T) {
+	repo, head := zeocoreFixture(t, "3.1.3")
+	root := t.TempDir()
+	bashEnvFile := filepath.Join(root, "bash_env_stderr_probe.sh")
+	if err := os.WriteFile(bashEnvFile, []byte("#!/bin/sh\necho 'injected diagnostic noise' >&2\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script, err := filepath.Abs("track3-preflight.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("bash", script, repo, t.TempDir(), "3.11", head)
+	cmd.Env = hermeticEnv(t, "", "BASH_ENV="+bashEnvFile)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+
+	if !strings.Contains(stderr.String(), "injected diagnostic noise") {
+		t.Fatalf("the injection itself didn't take effect -- test is not exercising what it claims to: stderr=%q", stderr.String())
+	}
+
+	out := stdout.String()
+	idx := strings.Index(out, "receipt_sha256: ")
+	if idx < 0 {
+		t.Fatalf("missing receipt_sha256 line in stdout: %s", out)
+	}
+	wantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(out[:idx]))
+	gotHash := strings.TrimSpace(out[idx:])
+	if gotHash != wantHash {
+		t.Fatalf("stdout-only receipt should survive injected stderr noise:\nwant %s\ngot  %s", wantHash, gotHash)
+	}
+
+	// Demonstrate exactly why the OLD CombinedOutput-based comparison this
+	// file used to make was wrong -- a SEPARATE run (stdout and stderr are
+	// genuinely interleaved by the kernel/pipe, in actual write order; a
+	// naive post-hoc concatenation of two independently-captured buffers
+	// does not reproduce that, so this needs a real CombinedOutput call,
+	// not a reconstruction from the run above). BASH_ENV's diagnostic is
+	// written before any of the script's own stdout exists, so it lands at
+	// the very start of the true merged stream, shifting everything after
+	// it -- reconstructing "what was hashed" from that merged stream must
+	// disagree with the real, stdout-only receipt.
+	cmd2 := exec.Command("bash", script, repo, t.TempDir(), "3.11", head)
+	cmd2.Env = hermeticEnv(t, "", "BASH_ENV="+bashEnvFile)
+	combinedBytes, _ := cmd2.CombinedOutput()
+	combined := string(combinedBytes)
+	oldIdx := strings.Index(combined, "receipt_sha256: ")
+	if oldIdx < 0 {
+		t.Fatalf("missing receipt_sha256 line in combined output: %s", combined)
+	}
+	oldWantHash := fmt.Sprintf("receipt_sha256: %x", sha256Sum(combined[:oldIdx]))
+	oldGotHash := strings.TrimSpace(combined[oldIdx:])
+	if oldWantHash == oldGotHash {
+		t.Fatalf("the combined-stream reconstruction should have mismatched its own receipt once stderr carried real content -- it didn't, so this scenario isn't actually exercising the bug the old logic had: %s", combined)
+	}
+}
+
 func TestTrack3PreflightRejectsIncompleteArguments(t *testing.T) {
 	repo, head := zeocoreFixture(t, "3.1.3")
 	script, err := filepath.Abs("track3-preflight.sh")
