@@ -29,7 +29,7 @@ func shortTemp(t *testing.T) string {
 
 func openProxy(t *testing.T, upstream string) (*Manager, *venue.Venue) {
 	t.Helper()
-	v, err := venue.Open(shortTemp(t))
+	v, err := openFixtureVenue(shortTemp(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestProxySocketPathTooLongIsRefused(t *testing.T) {
 
 	deep := filepath.Join(m.cfg.Venue.Root(), strings.Repeat("d", 60))
 	os.MkdirAll(deep, 0o700)
-	v2, err := venue.Open(deep)
+	v2, err := openFixtureVenue(deep)
 	if err != nil {
 		t.Fatal(err)
 	}

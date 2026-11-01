@@ -224,17 +224,25 @@ func TestOnlyTheControllerReachesThePTY(t *testing.T) {
 // queued input never lands; and only the new controller's input arrives.
 func TestATakeoverFencesTheOldControllersQueuedInput(t *testing.T) {
 	h, j := newHost(t)
-	s, _, err := h.Create("op-4", "operator", sh("stty raw -echo; sleep 2; exec cat"))
+	// pomar/architect review: a fixed sleep here only has to be "long
+	// enough" for the child to have actually reached `stty raw -echo`
+	// under whatever host scheduling delay applies to ITS startup
+	// specifically -- unrelated to delay anywhere else in the test. The
+	// shell now writes an explicit marker right after that call returns,
+	// so the test can wait for the real condition the blocking-writer
+	// behavior below actually depends on (raw/no-echo mode genuinely
+	// active), rather than guess a duration.
+	s, _, err := h.Create("op-4", "operator", sh("stty raw -echo; printf 'RAWREADY\\n'; sleep 2; exec cat"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.cmd.Process.Kill()
-	time.Sleep(200 * time.Millisecond)
 	a, snap, _ := s.Attach("seat")
 	defer a.Detach()
 	if _, err := a.Control(false, "test", nil); err != nil {
 		t.Fatal(err)
 	}
+	snap.Data = collect(t, a, snap.Data, "RAWREADY")
 	filler := bytes.Repeat([]byte("."), MaxData)
 	for i := 0; i < 4; i++ { // more than the terminal's input holds: the writer blocks
 		if err := a.Input(filler); err != nil {

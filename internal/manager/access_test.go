@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 func TestAccessArgs(t *testing.T) {
@@ -32,7 +31,7 @@ func TestAccessArgs(t *testing.T) {
 }
 
 func TestDefaultClassTakesJobUser(t *testing.T) {
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

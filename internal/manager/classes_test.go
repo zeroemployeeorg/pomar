@@ -21,7 +21,7 @@ func twoClasses(t *testing.T) (*Manager, JobClass, JobClass) {
 }
 func twoClassesWithSpace(t *testing.T, space func() (venue.Space, error)) (*Manager, JobClass, JobClass) {
 	t.Helper()
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func twoClassesWithSpace(t *testing.T, space func() (venue.Space, error)) (*Mana
 }
 
 func TestJobClassesNeedDistinctNames(t *testing.T) {
-	v, _ := venue.Open(t.TempDir())
+	v, _ := openFixtureVenue(t.TempDir())
 	v.Init()
 	self, _ := os.Executable()
 	for _, classes := range [][]JobClass{
@@ -104,7 +104,7 @@ func TestStartChoosesTheNamedClass(t *testing.T) {
 // Class names follow the attempt-id pattern: lower-case letters, digits and
 // dashes (the elders' ruling of 2026-09-27 §1.3).
 func TestJobClassNamesArePatternChecked(t *testing.T) {
-	v, _ := venue.Open(t.TempDir())
+	v, _ := openFixtureVenue(t.TempDir())
 	v.Init()
 	self, _ := os.Executable()
 	for _, name := range []string{"CI", "ci zero", "ci_zero", "-ci", "", strings.Repeat("a", 41)} {

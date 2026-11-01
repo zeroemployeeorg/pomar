@@ -100,6 +100,7 @@ type Venue struct {
 	objs      map[string]*Object // key: kind/id
 	teardowns map[string]string  // reserved object key -> relative path during removal
 	now       func() time.Time
+	statfs    func(string, *syscall.Statfs_t) error
 }
 
 const ledgerName = "ledger.jsonl"
@@ -107,6 +108,19 @@ const ledgerName = "ledger.jsonl"
 // Open opens the data root, which must already exist, be a directory and be
 // given as an absolute path. It replays the ledger.
 func Open(root string) (*Venue, error) {
+	return OpenWithOptions(root, Options{})
+}
+
+// Options supplies trusted host dependencies. A nil Statfs uses the real
+// filesystem. Tests can inject counters without depending on host disk use;
+// this does not change any caller's fill limit.
+type Options struct {
+	Statfs func(string, *syscall.Statfs_t) error
+}
+
+// OpenWithOptions opens the same ledgered data root as Open, with explicit
+// dependencies fixed for the lifetime of this Venue.
+func OpenWithOptions(root string, opts Options) (*Venue, error) {
 	if root == "" {
 		return nil, errors.New("venue: data root not set")
 	}
@@ -124,7 +138,11 @@ func Open(root string) (*Venue, error) {
 	if !fi.IsDir() {
 		return nil, fmt.Errorf("venue: data root %q is not a directory", real)
 	}
-	v := &Venue{root: real, objs: map[string]*Object{}, now: time.Now}
+	statfs := opts.Statfs
+	if statfs == nil {
+		statfs = syscall.Statfs
+	}
+	v := &Venue{root: real, objs: map[string]*Object{}, now: time.Now, statfs: statfs}
 	if err := v.replay(); err != nil {
 		return nil, err
 	}
@@ -375,7 +393,7 @@ func (v *Venue) OpenObjects() []Object {
 // one volume. That is deliberate: it is the figure that predicts exhaustion.
 func (v *Venue) Fill() (int, error) {
 	var s syscall.Statfs_t
-	if err := syscall.Statfs(v.root, &s); err != nil {
+	if err := v.statfs(v.root, &s); err != nil {
 		return 0, fmt.Errorf("venue: statfs: %w", err)
 	}
 	used := s.Blocks - s.Bfree
@@ -405,13 +423,13 @@ const SystemData = "/System/Volumes/Data"
 // cannot be read counts as shared, which keeps the fill floor on.
 func (v *Venue) Space() (Space, error) {
 	var s syscall.Statfs_t
-	if err := syscall.Statfs(v.root, &s); err != nil {
+	if err := v.statfs(v.root, &s); err != nil {
 		return Space{}, fmt.Errorf("venue: statfs: %w", err)
 	}
 	bs := int64(s.Bsize)
 	sp := Space{Used: int64(s.Blocks-s.Bfree) * bs, Avail: int64(s.Bavail) * bs, Device: cstr(s.Mntfromname[:]), Shared: true}
 	var sys syscall.Statfs_t
-	if err := syscall.Statfs(SystemData, &sys); err == nil {
+	if err := v.statfs(SystemData, &sys); err == nil {
 		sp.Shared = SameContainer(sp.Device, cstr(sys.Mntfromname[:]))
 	}
 	return sp, nil

@@ -11,7 +11,6 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // gitEnv keeps the developer's git configuration out of the test.
@@ -53,7 +52,7 @@ func TestStartSyncsOnlyConfiguredMirrors(t *testing.T) {
 	git(t, env, up, "init", "--quiet", "--initial-branch=main")
 	first := commit(t, env, up, "one")
 
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

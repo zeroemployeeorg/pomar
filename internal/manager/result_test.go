@@ -27,7 +27,7 @@ func openSigningWithSpace(t *testing.T, sign bool, space func() (venue.Space, er
 	base := shortDir(t)
 	root := filepath.Join(base, "root")
 	os.Mkdir(root, 0o700)
-	v, err := venue.Open(root)
+	v, err := openFixtureVenue(root)
 	if err != nil {
 		t.Fatal(err)
 	}

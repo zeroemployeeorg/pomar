@@ -10,7 +10,6 @@ import (
 
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 // A source the mirror cannot place is refused by name before capacity is
@@ -27,7 +26,7 @@ func TestSourceIsSettledBeforeAdmission(t *testing.T) {
 	git(t, env, up, "update-ref", "refs/pull/3/head", pr)
 	git(t, env, up, "checkout", "--quiet", "main")
 
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,14 +11,13 @@ import (
 	"github.com/zeroemployeeorg/pomar/internal/capacity"
 	"github.com/zeroemployeeorg/pomar/internal/mirror"
 	"github.com/zeroemployeeorg/pomar/internal/sign"
-	"github.com/zeroemployeeorg/pomar/internal/venue"
 )
 
 func TestClassCannotFetchAnotherProjectsMirror(t *testing.T) {
 	env, up := gitEnv(t), t.TempDir()
 	git(t, env, up, "init", "--quiet", "--initial-branch=main")
 	sha := commit(t, env, up, "source")
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +101,7 @@ func TestQualifiedClassRefExportsSelfBaseWithoutChangingMirror(t *testing.T) {
 	env, up := gitEnv(t), t.TempDir()
 	git(t, env, up, "init", "--quiet", "--initial-branch=main")
 	sha := commit(t, env, up, "source")
-	v, err := venue.Open(t.TempDir())
+	v, err := openFixtureVenue(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

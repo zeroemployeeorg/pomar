@@ -63,6 +63,7 @@ interface today.
   tests, static Linux ARM64 shim, locked Swift build/tests and the host's
   Virtualization entitlement. Maintainers pass the private hygiene denylist;
   never commit it. Run `make hooks` once in your own clone for the pre-push gate.
+- Disk-independent fixtures use `venue.OpenWithOptions` with explicit fake `Statfs` counters; production `venue.Open` retains the real reader and all fill limits. Keep fake full-disk and read-error refusal coverage alongside healthy fixtures.
 - Use meaningful behavioral tests for changed boundaries, including lost
   acknowledgements, mismatched bindings, refusal paths and concurrency. Pomar
   has no mandatory mutation-testing gate; report any actual mutation tool/scope

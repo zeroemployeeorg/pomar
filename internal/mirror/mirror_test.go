@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/zeroemployeeorg/pomar/internal/venue"
@@ -55,7 +56,10 @@ func upstream(t *testing.T, env []string) (string, string) {
 func setup(t *testing.T) (*Mirrors, []string, string, string) {
 	env := isolatedEnv(t)
 	up, sha := upstream(t, env)
-	v, err := venue.Open(t.TempDir())
+	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{Statfs: func(_ string, s *syscall.Statfs_t) error {
+		*s = syscall.Statfs_t{Bsize: 4096, Blocks: 200 << 18, Bfree: 100 << 18, Bavail: 100 << 18}
+		return nil
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -412,5 +416,26 @@ func TestShow(t *testing.T) {
 	}
 	if _, err := m.Show(ctx, "demo", strings.Repeat("0", 40), "package-lock.json"); !errors.Is(err, ErrUnknownCommit) {
 		t.Fatalf("an unknown commit: %v", err)
+	}
+}
+
+func TestSyncRefusesInjectedFullDiskBeforeFetching(t *testing.T) {
+	v, err := venue.OpenWithOptions(t.TempDir(), venue.Options{Statfs: func(_ string, s *syscall.Statfs_t) error {
+		*s = syscall.Statfs_t{Bsize: 4096, Blocks: 100, Bfree: 14, Bavail: 14}
+		return nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An accidental fetch would fail differently: there is no such git binary.
+	m := &Mirrors{Venue: v, Git: filepath.Join(t.TempDir(), "no-git")}
+	if err := m.Sync(context.Background(), "full", "file:///unused"); !errors.Is(err, venue.ErrDiskFull) {
+		t.Fatalf("Sync = %v, want ErrDiskFull", err)
+	}
+	if len(v.OpenObjects()) != 0 {
+		t.Fatal("refused clone created a ledger object")
+	}
+	if _, err := os.Stat(m.Path("full")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("refused clone left a mirror: %v", err)
 	}
 }
