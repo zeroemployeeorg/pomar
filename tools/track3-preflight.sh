@@ -169,9 +169,73 @@ bounded_run() {
   budget=$1
   outfile=$2
   shift 2
+  # outfile is a fresh file in run_bounded's private scratch directory.
+  # Record the watchdog event, rather than infer it from rounded wall time
+  # or the command's exit status (a TERM handler may legitimately exit 0).
+  #
+  # pomar's third, independent review (AMEND THIRD-WITNESS-CHANNEL-FAILURE-01):
+  # the second fix's own fallback write -- `printf ... > "$marker" ||
+  # true` -- assumed a pre-created file can always be truncated even when
+  # its DIRECTORY is locked, which is true, but not when something ALSO
+  # revokes write permission on the marker FILE itself (their repro:
+  # scratch 0500 AND the marker chmod 0400). That combination makes BOTH
+  # writes fail, the `|| true` on each swallows it, and the watchdog's
+  # kill sequence still runs correctly -- but with no durable record that
+  # anything went wrong, the parent falls through to plain COMPLETED/OK:
+  # a THIRD path to the same false-VERIFIED bug this mechanism exists to
+  # prevent, this time regardless of how the child responds to TERM at
+  # all. Every version so far was fail-OPEN: success unless a specific
+  # negative fact got positively recorded, and recording that fact was
+  # itself a fallible write that could silently lose the one thing it
+  # existed to report.
+  #
+  # Fail-CLOSED fix: open the marker for writing HERE, before the child
+  # or the watchdog even exist, while its permissions and its directory's
+  # are still whatever bounded_run's own caller set up -- long before
+  # anything (adversarial or just unlucky) could have altered either.
+  # Permission checks happen at open(2), not on each later write(2): once
+  # this descriptor is open, writing to it via the SAME descriptor later
+  # succeeds regardless of any chmod -- on the file OR its directory --
+  # that happens afterward (POSIX; verified against this exact macOS
+  # /bin/bash, and unaffected by the bash version: `exec N>file` /
+  # `>&N` / `N>&-` are all plain, decades-old fixed-fd redirections, not
+  # the bash-4.1+ `{fd}` dynamic-allocation syntax). The watchdog
+  # subshell inherits this open descriptor at fork time and writes
+  # through it, never reopening the path. If even this initial open
+  # fails, that is itself recorded (fd_opened=0) and treated as never-OK,
+  # rather than silently proceeding as if nothing were wrong.
+  timeout_marker=$outfile.timeout
+  # pomar's fourth, independent review (AMEND PREOPENED-FD-PATH-READBACK-
+  # LOST-EVENT-01): the write side was fixed, but the READ side still went
+  # through the marker's PATH (`[ -s "$timeout_marker" ]`), not through an
+  # already-open descriptor of its own. A path lookup only ever sees
+  # whatever is CURRENTLY linked there -- if the path is unlinked (their
+  # repro: the executed command itself, which inherited fd 9 and the path
+  # both, unlinks the marker) or replaced, the write the watchdog already
+  # made via fd 9 is real but no longer reachable by name, and this read
+  # would wrongly see "nothing happened" -- a fourth path to the same
+  # false-VERIFIED bug, this time entirely independent of permissions.
+  # Fixed the same way as the write side: open a SECOND descriptor for
+  # READING here, at the same early, still-trustworthy moment. A regular
+  # file's data is shared across every open instance of it regardless of
+  # which fd wrote or reads it, and an open fd keeps referencing the same
+  # underlying data even after its path is unlinked or reused -- so
+  # reading via fd 8 later sees exactly what fd 9 wrote, regardless of
+  # what happened to the path in between.
+  if exec 9>"$timeout_marker" 2>/dev/null; then fd_opened=1; else fd_opened=0; fi
+  if [ "$fd_opened" = 1 ] && exec 8<"$timeout_marker" 2>/dev/null; then
+    fd_readable=1
+  else
+    fd_readable=0
+  fi
   start=$(date +%s)
   set -m
-  "$@" >"$outfile" 2>&1 &
+  # Close both private descriptors in the executed command itself: it has
+  # no legitimate reason to touch this internal bookkeeping channel, and
+  # (per the same review) must not be left able to interfere with it --
+  # the watchdog subshell below, forked separately, still inherits both
+  # normally.
+  "$@" 9>&- 8>&- >"$outfile" 2>&1 &
   pid=$!
   set +m
   # The watchdog's own stdout/stderr must be redirected here, not inherited:
@@ -181,6 +245,21 @@ bounded_run() {
   # instead of the substitution's pipe.
   (
     sleep "$budget"
+    # The kill/drain sequence below always runs regardless of whether
+    # this write succeeds -- a child that merely ignores or outlives TERM
+    # must still be bounded even when the witness can't be recorded, or
+    # the parent's `wait "$pid"` would hang on it indefinitely (pomar's
+    # first review). Writing is now expected to succeed even when the
+    # directory or the file's own mode bits have since changed, since
+    # fd 9 was opened before either could have. Storage I/O can still
+    # fail (disk full, the filesystem itself going away) -- `|| true`
+    # keeps termination independent of that, rather than papering over
+    # it: with no positive event recorded, the parent below reports
+    # UNKNOWN instead of treating the absent witness as proof of a clean
+    # completion (pomar's conservative-fallback review).
+    if [ "$fd_opened" = 1 ]; then
+      printf 'timeout\n' >&9 2>/dev/null || true
+    fi
     kill -TERM -"$pid" 2>/dev/null || true
     sleep 5
     kill -KILL -"$pid" 2>/dev/null || true
@@ -190,10 +269,23 @@ bounded_run() {
   # since this runs inside a command-substitution subshell, silently
   # truncate the caller's output) before the report below is ever printed --
   # the exit-status capture must stay inside an if-condition, exempt from -e.
-  escalation_window_end=$((start + budget + 5))
   if wait "$pid" 2>/dev/null; then rc=0; else rc=$?; fi
   kill "$watchdog" 2>/dev/null || true
   wait "$watchdog" 2>/dev/null || true
+  timeout_observed=0
+  witness_unavailable=0
+  if [ "$fd_opened" != 1 ] || [ "$fd_readable" != 1 ]; then
+    # Could not open the witness, or could not open a way to read it back
+    # -- either way, never OK: an unreadable or unavailable event channel
+    # is never treated as "no timeout happened".
+    witness_unavailable=1
+  else
+    witness_read=$(cat <&8 2>/dev/null) || witness_unavailable=1
+    if [ -n "$witness_read" ]; then timeout_observed=1; fi
+  fi
+  exec 9>&- 2>/dev/null || true
+  exec 8>&- 2>/dev/null || true
+  rm -f "$timeout_marker"
   end=$(date +%s)
   elapsed=$((end - start))
 
@@ -228,15 +320,33 @@ bounded_run() {
   if group_has_member "$pid"; then
     residual=present
   fi
-  # A real "we killed it" claim requires both the signal-range exit status
-  # AND that our own escalation timeline had actually reached at least the
-  # TERM point by the time the child exited -- a process that happens to die
-  # from an unrelated signal in, say, its first second is not something this
-  # check terminated, even though its exit status lands in the same range.
-  if [ "$rc" -ge 128 ] && [ "$end" -ge "$((start + budget))" ]; then
-    echo "TIMED_OUT_KILLED $rc $residual"
-  elif [ "$elapsed" -gt "$budget" ]; then
-    echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
+  # A signal-range status alone cannot prove our watchdog fired. Conversely,
+  # a command that exits zero in its TERM handler is still a timeout, even
+  # when integer wall-clock elapsed time equals (rather than exceeds) budget.
+  if [ "$timeout_observed" = 1 ]; then
+    if [ "$rc" -ge 128 ]; then
+      echo "TIMED_OUT_KILLED $rc $residual"
+    else
+      echo "TIMED_OUT_COMPLETED_BEFORE_TERMINATION $rc $residual"
+    fi
+  elif [ "$witness_unavailable" = 1 ]; then
+    # Failure to retain the deadline witness cannot produce an OK result.
+    echo "UNKNOWN $rc $residual"
+  elif [ "$elapsed" -ge "$budget" ]; then
+    # pomar's review and conservative-fallback proposal: a write to an
+    # already-open, permission-valid descriptor can still fail for a
+    # genuinely irreducible reason (disk full, the filesystem itself
+    # going away) that no fd trick closes -- inability to record a
+    # durable witness must never default to OK, and must never be
+    # upgraded to a positively observed timeout either, since the clock
+    # alone cannot distinguish "the deadline fired and the witness write
+    # failed" from "wall-clock measurement was merely delayed by
+    # unrelated host load" -- both show the same elapsed>=budget, no
+    # marker. Only elapsed strictly LESS than budget -- unambiguously too
+    # early for the deadline to have mattered at all -- still reports OK;
+    # anything at or past it, with no positive witness, is unresolved,
+    # not guessed either way.
+    echo "UNKNOWN $rc $residual"
   else
     echo "COMPLETED $rc $residual"
   fi
