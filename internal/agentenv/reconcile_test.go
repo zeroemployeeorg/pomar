@@ -16,7 +16,12 @@ import (
 
 func reconciliationFixture(t *testing.T) (*Host, *Environment, ReconcileRequest, []byte) {
 	t.Helper()
-	dir := t.TempDir()
+	// Match the host contract even when macOS TMPDIR contains /var aliases.
+	// Private evidence reads deliberately refuse noncanonical parent paths.
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	os.Chmod(dir, 0700)
 	spec := VMSpec{HostConfig: HostConfig{Root: filepath.Dir(dir), Helper: "/retained/helper"}, Environment: "env", Session: "session", Incarnation: "actor", Directory: dir, Rootfs: filepath.Join(dir, "workspace.ext4")}
 	old := &Fence{Incarnation: "actor", ScopeID: "scope-actor", NetworkRevoked: true, AdapterAccessRevoked: true, State: "execution_unknown"}
