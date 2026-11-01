@@ -107,7 +107,7 @@ func (b *Bases) Build(ctx context.Context, store, imageRef, imageDigest, arm64Di
 			return err
 		}
 	}
-	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
+	if err := v.CheckHostDisk(); err != nil {
 		return err
 	}
 	rel := filepath.Join(Dir, b.key(h))

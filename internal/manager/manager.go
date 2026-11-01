@@ -733,7 +733,7 @@ func (m *Manager) admit(c capacity.Class) error {
 			live = append(live, e.claimClass())
 		}
 	}
-	return capacity.Admit(c, live, m.cfg.Host, capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared})
+	return capacity.Admit(c, live, m.cfg.Host, capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared, FillLimit: m.cfg.Venue.DiskLimit()})
 }
 
 // Capacity is the manager's admission state, for status output.
@@ -801,7 +801,7 @@ func (m *Manager) Capacity() (Capacity, error) {
 		}
 	}
 	m.mu.Unlock()
-	d := capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared}
+	d := capacity.Disk{Used: sp.Used, Avail: sp.Avail, Shared: sp.Shared, FillLimit: m.cfg.Venue.DiskLimit()}
 	var classes []capacity.Class
 	var current []ClassCapacity
 	for _, jc := range m.cfg.Classes {

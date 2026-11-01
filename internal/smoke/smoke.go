@@ -49,7 +49,7 @@ func FetchKernel(ctx context.Context, e *Env) error {
 	if err := v.Init(); err != nil {
 		return err
 	}
-	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
+	if err := v.CheckHostDisk(); err != nil {
 		return err
 	}
 	tarRel := filepath.Join(downloadsDir, filepath.Base(KernelURL))
@@ -107,7 +107,7 @@ func Boot(ctx context.Context, e *Env, kernelSHA256, id string) error {
 	if err := v.Init(); err != nil {
 		return err
 	}
-	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
+	if err := v.CheckHostDisk(); err != nil {
 		return err
 	}
 	got, err := fileSHA256(e.KernelPath())

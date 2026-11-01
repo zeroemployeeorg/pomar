@@ -86,7 +86,7 @@ func imageCmd(step string, args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
-	if err := v.CheckHeavy(venue.DefaultMaxFillPercent); err != nil {
+	if err := v.CheckHostDisk(); err != nil {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}

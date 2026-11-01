@@ -252,8 +252,9 @@ func venueStatus(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, err)
 		return 1
 	}
+	limit := v.DiskLimit()
 	heavy := "allowed"
-	if pct > venue.DefaultMaxFillPercent {
+	if pct > limit.Percent {
 		heavy = "REFUSED"
 	}
 	open := v.OpenObjects()
@@ -263,7 +264,7 @@ func venueStatus(args []string, stdout, stderr io.Writer) int {
 		}
 		return open[i].ID < open[j].ID
 	})
-	fmt.Fprintf(stdout, "fill: %d%% (limit %d%%, heavy work %s)\n", pct, venue.DefaultMaxFillPercent, heavy)
+	fmt.Fprintf(stdout, "fill: %d%% (limit %d%% from %s, heavy work %s)\n", pct, limit.Percent, limit.Source, heavy)
 	if sp, err := v.Space(); err == nil {
 		floor := "shared with " + venue.SystemData + ": admission keeps the fill floor"
 		if !sp.Shared {
