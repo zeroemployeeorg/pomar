@@ -187,3 +187,29 @@ func TestDiskLimitRejectsUnknownFileOwnership(t *testing.T) {
 		t.Fatalf("policy %+v", got)
 	}
 }
+
+func TestDiskLimitRejectsUnsafeOrUnknownOpenedACL(t *testing.T) {
+	for _, bad := range []string{"parent", "file"} {
+		t.Run(bad, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "max-fill-percent")
+			if err := os.WriteFile(path, []byte("99\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var checked int
+			got := ReadDiskLimitWithOptions(path, ReadOptions{OwnerUID: func(os.FileInfo) (uint32, bool) { return 0, true }, ACLSafe: func(f *os.File) bool {
+				checked++
+				info, err := f.Stat()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if bad == "parent" {
+					return !info.IsDir()
+				}
+				return info.IsDir()
+			}})
+			if got.Percent != 85 || !strings.Contains(got.Source, "ACL") || checked == 0 {
+				t.Fatalf("unknown ACL accepted: %+v checked%d", got, checked)
+			}
+		})
+	}
+}

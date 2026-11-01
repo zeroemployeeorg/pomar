@@ -43,6 +43,9 @@ func LoadDiskLimit() DiskLimit { return ReadDiskLimit(DiskLimitPath) }
 // leaves OwnerUID nil and uses the opened object's kernel ownership metadata.
 type ReadOptions struct {
 	OwnerUID func(os.FileInfo) (uint32, bool)
+	// ACLSafe is a test seam for the same opened descriptors production checks.
+	// false includes unknown or unreadable ACL metadata.
+	ACLSafe func(*os.File) bool
 }
 
 func ReadDiskLimit(path string) DiskLimit { return ReadDiskLimitWithOptions(path, ReadOptions{}) }
@@ -85,6 +88,19 @@ func ReadDiskLimitWithOptions(path string, opts ReadOptions) DiskLimit {
 	if err != nil || !info.IsDir() || !trustedMetadata(info, owner) {
 		return fallback(path, "opened parent must be uid 0 and not group/world writable")
 	}
+	aclSafe := opts.ACLSafe
+	if aclSafe == nil {
+		aclSafe = kernelACLSafe
+	}
+	parentFile, err := root.Open(".")
+	if err != nil {
+		return fallback(path, "parent ACL unreadable")
+	}
+	defer parentFile.Close()
+	openedParent, err := parentFile.Stat()
+	if err != nil || !os.SameFile(info, openedParent) || !aclSafe(parentFile) {
+		return fallback(path, "parent ACL unsafe or unreadable")
+	}
 	// Root methods may resolve in-root symlinks even with O_NOFOLLOW. Refuse
 	// a named link and bind the opened descriptor to this observed regular file.
 	before, err := root.Lstat(filepath.Base(path))
@@ -109,9 +125,16 @@ func ReadDiskLimitWithOptions(path string, opts ReadOptions) DiskLimit {
 	if !trustedMetadata(info, owner) {
 		return fallback(path, "file must be uid 0 and not group/world writable")
 	}
+	if !aclSafe(f) {
+		return fallback(path, "file ACL unsafe or unreadable")
+	}
 	b, err := io.ReadAll(io.LimitReader(f, 33))
 	if err != nil {
 		return fallback(path, "unreadable")
+	}
+	// Recheck the opened objects before admitting a raised setting.
+	if !aclSafe(parentFile) || !aclSafe(f) {
+		return fallback(path, "ACL changed or unreadable")
 	}
 	return parseDiskLimit(path, b)
 }

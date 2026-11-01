@@ -141,3 +141,9 @@ a running service still follows the host owner's reviewed deployment route.
 Raising this floor does not change per-job disk peak plus headroom, actual
 available-byte checks, or the low-free-space response for running attempts.
 A 99% setting does not promise a new guest can fit.
+
+Host disk settings also require readable ACL metadata on the opened parent
+and file. macOS accepts only an absent ACL; any ACL, including a deny-only
+entry, or unknown metadata falls back to 85. Linux requires absence of a
+POSIX access ACL; other platforms fall back. This conservative rule avoids
+treating mode bits alone as evidence that a named principal cannot write.
