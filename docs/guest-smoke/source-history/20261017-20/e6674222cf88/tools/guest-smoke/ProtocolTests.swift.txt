@@ -1,0 +1,193 @@
+// sow: pomar-guest-SOW-01
+import Foundation
+import Darwin
+
+@main
+struct ProtocolTests {
+    struct TestFailure: Error { let description: String }
+    static let binding = GuestSmoke.Binding(runID: "run-1", vmID: "vm-1", manifestSHA256: String(repeating: "a", count: 64))
+
+    static func expect(_ failure: GuestSmoke.Failure, _ label: String, _ body: () throws -> Void) throws {
+        do { try body() }
+        catch let actual as GuestSmoke.Failure {
+            guard actual == failure else { throw TestFailure(description: "\(label): unexpected refusal \(actual)") }
+            return
+        }
+        throw TestFailure(description: "\(label): accepted")
+    }
+
+    static func fixture() throws -> Data {
+        let checks = ["os", "kernel", "tools", "pid1", "settled_unit", "main_pid", "start_timeout", "unit_cleanup"]
+            .map { ["name": $0, "ok": true, "detail": "synthetic test only"] as [String: Any] }
+        return try JSONSerialization.data(withJSONObject: [
+            "schema": "pomar.guest-smoke/v1", "run_id": "run-1", "vm_id": "vm-1",
+            "manifest_sha256": String(repeating: "a", count: 64), "evidence_source": "SELF_REPORTED",
+            "outcome": "pass", "checks": checks,
+        ], options: [.sortedKeys, .withoutEscapingSlashes])
+    }
+
+    static func frame(_ body: Data) -> Data {
+        let count = UInt32(body.count)
+        return Data([UInt8(count >> 24), UInt8((count >> 16) & 255), UInt8((count >> 8) & 255), UInt8(count & 255)]) + body
+    }
+
+    static func connection(_ bytes: Data, eof: Bool = true, _ body: (Int32) throws -> Void) throws {
+        var pair: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { throw TestFailure(description: "socketpair") }
+        defer { close(pair[0]); close(pair[1]) }
+        try bytes.withUnsafeBytes { raw in
+            var offset = 0
+            while offset < raw.count {
+                let count = Darwin.write(pair[1], raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                guard count > 0 else { throw TestFailure(description: "fixture write") }
+                offset += count
+            }
+        }
+        if eof { _ = shutdown(pair[1], SHUT_WR) }
+        try body(pair[0])
+    }
+
+    // A tiny, finite writer is joined before either descriptor is closed,
+    // including when the receive operation refuses.
+    static func fragmented(
+        _ parts: [(useconds_t, Data)],
+        _ body: (Int32) throws -> Void
+    ) throws {
+        var pair: [Int32] = [-1, -1]
+        guard socketpair(AF_UNIX, SOCK_STREAM, 0, &pair) == 0 else { throw TestFailure(description: "fragment socketpair") }
+        defer { close(pair[0]); close(pair[1]) }
+        let writeFD = pair[1]
+        var noPipeSignal: Int32 = 1
+        guard setsockopt(writeFD, SOL_SOCKET, SO_NOSIGPIPE, &noPipeSignal, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw TestFailure(description: "fixture socket policy")
+        }
+        let start = DispatchSemaphore(value: 0)
+        let finished = DispatchGroup()
+        finished.enter()
+        DispatchQueue.global().async {
+            defer { _ = shutdown(writeFD, SHUT_WR); finished.leave() }
+            start.wait()
+            for (delay, bytes) in parts {
+                usleep(delay)
+                let sent = bytes.withUnsafeBytes { raw -> Bool in
+                    var offset = 0
+                    while offset < raw.count {
+                        let count = Darwin.write(writeFD, raw.baseAddress!.advanced(by: offset), raw.count - offset)
+                        if count < 0 && errno == EINTR { continue }
+                        guard count > 0 else { return false }
+                        offset += count
+                    }
+                    return true
+                }
+                guard sent else { return }
+            }
+        }
+        defer { finished.wait() }
+        start.signal()
+        try body(pair[0])
+    }
+
+    static func main() throws {
+        let valid = try fixture()
+        let text = String(decoding: valid, as: UTF8.self)
+        _ = try GuestSmoke.decode(valid, expected: binding)
+        let cases: [(String, Data, GuestSmoke.Failure)] = [
+            ("duplicate root", Data(("{\"run_id\":\"run-1\"," + text.dropFirst()).utf8), .duplicateKey),
+            ("escaped duplicate", Data(("{\"\\u0072un_id\":\"run-1\"," + text.dropFirst()).utf8), .duplicateKey),
+            ("nested duplicate", Data(text.replacingOccurrences(of: "\"ok\":true", with: "\"ok\":true,\"ok\":true").utf8), .duplicateKey),
+            ("invalid UTF8", Data([0x7b, 0xff, 0x7d]), .invalidJSON),
+            ("trailing whitespace", valid + Data([32]), .extraData),
+            ("second object", valid + valid, .extraData),
+            ("schema", Data(text.replacingOccurrences(of: "pomar.guest-smoke/v1", with: "unknown").utf8), .invalidSchema),
+            ("wrong VM", Data(text.replacingOccurrences(of: "vm-1", with: "vm-2").utf8), .wrongBinding),
+            ("wrong run", Data(text.replacingOccurrences(of: "run-1", with: "run-2").utf8), .wrongBinding),
+            ("wrong manifest", Data(text.replacingOccurrences(of: String(repeating: "a", count: 64), with: String(repeating: "b", count: 64)).utf8), .wrongBinding),
+            ("numeric bool", Data(text.replacingOccurrences(of: "\"ok\":true", with: "\"ok\":1").utf8), .invalidSchema),
+            ("unknown field", Data(("{\"unexpected\":1," + text.dropFirst()).utf8), .invalidSchema),
+            ("missing check", Data(text.replacingOccurrences(of: "start_timeout", with: "pid1").utf8), .invalidSchema),
+            ("inconsistent pass", Data(text.replacingOccurrences(of: "\"ok\":true", with: "\"ok\":false").utf8), .invalidSchema),
+        ]
+        for (name, data, failure) in cases {
+            try expect(failure, name) { _ = try GuestSmoke.decode(data, expected: binding) }
+        }
+        try connection(frame(valid)) { fd in _ = try GuestSmoke.receive(fd: fd, expected: binding) }
+        for (name, data, failure) in [
+            ("zero length", Data([0, 0, 0, 0]), GuestSmoke.Failure.oversized),
+            ("oversize header without body", Data([0, 16, 0, 1]), .oversized),
+            ("short header", Data([0, 0]), .truncated),
+            ("short body", Data([0, 0, 0, 10, 123]), .truncated),
+            ("duplicate terminal", frame(valid) + frame(valid), .extraData),
+        ] {
+            try connection(data) { fd in
+                try expect(failure, name) { _ = try GuestSmoke.receive(fd: fd, expected: binding) }
+            }
+        }
+        try connection(frame(valid), eof: false) { fd in
+            try expect(.deadline, "missing EOF") { _ = try GuestSmoke.receive(fd: fd, expected: binding, timeout: 0.02) }
+        }
+        try connection(Data(), eof: false) { fd in
+            try expect(.deadline, "missing header") { _ = try GuestSmoke.receive(fd: fd, expected: binding, timeout: 0.02) }
+        }
+        let framed = frame(valid)
+        let split = 4 + valid.count / 2
+        let pieces = [Data(framed.prefix(2)), Data(framed[2..<4]), Data(framed[4..<split]), Data(framed[split...])]
+        try fragmented(pieces.map { (useconds_t(5_000), $0) }) { fd in
+            _ = try GuestSmoke.receive(fd: fd, expected: binding, timeout: 1)
+        }
+        // Nominal delivery is ~160 ms for the header and ~320 ms for the body.
+        // Without observed read milestones, a timeout alone cannot establish
+        // that the reader reached the body stage before its budget expired.
+        try fragmented(pieces.map { (useconds_t(80_000), $0) }) { fd in
+            try expect(.deadline, "scheduled multi-stage delivery refusal") {
+                _ = try GuestSmoke.receive(fd: fd, expected: binding, timeout: 0.2)
+            }
+        }
+        print("INCONCLUSIVE: cross-stage deadline coverage has no observed header/body read milestones")
+        print("NOT COVERED: EINTR retry branch; no signal-based fixture is run")
+        try expect(.transport, "negative descriptor") {
+            _ = try GuestSmoke.receive(fd: -1, expected: binding, timeout: 0.02)
+        }
+        // A write-only pipe with no readers reports a poll error; reading its
+        // owned write descriptor then fails. No stale or foreign fd is used.
+        var pipeFDs: [Int32] = [-1, -1]
+        guard pipe(&pipeFDs) == 0 else { throw TestFailure(description: "fixture pipe") }
+        close(pipeFDs[0])
+        defer { close(pipeFDs[1]) }
+        try expect(.transport, "OS read failure") {
+            _ = try GuestSmoke.receive(fd: pipeFDs[1], expected: binding, timeout: 0.2)
+        }
+        try connection(Data()) { fd in
+            for limit in [0, -1, TimeInterval.infinity, TimeInterval.nan, 121] {
+                try expect(.invalidLimit, "invalid deadline") {
+                    _ = try GuestSmoke.receive(fd: fd, expected: binding, timeout: limit)
+                }
+            }
+        }
+        for (vmStopped, reaped) in [(false, false), (false, true), (true, false)] {
+            var lifecycle = try GuestSmoke.Lifecycle(binding: binding)
+            try lifecycle.beginBoot()
+            try lifecycle.booted()
+            try expect(.invalidTransition, "remove before stop") { try lifecycle.confirmRemoval(pathsAbsent: true) }
+            try lifecycle.beginStop()
+            try expect(.unknownCleanup, "partial quiescence") {
+                try lifecycle.confirmQuiescence(vmStopped: vmStopped, executorReaped: reaped)
+            }
+            guard !lifecycle.mayRemoveRunMutableData else { throw TestFailure(description: "unsafe removal") }
+            try expect(.invalidTransition, "restart quarantined") { try lifecycle.beginBoot() }
+        }
+        var clean = try GuestSmoke.Lifecycle(binding: binding)
+        try clean.beginBoot()
+        try clean.booted()
+        try clean.beginStop()
+        try clean.confirmQuiescence(vmStopped: true, executorReaped: true)
+        guard clean.mayRemoveRunMutableData else { throw TestFailure(description: "quiescence not recorded") }
+        try clean.confirmRemoval(pathsAbsent: true)
+        try expect(.invalidTransition, "reuse removed") { try clean.beginBoot() }
+        var missing = try GuestSmoke.Lifecycle(binding: binding)
+        try missing.beginStop()
+        try missing.confirmQuiescence(vmStopped: true, executorReaped: true)
+        try expect(.unknownCleanup, "retained mutable path") { try missing.confirmRemoval(pathsAbsent: false) }
+        try expect(.invalidTransition, "reuse failed cleanup") { try missing.beginBoot() }
+        print("PASS: observed synthetic refusal outcomes only; cross-stage coverage INCONCLUSIVE; EINTR NOT COVERED; no VM or native guest proof")
+    }
+}

@@ -1,0 +1,41 @@
+{
+  "sow": "pomar-guest-SOW-01 rev4",
+  "status": "UNADOPTED_HISTORICAL_PUBLIC_SOURCE_ONLY",
+  "main_comparison_base": "a3aeae16a92702cdd121b0e91e44977c97a6bc6f",
+  "source_commit": "e6674222cf88051053ff94fb5102a68c3f36f4d3",
+  "files": [
+    {
+      "source_commit": "e6674222cf88051053ff94fb5102a68c3f36f4d3",
+      "source_path": "host/GuestSmoke.swift",
+      "source_blob": "ae7949884b27724195e8e2664a7d91f200e4e64e",
+      "archive_path": "docs/guest-smoke/source-history/20261017-20/e6674222cf88/host/GuestSmoke.swift.txt",
+      "archive_blob": "ae7949884b27724195e8e2664a7d91f200e4e64e",
+      "bytes": 11393,
+      "sha256": "500aa589e952add455d113dc42664b0cf2ae3f1671518acf89478195d8b945ce",
+      "reason": "Retain final isolated framing/refusal model and signal-free synthetic fixtures as unadopted public design source; no runtime adoption or test execution."
+    },
+    {
+      "source_commit": "e6674222cf88051053ff94fb5102a68c3f36f4d3",
+      "source_path": "tools/guest-smoke/ProtocolTests.swift",
+      "source_blob": "47e7fe9e0972f3ed106fabf8de2c9f80db87126b",
+      "archive_path": "docs/guest-smoke/source-history/20261017-20/e6674222cf88/tools/guest-smoke/ProtocolTests.swift.txt",
+      "archive_blob": "47e7fe9e0972f3ed106fabf8de2c9f80db87126b",
+      "bytes": 10704,
+      "sha256": "1245a0b32e28474b4d85e7252ef6beb93677702389d484c83a6c4e3b2193d7d5",
+      "reason": "Retain final isolated framing/refusal model and signal-free synthetic fixtures as unadopted public design source; no runtime adoption or test execution."
+    },
+    {
+      "source_commit": "e6674222cf88051053ff94fb5102a68c3f36f4d3",
+      "source_path": "tools/guest-smoke/README.md",
+      "source_blob": "9b88a7d68d47cb10414ceea01cd63f008cd41c70",
+      "archive_path": "docs/guest-smoke/source-history/20261017-20/e6674222cf88/tools/guest-smoke/README.md.txt",
+      "archive_blob": "9b88a7d68d47cb10414ceea01cd63f008cd41c70",
+      "bytes": 4297,
+      "sha256": "18b2533102d9f7a5f5a0fd047da3913a5896f3e01092f1f620f15f75b4e4f101",
+      "reason": "Retain final isolated framing/refusal model and signal-free synthetic fixtures as unadopted public design source; no runtime adoption or test execution."
+    }
+  ],
+  "authority": "Architect local-work8Nov; Pomar AMEND ans_774dda5de085fc61",
+  "not_executed": true,
+  "not_a_profile_or_executor": true
+}
