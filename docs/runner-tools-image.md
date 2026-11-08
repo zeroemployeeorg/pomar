@@ -56,3 +56,18 @@ adoption, production rendering, runtime admission or deployment. A real
 release still requires an independently pinned base/kernel/helper and
 signer, reviewed source/input identity, measured shared capacity and the
 project's complete fixed gate.
+
+
+## Synthetic staging ownership regression
+
+`TestStageFilesOwnsEveryReachedSourceBlob` builds a temporary linux/arm64 OCI
+layout with two distinct, uncompressed synthetic payload layers. It checks the
+expected file-byte hashes, stages the layout, and snapshots every staged file.
+It then changes the source manifest and each reached payload layer in place.
+After each change, every staged byte must remain unchanged and the staged layout
+must still pass `CheckFiles`. In-place writes expose payload hard links that a
+rename would leave untouched.
+
+This is a static regression of the existing `StageFiles`/`CheckFiles` behavior.
+It downloads and executes no image or tool and does not qualify a runtime,
+image, permanent class, or deployment.
