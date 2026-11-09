@@ -39,7 +39,7 @@ hygiene:
 
 gofmt:
 	@echo "=== gofmt"
-	@out="$$(gofmt -l .)"; if [ -n "$$out" ]; then echo "$$out"; exit 1; fi
+	@out="$$(gofmt -l .)" || exit $$?; if [ -n "$$out" ]; then echo "$$out"; exit 1; fi
 
 vet:
 	@echo "=== go vet"

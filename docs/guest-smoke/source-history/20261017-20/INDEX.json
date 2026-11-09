@@ -1,7 +1,7 @@
 {
   "sow": "pomar-guest-SOW-01 rev4",
   "status": "UNADOPTED_HISTORICAL_PUBLIC_SOURCE_ONLY",
-  "main_comparison_base": "a3aeae16a92702cdd121b0e91e44977c97a6bc6f",
+  "main_comparison_base": "a0a4e30f91b18fe4f02357c8c95ccb0f5b4036df",
   "source_commit": "e6674222cf88051053ff94fb5102a68c3f36f4d3",
   "files": [
     {
@@ -37,5 +37,8 @@
   ],
   "authority": "Architect local-work8Nov; Pomar AMEND ans_774dda5de085fc61",
   "not_executed": true,
-  "not_a_profile_or_executor": true
+  "not_a_profile_or_executor": true,
+  "original_archive_review_base": "a3aeae16a92702cdd121b0e91e44977c97a6bc6f",
+  "prior_source_review_head": "5c0b5dceffbe23c272d8c3ec647e32153d218718",
+  "base_update_reason": "PR182 merged source gate repair; preservation payload blobs unchanged; renewed head-bound review/gate required."
 }
